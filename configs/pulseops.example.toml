@@ -1,0 +1,36 @@
+[server]
+addr = ":8080"
+read_timeout = "5s"
+write_timeout = "10s"
+
+[task]
+config_dir = "configs/tasks"
+reload_debounce = "500ms"
+default_timeout = "10s"
+default_trace_level = "summary"
+
+[state]
+backend = "postgres"
+dsn = "postgres://pulseops:secret@127.0.0.1:5432/pulseops?sslmode=disable"
+
+[artifact_store]
+kind = "s3"
+provider = "minio"
+bucket = "pulseops-artifacts"
+endpoint = "http://127.0.0.1:9000"
+region = "auto"
+key_prefix = "local"
+force_path_style = true
+presign_ttl = "15m"
+access_key = "minioadmin"
+secret_key = "minioadmin"
+use_ssl = false
+
+[trace.sinks.postgres_main]
+kind = "postgres"
+dsn = "postgres://pulseops:secret@127.0.0.1:5432/pulseops?sslmode=disable"
+
+[trace.sinks.webhook_audit]
+kind = "webhook"
+url = "http://127.0.0.1:18080/internal/task-trace"
+timeout = "3s"
