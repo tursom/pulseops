@@ -1,0 +1,524 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	_ "github.com/jackc/pgx/v5/stdlib"
+)
+
+type TaskState struct {
+	TaskID            string            `json:"task_id"`
+	Name              string            `json:"name"`
+	Kind              string            `json:"kind"`
+	Enabled           bool              `json:"enabled"`
+	Status            string            `json:"status"`
+	Labels            map[string]string `json:"labels"`
+	LastRunAt         *time.Time        `json:"last_run_at,omitempty"`
+	NextRunAt         *time.Time        `json:"next_run_at,omitempty"`
+	LastRunStatus     string            `json:"last_run_status,omitempty"`
+	LastCheckStatus   string            `json:"last_check_status,omitempty"`
+	LastError         string            `json:"last_error,omitempty"`
+	LastDurationMS    int64             `json:"last_duration_ms,omitempty"`
+	LastReloadError   string            `json:"last_reload_error,omitempty"`
+	LastSampleSeed    int64             `json:"last_sample_seed,omitempty"`
+	LastSampleCount   int               `json:"last_sample_count,omitempty"`
+	LastMismatchCount int               `json:"last_mismatch_count,omitempty"`
+	SourcePath        string            `json:"source_path"`
+	UpdatedAt         time.Time         `json:"updated_at"`
+}
+
+type ArtifactRef struct {
+	ArtifactID  string `json:"artifact_id"`
+	Kind        string `json:"kind"`
+	StorageKind string `json:"storage_kind"`
+	URI         string `json:"uri"`
+	ContentType string `json:"content_type"`
+	SizeBytes   int64  `json:"size_bytes"`
+	SHA256      string `json:"sha256"`
+	PreviewText string `json:"preview_text"`
+}
+
+type Finding struct {
+	FindingID string         `json:"finding_id"`
+	RunID     string         `json:"run_id"`
+	TaskID    string         `json:"task_id"`
+	SampleID  string         `json:"sample_id"`
+	Reason    string         `json:"reason"`
+	Data      map[string]any `json:"data"`
+}
+
+type RunRecord struct {
+	RunID        string            `json:"run_id"`
+	TaskID       string            `json:"task_id"`
+	TaskKind     string            `json:"task_kind"`
+	TriggerType  string            `json:"trigger_type"`
+	RunStatus    string            `json:"run_status"`
+	CheckStatus  string            `json:"check_status"`
+	StartedAt    time.Time         `json:"started_at"`
+	EndedAt      time.Time         `json:"ended_at"`
+	DurationMS   int64             `json:"duration_ms"`
+	ErrorMessage string            `json:"error_message,omitempty"`
+	Summary      map[string]any    `json:"summary,omitempty"`
+	Payload      []byte            `json:"payload,omitempty"`
+	ArtifactRefs []ArtifactRef     `json:"artifact_refs,omitempty"`
+	Findings     []Finding         `json:"findings,omitempty"`
+	Stdout       string            `json:"stdout,omitempty"`
+	Stderr       string            `json:"stderr,omitempty"`
+	Labels       map[string]string `json:"labels,omitempty"`
+}
+
+type Repository interface {
+	Close() error
+	UpsertTaskState(ctx context.Context, state TaskState) error
+	DeleteTaskState(ctx context.Context, taskID string) error
+	InsertRun(ctx context.Context, record RunRecord) error
+	ListRuns(ctx context.Context, taskID string, limit int) ([]RunRecord, error)
+	GetRun(ctx context.Context, taskID, runID string) (RunRecord, error)
+	ListArtifactsByRun(ctx context.Context, taskID, runID string) ([]ArtifactRef, error)
+	GetArtifact(ctx context.Context, artifactID string) (ArtifactRef, error)
+	InsertReloadFailure(ctx context.Context, taskID, sourcePath, message string) error
+}
+
+type PostgresStore struct {
+	db *sql.DB
+}
+
+func OpenPostgres(dsn string) (*PostgresStore, error) {
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open postgres: %w", err)
+	}
+	store := &PostgresStore{db: db}
+	if err := store.init(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(pingCtx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ping postgres: %w", err)
+	}
+	return store, nil
+}
+
+func (s *PostgresStore) Close() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	return s.db.Close()
+}
+
+func (s *PostgresStore) init() error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS runs (
+			run_id TEXT PRIMARY KEY,
+			task_id TEXT NOT NULL,
+			task_kind TEXT NOT NULL,
+			trigger_type TEXT NOT NULL,
+			run_status TEXT NOT NULL,
+			check_status TEXT NOT NULL,
+			started_at TIMESTAMPTZ NOT NULL,
+			ended_at TIMESTAMPTZ NOT NULL,
+			duration_ms BIGINT NOT NULL,
+			error_message TEXT NOT NULL DEFAULT '',
+			summary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+			payload JSONB,
+			stdout TEXT NOT NULL DEFAULT '',
+			stderr TEXT NOT NULL DEFAULT '',
+			labels_json JSONB NOT NULL DEFAULT '{}'::jsonb
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_runs_task_started
+			ON runs(task_id, started_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS findings (
+			finding_id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			task_id TEXT NOT NULL,
+			sample_id TEXT NOT NULL,
+			reason TEXT NOT NULL,
+			data_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+			created_at TIMESTAMPTZ NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_findings_run
+			ON findings(run_id);`,
+		`CREATE TABLE IF NOT EXISTS artifacts (
+			artifact_id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			task_id TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			storage_kind TEXT NOT NULL,
+			uri TEXT NOT NULL,
+			content_type TEXT NOT NULL,
+			size_bytes BIGINT NOT NULL,
+			sha256 TEXT NOT NULL,
+			preview_text TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL,
+			expire_at TIMESTAMPTZ NULL,
+			deleted_at TIMESTAMPTZ NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_artifacts_run
+			ON artifacts(run_id);`,
+		`CREATE TABLE IF NOT EXISTS task_runtime_state (
+			task_id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			enabled BOOLEAN NOT NULL,
+			status TEXT NOT NULL,
+			labels_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+			last_run_at TIMESTAMPTZ NULL,
+			next_run_at TIMESTAMPTZ NULL,
+			last_run_status TEXT,
+			last_check_status TEXT,
+			last_error TEXT,
+			last_duration_ms BIGINT NOT NULL DEFAULT 0,
+			last_reload_error TEXT,
+			last_sample_seed BIGINT NOT NULL DEFAULT 0,
+			last_sample_count INTEGER NOT NULL DEFAULT 0,
+			last_mismatch_count INTEGER NOT NULL DEFAULT 0,
+			source_path TEXT NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS task_reload_failures (
+			id BIGSERIAL PRIMARY KEY,
+			task_id TEXT NOT NULL,
+			source_path TEXT NOT NULL,
+			error_message TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS run_steps (
+			step_id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			step_name TEXT NOT NULL,
+			step_status TEXT NOT NULL,
+			started_at TIMESTAMPTZ NULL,
+			ended_at TIMESTAMPTZ NULL,
+			input_json JSONB NULL,
+			output_json JSONB NULL
+		);`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("init postgres schema: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *PostgresStore) UpsertTaskState(ctx context.Context, state TaskState) error {
+	state.UpdatedAt = time.Now()
+	labelsJSON, err := marshalJSONBytes(state.Labels)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO task_runtime_state (
+			task_id, name, kind, enabled, status, labels_json, last_run_at, next_run_at,
+			last_run_status, last_check_status, last_error, last_duration_ms, last_reload_error,
+			last_sample_seed, last_sample_count, last_mismatch_count, source_path, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+		ON CONFLICT(task_id) DO UPDATE SET
+			name=excluded.name,
+			kind=excluded.kind,
+			enabled=excluded.enabled,
+			status=excluded.status,
+			labels_json=excluded.labels_json,
+			last_run_at=excluded.last_run_at,
+			next_run_at=excluded.next_run_at,
+			last_run_status=excluded.last_run_status,
+			last_check_status=excluded.last_check_status,
+			last_error=excluded.last_error,
+			last_duration_ms=excluded.last_duration_ms,
+			last_reload_error=excluded.last_reload_error,
+			last_sample_seed=excluded.last_sample_seed,
+			last_sample_count=excluded.last_sample_count,
+			last_mismatch_count=excluded.last_mismatch_count,
+			source_path=excluded.source_path,
+			updated_at=excluded.updated_at
+	`, state.TaskID, state.Name, state.Kind, state.Enabled, state.Status, string(labelsJSON),
+		state.LastRunAt, state.NextRunAt,
+		state.LastRunStatus, state.LastCheckStatus, state.LastError, state.LastDurationMS,
+		state.LastReloadError, state.LastSampleSeed, state.LastSampleCount, state.LastMismatchCount,
+		state.SourcePath, state.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("upsert task state: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteTaskState(ctx context.Context, taskID string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM task_runtime_state WHERE task_id = $1`, taskID); err != nil {
+		return fmt.Errorf("delete task state: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) InsertRun(ctx context.Context, record RunRecord) error {
+	summaryJSON, err := marshalJSONBytes(record.Summary)
+	if err != nil {
+		return err
+	}
+	labelsJSON, err := marshalJSONBytes(record.Labels)
+	if err != nil {
+		return err
+	}
+	var payload any
+	if len(record.Payload) > 0 {
+		payload = string(record.Payload)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin run transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO runs (
+			run_id, task_id, task_kind, trigger_type, run_status, check_status,
+			started_at, ended_at, duration_ms, error_message, summary_json, payload,
+			stdout, stderr, labels_json
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15, $16::jsonb)
+	`, record.RunID, record.TaskID, record.TaskKind, record.TriggerType, record.RunStatus,
+		record.CheckStatus, record.StartedAt, record.EndedAt, record.DurationMS, record.ErrorMessage,
+		string(summaryJSON), payload, record.Stdout, record.Stderr, string(labelsJSON))
+	if err != nil {
+		return fmt.Errorf("insert run record: %w", err)
+	}
+	for _, finding := range record.Findings {
+		if finding.FindingID == "" {
+			finding.FindingID = uuid.NewString()
+		}
+		if finding.RunID == "" {
+			finding.RunID = record.RunID
+		}
+		if finding.TaskID == "" {
+			finding.TaskID = record.TaskID
+		}
+		dataJSON, marshalErr := marshalJSONBytes(finding.Data)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO findings (finding_id, run_id, task_id, sample_id, reason, data_json, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+		`, finding.FindingID, finding.RunID, finding.TaskID, finding.SampleID, finding.Reason, string(dataJSON), time.Now()); err != nil {
+			return fmt.Errorf("insert finding: %w", err)
+		}
+	}
+	for _, artifact := range record.ArtifactRefs {
+		if artifact.ArtifactID == "" {
+			artifact.ArtifactID = uuid.NewString()
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO artifacts (
+				artifact_id, run_id, task_id, kind, storage_kind, uri, content_type,
+				size_bytes, sha256, preview_text, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		`, artifact.ArtifactID, record.RunID, record.TaskID, artifact.Kind, artifact.StorageKind,
+			artifact.URI, artifact.ContentType, artifact.SizeBytes, artifact.SHA256, artifact.PreviewText, time.Now()); err != nil {
+			return fmt.Errorf("insert artifact: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit run transaction: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) ListRuns(ctx context.Context, taskID string, limit int) ([]RunRecord, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT run_id, task_id, task_kind, trigger_type, run_status, check_status,
+		       started_at, ended_at, duration_ms, error_message, summary_json, payload,
+		       stdout, stderr, labels_json
+		FROM runs
+		WHERE task_id = $1
+		ORDER BY started_at DESC
+		LIMIT $2
+	`, taskID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list runs: %w", err)
+	}
+	defer rows.Close()
+	var records []RunRecord
+	for rows.Next() {
+		record, err := scanRunRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
+func (s *PostgresStore) GetRun(ctx context.Context, taskID, runID string) (RunRecord, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT run_id, task_id, task_kind, trigger_type, run_status, check_status,
+		       started_at, ended_at, duration_ms, error_message, summary_json, payload,
+		       stdout, stderr, labels_json
+		FROM runs
+		WHERE task_id = $1 AND run_id = $2
+	`, taskID, runID)
+	record, err := scanRunRecord(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return RunRecord{}, err
+		}
+		return RunRecord{}, fmt.Errorf("get run: %w", err)
+	}
+	record.Findings, err = s.listFindings(ctx, runID)
+	if err != nil {
+		return RunRecord{}, err
+	}
+	record.ArtifactRefs, err = s.ListArtifactsByRun(ctx, taskID, runID)
+	if err != nil {
+		return RunRecord{}, err
+	}
+	return record, nil
+}
+
+func (s *PostgresStore) ListArtifactsByRun(ctx context.Context, taskID, runID string) ([]ArtifactRef, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT artifact_id, kind, storage_kind, uri, content_type, size_bytes, sha256, preview_text
+		FROM artifacts
+		WHERE task_id = $1 AND run_id = $2
+		ORDER BY created_at ASC
+	`, taskID, runID)
+	if err != nil {
+		return nil, fmt.Errorf("list artifacts: %w", err)
+	}
+	defer rows.Close()
+	var artifacts []ArtifactRef
+	for rows.Next() {
+		var ref ArtifactRef
+		if err := rows.Scan(
+			&ref.ArtifactID, &ref.Kind, &ref.StorageKind, &ref.URI, &ref.ContentType,
+			&ref.SizeBytes, &ref.SHA256, &ref.PreviewText,
+		); err != nil {
+			return nil, fmt.Errorf("scan artifact: %w", err)
+		}
+		artifacts = append(artifacts, ref)
+	}
+	return artifacts, rows.Err()
+}
+
+func (s *PostgresStore) GetArtifact(ctx context.Context, artifactID string) (ArtifactRef, error) {
+	var ref ArtifactRef
+	err := s.db.QueryRowContext(ctx, `
+		SELECT artifact_id, kind, storage_kind, uri, content_type, size_bytes, sha256, preview_text
+		FROM artifacts
+		WHERE artifact_id = $1
+	`, artifactID).Scan(
+		&ref.ArtifactID, &ref.Kind, &ref.StorageKind, &ref.URI, &ref.ContentType,
+		&ref.SizeBytes, &ref.SHA256, &ref.PreviewText,
+	)
+	if err != nil {
+		return ArtifactRef{}, err
+	}
+	return ref, nil
+}
+
+func (s *PostgresStore) InsertReloadFailure(ctx context.Context, taskID, sourcePath, message string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO task_reload_failures(task_id, source_path, error_message, created_at)
+		VALUES ($1, $2, $3, $4)
+	`, taskID, sourcePath, message, time.Now())
+	if err != nil {
+		return fmt.Errorf("insert reload failure: %w", err)
+	}
+	return nil
+}
+
+type scanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRunRecord(scanner scanner) (RunRecord, error) {
+	var (
+		record     RunRecord
+		summaryRaw []byte
+		labelsRaw  []byte
+		payloadRaw []byte
+	)
+	if err := scanner.Scan(
+		&record.RunID, &record.TaskID, &record.TaskKind, &record.TriggerType, &record.RunStatus,
+		&record.CheckStatus, &record.StartedAt, &record.EndedAt, &record.DurationMS, &record.ErrorMessage,
+		&summaryRaw, &payloadRaw, &record.Stdout, &record.Stderr, &labelsRaw,
+	); err != nil {
+		return RunRecord{}, err
+	}
+	record.Payload = payloadRaw
+	if err := unmarshalMapBytes(summaryRaw, &record.Summary); err != nil {
+		return RunRecord{}, err
+	}
+	if err := unmarshalStringMapBytes(labelsRaw, &record.Labels); err != nil {
+		return RunRecord{}, err
+	}
+	return record, nil
+}
+
+func (s *PostgresStore) listFindings(ctx context.Context, runID string) ([]Finding, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT finding_id, run_id, task_id, sample_id, reason, data_json
+		FROM findings
+		WHERE run_id = $1
+		ORDER BY created_at ASC
+	`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("list findings: %w", err)
+	}
+	defer rows.Close()
+	var findings []Finding
+	for rows.Next() {
+		var (
+			finding Finding
+			dataRaw []byte
+		)
+		if err := rows.Scan(&finding.FindingID, &finding.RunID, &finding.TaskID, &finding.SampleID, &finding.Reason, &dataRaw); err != nil {
+			return nil, fmt.Errorf("scan finding: %w", err)
+		}
+		if err := unmarshalMapBytes(dataRaw, &finding.Data); err != nil {
+			return nil, err
+		}
+		findings = append(findings, finding)
+	}
+	return findings, rows.Err()
+}
+
+func marshalJSONBytes(v any) ([]byte, error) {
+	if v == nil {
+		return []byte("{}"), nil
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("marshal json: %w", err)
+	}
+	return raw, nil
+}
+
+func unmarshalMapBytes(raw []byte, target *map[string]any) error {
+	if len(raw) == 0 {
+		*target = map[string]any{}
+		return nil
+	}
+	if err := json.Unmarshal(raw, target); err != nil {
+		return fmt.Errorf("unmarshal map: %w", err)
+	}
+	return nil
+}
+
+func unmarshalStringMapBytes(raw []byte, target *map[string]string) error {
+	if len(raw) == 0 {
+		*target = map[string]string{}
+		return nil
+	}
+	if err := json.Unmarshal(raw, target); err != nil {
+		return fmt.Errorf("unmarshal string map: %w", err)
+	}
+	return nil
+}

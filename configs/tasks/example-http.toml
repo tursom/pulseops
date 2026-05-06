@@ -1,0 +1,21 @@
+id = "pulseops-health-self-check"
+name = "PulseOps 自检"
+kind = "http_check"
+enabled = true
+interval = "30s"
+timeout = "3s"
+
+[labels]
+env = "local"
+service = "pulseops"
+
+[params]
+url = "http://127.0.0.1:8080/healthz"
+method = "GET"
+expect_status = [200]
+
+[trace]
+enabled = true
+level = "summary"
+sinks = ["postgres_main"]
+store_result_payload = false
