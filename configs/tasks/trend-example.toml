@@ -1,0 +1,71 @@
+# AI 趋势分析任务示例
+# 每 6 小时汇总 Steam 价格检查的趋势
+
+id = "trend-steam-price"
+name = "Steam 价格趋势分析"
+kind = "ai_analyze"
+enabled = false
+trigger = "scheduled"
+cron = "0 */6 * * *"
+timeout = "60s"
+labels = { env = "prod", service = "steam-trade" }
+
+[params]
+analysis_type = "trend"
+
+[[params.data_sources]]
+type = "run_history"
+[params.data_sources.config]
+task_id = "steam-price-check"
+limit = 100
+
+[[params.data_sources]]
+type = "previous_analysis"
+[params.data_sources.config]
+task_id = "trend-steam-price"
+limit = 1
+
+[params.prompt]
+text = """
+你是 PulseOps 数据趋势分析师。以下是 Steam 价格检查任务最近100次执行的汇总数据，请分析趋势。
+
+【执行概况】
+总执行次数: {{ len .DataSources.run_history }}
+成功次数: {{ len (filter .DataSources.run_history "RunStatus" "success") }}
+失败次数: {{ len (filter .DataSources.run_history "RunStatus" "failed") }}
+平均耗时: {{ avg .DataSources.run_history "DurationMS" }}ms
+
+【按检查状态分组】
+通过次数: {{ len (filter .DataSources.run_history "CheckStatus" "pass") }}
+失败次数: {{ len (filter .DataSources.run_history "CheckStatus" "fail") }}
+
+【失败记录明细】
+{{ $failures := failures .DataSources.run_history }}
+{{ if $failures }}
+{{ table $failures "StartedAt" "CheckStatus" "DurationMS" }}
+{{ end }}
+
+{{ if .DataSources.previous_analysis }}
+【上次趋势分析】
+{{ range .DataSources.previous_analysis }}{{ .Response }}{{ end }}
+{{ end }}
+
+请用中文回答：
+1. 趋势判断（改善/稳定/恶化）
+2. 关键指标变化（失败率、平均耗时）
+3. 异常模式识别
+4. 关注建议
+"""
+
+[[params.outputs]]
+type = "summary"
+[params.outputs.config]
+field = "ai_trend"
+
+[[params.outputs]]
+type = "findings"
+
+[trace]
+level = "debug"
+sinks = ["postgres_main"]
+store_stdout = true

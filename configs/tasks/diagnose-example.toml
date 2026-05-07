@@ -1,0 +1,77 @@
+# AI 诊断任务示例
+# 当 steam-price-check 任务执行完成后，自动触发 AI 诊断
+
+id = "diagnose-steam-price"
+name = "Steam 价格检查 AI 诊断"
+kind = "ai_analyze"
+enabled = false
+trigger = "on_run"
+watch_task = "steam-price-check"
+watch_condition = "check_status == 'fail'"
+timeout = "60s"
+labels = { env = "prod", service = "steam-trade" }
+
+[params]
+analysis_type = "diagnose"
+
+[[params.data_sources]]
+type = "run_context"
+
+[[params.data_sources]]
+type = "run_history"
+[params.data_sources.config]
+task_id = "steam-price-check"
+limit = 5
+
+[[params.data_sources]]
+type = "previous_analysis"
+[params.data_sources.config]
+task_id = "diagnose-steam-price"
+limit = 1
+
+[params.prompt]
+text = """
+你是 PulseOps 运维分析助手。以下是一次 Steam 价格检查的执行记录，请进行诊断分析。
+
+【本次执行】
+状态: {{ .DataSources.run_context.CheckStatus }}
+耗时: {{ .DataSources.run_context.DurationMS }}ms
+触发类型: {{ .DataSources.run_context.TriggerType }}
+{{ if .DataSources.run_context.ErrorMessage }}错误: {{ .DataSources.run_context.ErrorMessage }}{{ end }}
+{{ if .DataSources.run_context.Summary }}
+摘要数据:
+{{ json .DataSources.run_context.Summary }}
+{{ end }}
+{{ if .DataSources.run_context.Findings }}
+异常发现:
+{{ json .DataSources.run_context.Findings }}
+{{ end }}
+
+{{ if .DataSources.run_history }}
+【最近 5 次执行记录】
+{{ table .DataSources.run_history "StartedAt" "CheckStatus" "RunStatus" "DurationMS" }}
+{{ $failures := filter .DataSources.run_history "CheckStatus" "fail" }}
+近 5 次中失败 {{ len $failures }} 次
+平均耗时: {{ avg .DataSources.run_history "DurationMS" }}ms
+{{ end }}
+
+{{ if .DataSources.previous_analysis }}
+【上次诊断结果】
+{{ range .DataSources.previous_analysis }}{{ .Response }}{{ end }}
+{{ end }}
+
+请用中文回答：
+1. 问题判定（正常/警告/异常）
+2. 根因分析（一句话）
+3. 建议操作（1-2条具体建议）
+"""
+
+[[params.outputs]]
+type = "summary"
+[params.outputs.config]
+field = "ai_diagnosis"
+
+[trace]
+level = "debug"
+sinks = ["postgres_main"]
+store_stdout = true

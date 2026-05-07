@@ -82,6 +82,9 @@ type Repository interface {
 	ListArtifactsByRun(ctx context.Context, taskID, runID string) ([]ArtifactRef, error)
 	GetArtifact(ctx context.Context, artifactID string) (ArtifactRef, error)
 	InsertReloadFailure(ctx context.Context, taskID, sourcePath, message string) error
+	InsertAIAnalysis(ctx context.Context, record AIAnalysisRecord) error
+	GetAIAnalysis(ctx context.Context, runID string) (*AIAnalysisRecord, error)
+	ListAIAnalyses(ctx context.Context, taskID string, limit int) ([]AIAnalysisRecord, error)
 }
 
 type PostgresStore struct {
@@ -200,6 +203,25 @@ func (s *PostgresStore) init() error {
 			input_json JSONB NULL,
 			output_json JSONB NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS ai_analyses (
+			id BIGSERIAL PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			task_id TEXT NOT NULL,
+			analysis_type TEXT NOT NULL DEFAULT 'general',
+			model TEXT NOT NULL,
+			prompt TEXT NOT NULL,
+			response TEXT NOT NULL,
+			tokens_in INTEGER NOT NULL DEFAULT 0,
+			tokens_out INTEGER NOT NULL DEFAULT 0,
+			duration_ms BIGINT NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'success',
+			error_message TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_ai_analyses_run
+			ON ai_analyses(run_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_ai_analyses_task
+			ON ai_analyses(task_id, analysis_type, created_at DESC);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -432,6 +454,96 @@ func (s *PostgresStore) InsertReloadFailure(ctx context.Context, taskID, sourceP
 		return fmt.Errorf("insert reload failure: %w", err)
 	}
 	return nil
+}
+
+type AIAnalysisRecord struct {
+	ID           int64     `json:"id"`
+	RunID        string    `json:"run_id"`
+	TaskID       string    `json:"task_id"`
+	AnalysisType string    `json:"analysis_type"`
+	Model        string    `json:"model"`
+	Prompt       string    `json:"prompt"`
+	Response     string    `json:"response"`
+	TokensIn     int       `json:"tokens_in"`
+	TokensOut    int       `json:"tokens_out"`
+	DurationMS   int64     `json:"duration_ms"`
+	Status       string    `json:"status"`
+	ErrorMessage string    `json:"error_message,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+func (s *PostgresStore) InsertAIAnalysis(ctx context.Context, record AIAnalysisRecord) error {
+	if record.RunID == "" {
+		record.RunID = fmt.Sprintf("ai-%d", time.Now().UnixNano())
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO ai_analyses (
+			run_id, task_id, analysis_type, model, prompt, response,
+			tokens_in, tokens_out, duration_ms, status, error_message, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+	`, record.RunID, record.TaskID, record.AnalysisType, record.Model,
+		record.Prompt, record.Response, record.TokensIn, record.TokensOut,
+		record.DurationMS, record.Status, record.ErrorMessage, time.Now())
+	if err != nil {
+		return fmt.Errorf("insert ai analysis: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetAIAnalysis(ctx context.Context, runID string) (*AIAnalysisRecord, error) {
+	var record AIAnalysisRecord
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, run_id, task_id, analysis_type, model, prompt, response,
+		       tokens_in, tokens_out, duration_ms, status, error_message, created_at
+		FROM ai_analyses
+		WHERE run_id = $1
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, runID).Scan(
+		&record.ID, &record.RunID, &record.TaskID, &record.AnalysisType,
+		&record.Model, &record.Prompt, &record.Response,
+		&record.TokensIn, &record.TokensOut, &record.DurationMS,
+		&record.Status, &record.ErrorMessage, &record.CreatedAt,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get ai analysis: %w", err)
+	}
+	return &record, nil
+}
+
+func (s *PostgresStore) ListAIAnalyses(ctx context.Context, taskID string, limit int) ([]AIAnalysisRecord, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, run_id, task_id, analysis_type, model, prompt, response,
+		       tokens_in, tokens_out, duration_ms, status, error_message, created_at
+		FROM ai_analyses
+		WHERE task_id = $1
+		ORDER BY created_at DESC
+		LIMIT $2
+	`, taskID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list ai analyses: %w", err)
+	}
+	defer rows.Close()
+	var records []AIAnalysisRecord
+	for rows.Next() {
+		var record AIAnalysisRecord
+		if err := rows.Scan(
+			&record.ID, &record.RunID, &record.TaskID, &record.AnalysisType,
+			&record.Model, &record.Prompt, &record.Response,
+			&record.TokensIn, &record.TokensOut, &record.DurationMS,
+			&record.Status, &record.ErrorMessage, &record.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan ai analysis: %w", err)
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
 }
 
 type scanner interface {

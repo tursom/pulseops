@@ -15,9 +15,10 @@ import (
 type TriggerType string
 
 const (
-	TriggerScheduled TriggerType = "scheduled"
-	TriggerManual    TriggerType = "manual"
-	TriggerRerun     TriggerType = "rerun"
+	TriggerScheduled  TriggerType = "scheduled"
+	TriggerManual     TriggerType = "manual"
+	TriggerRerun      TriggerType = "rerun"
+	TriggerDependent  TriggerType = "dependent"
 )
 
 type Result struct {

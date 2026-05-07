@@ -76,7 +76,7 @@ func (a minioClientAdapter) RemoveObject(ctx context.Context, bucketName, object
 
 type MinIOArtifactStore struct {
 	bucket     string
-	keyPrefix  string
+	basePath   string
 	kind       string
 	presignTTL time.Duration
 	client     objectClient
@@ -102,7 +102,7 @@ func NewMinIOArtifactStore(cfg config.ArtifactStoreConfig) (*MinIOArtifactStore,
 	}
 	store := &MinIOArtifactStore{
 		bucket:     cfg.Bucket,
-		keyPrefix:  strings.Trim(cfg.KeyPrefix, "/"),
+		basePath:   strings.Trim(cfg.BasePath, "/"),
 		kind:       "s3",
 		presignTTL: cfg.PresignTTL.Duration,
 		client:     minioClientAdapter{client: client},
@@ -172,8 +172,8 @@ func (s *MinIOArtifactStore) Delete(ctx context.Context, key string) error {
 
 func (s *MinIOArtifactStore) BuildObjectKey(taskID, runID, artifactName string, startedAt time.Time) string {
 	parts := []string{}
-	if s.keyPrefix != "" {
-		parts = append(parts, s.keyPrefix)
+	if s.basePath != "" {
+		parts = append(parts, s.basePath)
 	}
 	parts = append(parts, taskID, startedAt.Format("2006/01/02"), runID, artifactName)
 	return path.Join(parts...)

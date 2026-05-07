@@ -17,7 +17,7 @@ func TestMinIOArtifactStorePutGeneratesMetadata(t *testing.T) {
 	client := &fakeObjectClient{}
 	st := &MinIOArtifactStore{
 		bucket:     "pulseops-artifacts",
-		keyPrefix:  "prod",
+		basePath:  "prod",
 		kind:       "s3",
 		presignTTL: 15 * time.Minute,
 		client:     client,
@@ -68,7 +68,7 @@ func TestMinIOArtifactStorePresignGetUsesConfiguredTTL(t *testing.T) {
 func TestObjectKeyHelpers(t *testing.T) {
 	t.Parallel()
 
-	st := &MinIOArtifactStore{keyPrefix: "prod"}
+	st := &MinIOArtifactStore{basePath: "prod"}
 	key := st.BuildObjectKey("task-a", "run-1", "payload.json", time.Date(2026, 4, 27, 1, 0, 0, 0, time.UTC))
 	if key != "prod/task-a/2026/04/27/run-1/payload.json" {
 		t.Fatalf("unexpected key %q", key)

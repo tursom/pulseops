@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"pulseops/internal/store"
 	"pulseops/internal/task"
 	"pulseops/internal/trace"
+	"pulseops/internal/ai"
 )
 
 type Manager struct {
@@ -31,6 +33,7 @@ type Manager struct {
 	mu       sync.RWMutex
 	tasks    map[string]*managedTask
 	pathToID map[string]string
+	depTasks map[string][]*managedTask
 }
 
 func NewManager(
@@ -53,6 +56,7 @@ func NewManager(
 		metrics:  NewMetrics(),
 		tasks:    map[string]*managedTask{},
 		pathToID: map[string]string{},
+		depTasks: map[string][]*managedTask{},
 	}
 }
 
@@ -120,6 +124,14 @@ func (m *Manager) UpsertTaskSpec(ctx context.Context, spec config.TaskSpec) erro
 	m.tasks[spec.ID] = candidate
 	m.pathToID[spec.SourcePath] = spec.ID
 	m.metrics.tasksLoaded.Set(float64(len(m.tasks)))
+
+	if candidate.spec.Trigger == "on_run" && candidate.spec.WatchTaskID != "" {
+		m.depTasks[candidate.spec.WatchTaskID] = append(m.depTasks[candidate.spec.WatchTaskID], candidate)
+	}
+	for _, item := range toStop {
+		m.removeDepTask(item)
+	}
+
 	m.mu.Unlock()
 
 	candidate.start()
@@ -140,6 +152,7 @@ func (m *Manager) RemoveTaskByPath(ctx context.Context, path string) error {
 	taskEntry := m.tasks[id]
 	delete(m.pathToID, path)
 	delete(m.tasks, id)
+	m.removeDepTask(taskEntry)
 	m.metrics.tasksLoaded.Set(float64(len(m.tasks)))
 	m.mu.Unlock()
 	if taskEntry != nil {
@@ -149,6 +162,24 @@ func (m *Manager) RemoveTaskByPath(ctx context.Context, path string) error {
 		return err
 	}
 	return nil
+}
+
+func (m *Manager) removeDepTask(entry *managedTask) {
+	if entry == nil {
+		return
+	}
+	if entry.spec.Trigger == "on_run" && entry.spec.WatchTaskID != "" {
+		deps := m.depTasks[entry.spec.WatchTaskID]
+		for i, dep := range deps {
+			if dep == entry {
+				m.depTasks[entry.spec.WatchTaskID] = append(deps[:i], deps[i+1:]...)
+				break
+			}
+		}
+		if len(m.depTasks[entry.spec.WatchTaskID]) == 0 {
+			delete(m.depTasks, entry.spec.WatchTaskID)
+		}
+	}
 }
 
 func (m *Manager) RunTask(ctx context.Context, id string, trigger task.TriggerType) (store.RunRecord, error) {
@@ -221,6 +252,15 @@ func (m *Manager) getTask(id string) (*managedTask, error) {
 	return entry, nil
 }
 
+func (m *Manager) triggerDepTasks(sourceTaskID string, record store.RunRecord) {
+	m.mu.RLock()
+	deps := m.depTasks[sourceTaskID]
+	m.mu.RUnlock()
+	for _, dep := range deps {
+		dep.triggerFromDependency(record)
+	}
+}
+
 func (m *Manager) newManagedTask(spec config.TaskSpec) (*managedTask, error) {
 	driver, ok := m.drivers.Get(spec.Kind)
 	if !ok {
@@ -269,10 +309,11 @@ func (m *Manager) markReloadFailure(ctx context.Context, path string, err error)
 }
 
 type taskCommand struct {
-	kind    string
-	trigger task.TriggerType
-	enabled bool
-	resp    chan taskResponse
+	kind         string
+	trigger      task.TriggerType
+	enabled      bool
+	resp         chan taskResponse
+	sourceRecord *store.RunRecord
 }
 
 type taskResponse struct {
@@ -402,7 +443,7 @@ func (t *managedTask) loop() {
 			}
 			switch cmd.kind {
 			case "run":
-				record, err := t.execute(cmd.trigger)
+				record, err := t.execute(cmd.trigger, cmd.sourceRecord)
 				if cmd.resp != nil {
 					cmd.resp <- taskResponse{record: record, err: err}
 				}
@@ -427,7 +468,7 @@ func (t *managedTask) loop() {
 				}
 			}
 		case <-timerCh:
-			_, _ = t.execute(task.TriggerScheduled)
+			_, _ = t.execute(task.TriggerScheduled, nil)
 		}
 	}
 }
@@ -469,7 +510,39 @@ func (t *managedTask) setEnabled(ctx context.Context, enabled bool) error {
 	}
 }
 
-func (t *managedTask) execute(trigger task.TriggerType) (store.RunRecord, error) {
+func (t *managedTask) triggerFromDependency(sourceRecord store.RunRecord) {
+	if t.spec.WatchCondition != "" && !matchCondition(t.spec.WatchCondition, sourceRecord) {
+		return
+	}
+	select {
+	case t.cmdCh <- taskCommand{kind: "run", trigger: task.TriggerDependent, sourceRecord: &sourceRecord}:
+	default:
+		t.manager.logger.ErrorContext(context.Background(), "dependent task busy, skipping trigger", "task_id", t.spec.ID)
+	}
+}
+
+func matchCondition(condition string, record store.RunRecord) bool {
+	condition = strings.TrimSpace(condition)
+	if condition == "" {
+		return true
+	}
+	parts := strings.SplitN(condition, "==", 2)
+	if len(parts) != 2 {
+		return true
+	}
+	field := strings.TrimSpace(parts[0])
+	expected := strings.Trim(strings.TrimSpace(parts[1]), "'\"")
+	switch field {
+	case "check_status":
+		return record.CheckStatus == expected
+	case "run_status":
+		return record.RunStatus == expected
+	default:
+		return true
+	}
+}
+
+func (t *managedTask) execute(trigger task.TriggerType, sourceRecord *store.RunRecord) (store.RunRecord, error) {
 	runID := fmt.Sprintf("%s-%d", t.spec.ID, time.Now().UnixNano())
 	startedAt := time.Now()
 	runCtx := t.ctx
@@ -478,6 +551,11 @@ func (t *managedTask) execute(trigger task.TriggerType) (store.RunRecord, error)
 		runCtx, cancel = context.WithTimeout(t.ctx, t.spec.Timeout.Duration)
 	}
 	defer cancel()
+
+	runCtx = context.WithValue(runCtx, ai.CtxRunID, runID)
+	if sourceRecord != nil {
+		runCtx = context.WithValue(runCtx, ai.CtxTriggerRun, sourceRecord)
+	}
 
 	result, err := t.runner.Run(runCtx, trigger)
 	endedAt := time.Now()
@@ -548,6 +626,9 @@ func (t *managedTask) execute(trigger task.TriggerType) (store.RunRecord, error)
 		t.manager.logger.ErrorContext(context.Background(), "process trace record failed", "task_id", t.spec.ID, "err", traceErr)
 	}
 	t.manager.tracer.Dispatch(context.Background(), t.spec.Trace, processed)
+
+	t.manager.triggerDepTasks(t.spec.ID, processed)
+
 	return processed, err
 }
 

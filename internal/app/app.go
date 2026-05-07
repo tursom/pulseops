@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"pulseops/internal/ai"
 	"pulseops/internal/api"
 	"pulseops/internal/config"
 	"pulseops/internal/evaluator"
@@ -68,13 +69,28 @@ func New(ctx context.Context, baseDir, configPath string, logger *slog.Logger) (
 		return nil, err
 	}
 	drivers := task.NewRegistry()
-	for _, driver := range []task.Driver{
+	driverList := []task.Driver{
 		task.HTTPCheckDriver{},
 		task.TCPCheckDriver{},
 		task.ScriptExecDriver{},
 		task.ProcessCheckDriver{},
 		task.ScenarioCheckDriver{},
-	} {
+	}
+	if cfg.AI.Enabled {
+		aiClient := ai.NewClient(ai.ClientConfig{
+			Endpoint:    cfg.AI.Endpoint,
+			APIKey:      cfg.AI.APIKey,
+			Model:       cfg.AI.Model,
+			Timeout:     cfg.AI.DefaultTimeout.Duration,
+			MaxTokens:   cfg.AI.MaxTokens,
+			Temperature: cfg.AI.Temperature,
+		})
+		driverList = append(driverList, ai.NewDriver(aiClient, stateStore))
+		if err := evaluators.Register(&ai.AIEvaluator{Client: aiClient}); err != nil {
+			return nil, err
+		}
+	}
+	for _, driver := range driverList {
 		if err := drivers.Register(driver); err != nil {
 			return nil, err
 		}

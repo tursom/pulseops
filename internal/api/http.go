@@ -67,6 +67,27 @@ func NewServer(cfg config.ServerConfig, manager TaskManager, repository store.Re
 		}
 		writeJSON(w, http.StatusOK, record)
 	})
+	mux.HandleFunc("GET /tasks/{id}/runs/{runID}/ai", func(w http.ResponseWriter, r *http.Request) {
+		analysis, err := repository.GetAIAnalysis(r.Context(), r.PathValue("runID"))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if analysis == nil {
+			writeError(w, http.StatusNotFound, "ai analysis not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, analysis)
+	})
+	mux.HandleFunc("GET /tasks/{id}/ai", func(w http.ResponseWriter, r *http.Request) {
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		records, err := repository.ListAIAnalyses(r.Context(), r.PathValue("id"), limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, records)
+	})
 	mux.HandleFunc("GET /tasks/{id}/runs/{runID}/artifacts", func(w http.ResponseWriter, r *http.Request) {
 		artifacts, err := repository.ListArtifactsByRun(r.Context(), r.PathValue("id"), r.PathValue("runID"))
 		if err != nil {

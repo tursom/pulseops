@@ -148,4 +148,46 @@ url = "http://127.0.0.1/healthz"
 	if spec.Timeout.Duration != 3*time.Second {
 		t.Fatalf("expected default timeout, got %s", spec.Timeout.Duration)
 	}
+	if spec.Trigger != "scheduled" {
+		t.Fatalf("expected default trigger scheduled, got %q", spec.Trigger)
+	}
+}
+
+func TestTaskSpecValidateTrigger(t *testing.T) {
+	t.Parallel()
+
+	t.Run("default trigger is valid", func(t *testing.T) {
+		spec := TaskSpec{ID: "a", Kind: "http_check"}
+		if err := spec.ValidateBasic(); err != nil {
+			t.Fatalf("expected valid, got %v", err)
+		}
+	})
+
+	t.Run("invalid trigger rejected", func(t *testing.T) {
+		spec := TaskSpec{ID: "a", Kind: "http_check", Trigger: "cron"}
+		if err := spec.ValidateBasic(); err == nil {
+			t.Fatalf("expected invalid trigger to be rejected")
+		}
+	})
+
+	t.Run("on_run requires watch_task", func(t *testing.T) {
+		spec := TaskSpec{ID: "a", Kind: "http_check", Trigger: "on_run"}
+		if err := spec.ValidateBasic(); err == nil {
+			t.Fatalf("expected on_run without watch_task to fail")
+		}
+	})
+
+	t.Run("on_run with watch_task is valid", func(t *testing.T) {
+		spec := TaskSpec{ID: "a", Kind: "http_check", Trigger: "on_run", WatchTaskID: "source-task"}
+		if err := spec.ValidateBasic(); err != nil {
+			t.Fatalf("expected valid, got %v", err)
+		}
+	})
+
+	t.Run("watch_task without on_run rejected", func(t *testing.T) {
+		spec := TaskSpec{ID: "a", Kind: "http_check", Trigger: "scheduled", WatchTaskID: "source-task"}
+		if err := spec.ValidateBasic(); err == nil {
+			t.Fatalf("expected watch_task without on_run to fail")
+		}
+	})
 }

@@ -44,6 +44,17 @@ type Config struct {
 	State         StateConfig         `toml:"state"`
 	ArtifactStore ArtifactStoreConfig `toml:"artifact_store"`
 	Trace         TraceConfig         `toml:"trace"`
+	AI            AIConfig            `toml:"ai"`
+}
+
+type AIConfig struct {
+	Enabled        bool     `toml:"enabled"`
+	Endpoint       string   `toml:"endpoint"`
+	APIKey         string   `toml:"api_key"`
+	Model          string   `toml:"model"`
+	DefaultTimeout Duration `toml:"default_timeout"`
+	MaxTokens      int      `toml:"max_tokens"`
+	Temperature    float64  `toml:"temperature"`
 }
 
 type ServerConfig struct {
@@ -70,7 +81,7 @@ type ArtifactStoreConfig struct {
 	Bucket         string   `toml:"bucket"`
 	Endpoint       string   `toml:"endpoint"`
 	Region         string   `toml:"region"`
-	KeyPrefix      string   `toml:"key_prefix"`
+	BasePath       string   `toml:"base_path"`
 	ForcePathStyle bool     `toml:"force_path_style"`
 	PresignTTL     Duration `toml:"presign_ttl"`
 	AccessKey      string   `toml:"access_key"`
@@ -101,6 +112,10 @@ type TaskSpec struct {
 	Params   map[string]any    `toml:"params" json:"params"`
 	Trace    TracePolicy       `toml:"trace" json:"trace"`
 	Alert    AlertPolicy       `toml:"alert" json:"alert"`
+
+	Trigger        string `toml:"trigger" json:"trigger"`                 // "scheduled"|"manual"|"on_run", default "scheduled"
+	WatchTaskID    string `toml:"watch_task" json:"watch_task"`           // 当 trigger=on_run 时监听的源任务 ID
+	WatchCondition string `toml:"watch_condition" json:"watch_condition"` // 可选触发条件表达式，如 "check_status == 'fail'"
 
 	SourcePath string `toml:"-" json:"source_path"`
 	SourceHash string `toml:"-" json:"source_hash"`
@@ -168,6 +183,17 @@ func (cfg *Config) Normalize() {
 	for name, sink := range cfg.Trace.Sinks {
 		cfg.Trace.Sinks[name] = sink
 	}
+	if cfg.AI.Endpoint != "" && cfg.AI.Enabled {
+		if cfg.AI.Model == "" {
+			cfg.AI.Model = "deepseek-chat"
+		}
+		if cfg.AI.DefaultTimeout.Duration == 0 {
+			cfg.AI.DefaultTimeout.Duration = 30 * time.Second
+		}
+		if cfg.AI.MaxTokens == 0 {
+			cfg.AI.MaxTokens = 4096
+		}
+	}
 }
 
 func (cfg Config) Validate() error {
@@ -214,6 +240,9 @@ func (spec *TaskSpec) Normalize(global Config) {
 			break
 		}
 	}
+	if spec.Trigger == "" {
+		spec.Trigger = "scheduled"
+	}
 	if spec.Labels == nil {
 		spec.Labels = map[string]string{}
 	}
@@ -228,6 +257,17 @@ func (spec TaskSpec) ValidateBasic() error {
 	}
 	if spec.Kind == "" {
 		return errors.New("task kind is required")
+	}
+	switch spec.Trigger {
+	case "", "scheduled", "manual", "on_run":
+	default:
+		return fmt.Errorf("invalid trigger %q, must be scheduled, manual, or on_run", spec.Trigger)
+	}
+	if spec.Trigger == "on_run" && spec.WatchTaskID == "" {
+		return errors.New("task with trigger on_run must set watch_task")
+	}
+	if spec.Trigger != "on_run" && spec.WatchTaskID != "" {
+		return errors.New("watch_task is only valid when trigger is on_run")
 	}
 	if spec.Interval.Duration > 0 && spec.Cron != "" {
 		return errors.New("task cannot set both interval and cron")

@@ -101,6 +101,13 @@ func (r *fakeRepository) GetArtifact(_ context.Context, artifactID string) (stor
 func (r *fakeRepository) InsertReloadFailure(context.Context, string, string, string) error {
 	return nil
 }
+func (r *fakeRepository) InsertAIAnalysis(context.Context, store.AIAnalysisRecord) error { return nil }
+func (r *fakeRepository) GetAIAnalysis(context.Context, string) (*store.AIAnalysisRecord, error) {
+	return nil, sql.ErrNoRows
+}
+func (r *fakeRepository) ListAIAnalyses(context.Context, string, int) ([]store.AIAnalysisRecord, error) {
+	return nil, nil
+}
 
 type fakeArtifactStore struct{}
 
