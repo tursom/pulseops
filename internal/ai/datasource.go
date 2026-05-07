@@ -48,6 +48,7 @@ func (r *DataSourceRegistry) registerBuiltins() {
 	r.Register("run_context", &runContextSource{})
 	r.Register("run_history", &runHistorySource{})
 	r.Register("previous_analysis", &previousAnalysisSource{})
+	r.Register("http_call", &httpCallSource{})
 }
 
 type runContextSource struct{}

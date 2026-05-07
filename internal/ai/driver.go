@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -17,15 +18,22 @@ type Driver struct {
 	store     store.Repository
 	sources *DataSourceRegistry
 	writers *OutputWriterRegistry
+	logger *slog.Logger
 }
 
-func NewDriver(client *Client, store store.Repository) *Driver {
+func NewDriver(client *Client, store store.Repository, logger *slog.Logger) *Driver {
 	return &Driver{
 		client:    client,
 		store:     store,
 		sources: NewDataSourceRegistry(),
 		writers: NewOutputWriterRegistry(),
+		logger: logger,
 	}
+}
+
+func (d *Driver) LoadPlugins(pluginDir string, logger *slog.Logger) error {
+	pm := NewPluginManager(pluginDir, logger)
+	return pm.LoadPlugins(d.sources)
 }
 
 func (d *Driver) Kind() string { return "ai_analyze" }
@@ -40,6 +48,22 @@ func (d *Driver) Validate(spec config.TaskSpec) error {
 	}
 	if params.Prompt.Text == "" {
 		return fmt.Errorf("ai_analyze requires prompt.text")
+	}
+	for _, dsSpec := range params.DataSources {
+		if _, ok := d.sources.Get(dsSpec.Type); !ok {
+			return fmt.Errorf("unknown data source type %q", dsSpec.Type)
+		}
+	}
+	builtins := map[string]bool{
+		"run_context":       true,
+		"run_history":       true,
+		"previous_analysis": true,
+		"http_call":         true,
+	}
+	for _, dsSpec := range params.DataSources {
+		if dsSpec.Alias != "" && builtins[dsSpec.Alias] {
+			return fmt.Errorf("alias %q conflicts with built-in data source type", dsSpec.Alias)
+		}
 	}
 	return nil
 }
@@ -57,6 +81,7 @@ func (d *Driver) NewRunner(spec config.TaskSpec, deps task.RunnerDeps) (task.Run
 		deps:      deps,
 		sources: d.sources,
 		writers: d.writers,
+		logger: d.logger,
 	}, nil
 }
 
@@ -79,6 +104,7 @@ type runner struct {
 	deps      task.RunnerDeps
 	sources *DataSourceRegistry
 	writers *OutputWriterRegistry
+	logger *slog.Logger
 }
 
 func (r *runner) Run(ctx context.Context, trigger task.TriggerType) (task.Result, error) {
@@ -202,9 +228,21 @@ func (r *runner) fetchDataSources(ctx context.Context) (map[string]any, error) {
 		}
 		data, err := source.Fetch(ctx, dsSpec, deps)
 		if err != nil {
+			if dsSpec.OnError == "skip" {
+				r.logger.WarnContext(ctx, "skipping failed data source",
+					"type", dsSpec.Type,
+					"alias", dsSpec.Alias,
+					"err", err,
+				)
+				continue
+			}
 			return nil, fmt.Errorf("fetch data source %q: %w", dsSpec.Type, err)
 		}
-		result[dsSpec.Type] = data
+		key := dsSpec.Alias
+		if key == "" {
+			key = dsSpec.Type
+		}
+		result[key] = data
 	}
 	return result, nil
 }

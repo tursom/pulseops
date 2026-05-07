@@ -29,8 +29,10 @@ const (
 )
 
 type DataSourceSpec struct {
-	Type   string         `toml:"type" json:"type"`
-	Config map[string]any `toml:"config" json:"config"`
+	Type    string         `toml:"type" json:"type"`
+	Config  map[string]any `toml:"config" json:"config"`
+	Alias   string         `toml:"alias" json:"alias"`
+	OnError string         `toml:"on_error" json:"on_error"`
 }
 
 type PromptSpec struct {

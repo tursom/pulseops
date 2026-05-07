@@ -85,7 +85,13 @@ func New(ctx context.Context, baseDir, configPath string, logger *slog.Logger) (
 			MaxTokens:   cfg.AI.MaxTokens,
 			Temperature: cfg.AI.Temperature,
 		})
-		driverList = append(driverList, ai.NewDriver(aiClient, stateStore))
+		aiDriver := ai.NewDriver(aiClient, stateStore, logger)
+		if cfg.AI.PluginDir != "" {
+			if err := aiDriver.LoadPlugins(cfg.AI.PluginDir, logger); err != nil {
+				return nil, fmt.Errorf("load AI plugins: %w", err)
+			}
+		}
+		driverList = append(driverList, aiDriver)
 		if err := evaluators.Register(&ai.AIEvaluator{Client: aiClient}); err != nil {
 			return nil, err
 		}

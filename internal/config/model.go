@@ -55,6 +55,7 @@ type AIConfig struct {
 	DefaultTimeout Duration `toml:"default_timeout"`
 	MaxTokens      int      `toml:"max_tokens"`
 	Temperature    float64  `toml:"temperature"`
+	PluginDir      string   `toml:"plugin_dir" json:"plugin_dir"`
 }
 
 type ServerConfig struct {
@@ -193,6 +194,10 @@ func (cfg *Config) Normalize() {
 		if cfg.AI.MaxTokens == 0 {
 			cfg.AI.MaxTokens = 4096
 		}
+		if cfg.AI.PluginDir == "" {
+			cfg.AI.PluginDir = "plugins"
+		}
+		cfg.AI.PluginDir = ResolvePath(cfg.BaseDir, cfg.AI.PluginDir)
 	}
 }
 

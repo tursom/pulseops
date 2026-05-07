@@ -3,12 +3,15 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
 	"pulseops/internal/config"
 	"pulseops/internal/store"
+	"pulseops/internal/task"
 )
 
 func TestRenderTemplate(t *testing.T) {
@@ -198,7 +201,7 @@ func TestTryParseFindingJSON(t *testing.T) {
 func TestDriverValidate(t *testing.T) {
 	t.Parallel()
 
-	d := NewDriver(nil, nil)
+	d := NewDriver(nil, nil, slog.Default())
 
 	t.Run("requires data sources", func(t *testing.T) {
 		spec := config.TaskSpec{
@@ -375,6 +378,142 @@ func TestDataSourceNames(t *testing.T) {
 	if !ok || s.Name() != "previous_analysis" {
 		t.Fatal("previous_analysis source not registered")
 	}
+
+	s, ok = reg.Get("http_call")
+	if !ok || s.Name() != "http_call" {
+		t.Fatal("http_call source not registered")
+	}
+}
+
+func TestDriverValidateAliasCollision(t *testing.T) {
+	t.Parallel()
+	d := NewDriver(nil, nil, slog.Default())
+
+	t.Run("alias colliding with builtin", func(t *testing.T) {
+		spec := config.TaskSpec{
+			ID: "test", Kind: "ai_analyze",
+			Params: map[string]any{
+				"data_sources": []any{map[string]any{
+					"type": "run_context", "alias": "run_history",
+				}},
+				"prompt": map[string]any{"text": "hello"},
+			},
+		}
+		err := d.Validate(spec)
+		if err == nil || !strings.Contains(err.Error(), "conflicts") {
+			t.Fatalf("expected alias collision error, got: %v", err)
+		}
+	})
+
+	t.Run("alias not colliding is fine", func(t *testing.T) {
+		spec := config.TaskSpec{
+			ID: "test", Kind: "ai_analyze",
+			Params: map[string]any{
+				"data_sources": []any{map[string]any{
+					"type": "run_context", "alias": "my_custom_name",
+				}},
+				"prompt": map[string]any{"text": "hello"},
+			},
+		}
+		err := d.Validate(spec)
+		if err != nil {
+			t.Fatalf("unexpected error for valid alias: %v", err)
+		}
+	})
+}
+
+func TestDriverValidateUnknownType(t *testing.T) {
+	t.Parallel()
+	d := NewDriver(nil, nil, slog.Default())
+
+	t.Run("unknown type rejected", func(t *testing.T) {
+		spec := config.TaskSpec{
+			ID: "test", Kind: "ai_analyze",
+			Params: map[string]any{
+				"data_sources": []any{map[string]any{
+					"type": "nonexistent_source",
+				}},
+				"prompt": map[string]any{"text": "hello"},
+			},
+		}
+		err := d.Validate(spec)
+		if err == nil || !strings.Contains(err.Error(), "unknown data source type") {
+			t.Fatalf("expected unknown type error, got: %v", err)
+		}
+	})
+}
+
+func TestDataSourceOnError(t *testing.T) {
+	t.Parallel()
+
+	reg := NewDataSourceRegistry()
+	reg.Register("test_failing", &testFailingSource{})
+	reg.Register("test_aliased", &testStaticSource{data: "hello"})
+
+	t.Run("on_error skip spec parses", func(t *testing.T) {
+		d := NewDriver(nil, nil, slog.Default())
+		d.sources = reg
+
+		spec := config.TaskSpec{
+			ID: "test", Kind: "ai_analyze",
+			Params: map[string]any{
+				"data_sources": []any{map[string]any{
+					"type":     "test_failing",
+					"alias":    "my_fail",
+					"on_error": "skip",
+				}},
+				"prompt": map[string]any{"text": "hello"},
+			},
+		}
+		r, err := d.NewRunner(spec, task.RunnerDeps{})
+		if err != nil {
+			t.Fatalf("NewRunner: %v", err)
+		}
+		if r == nil {
+			t.Fatal("expected non-nil runner")
+		}
+	})
+
+	t.Run("alias key used in result map", func(t *testing.T) {
+		d := NewDriver(nil, nil, slog.Default())
+		d.sources = reg
+
+		spec := config.TaskSpec{
+			ID: "test", Kind: "ai_analyze",
+			Params: map[string]any{
+				"data_sources": []any{map[string]any{
+					"type":  "test_aliased",
+					"alias": "greeting",
+				}},
+				"prompt": map[string]any{"text": "{{ .DataSources.greeting }}"},
+			},
+		}
+		r, err := d.NewRunner(spec, task.RunnerDeps{})
+		if err != nil {
+			t.Fatalf("NewRunner: %v", err)
+		}
+		if r == nil {
+			t.Fatal("expected non-nil runner")
+		}
+	})
+}
+
+type testFailingSource struct{}
+
+func (s *testFailingSource) Name() string { return "test_failing" }
+
+func (s *testFailingSource) Fetch(ctx context.Context, spec DataSourceSpec, deps FetchDeps) (any, error) {
+	return nil, fmt.Errorf("intentional failure")
+}
+
+type testStaticSource struct {
+	data any
+}
+
+func (s *testStaticSource) Name() string { return "test_aliased" }
+
+func (s *testStaticSource) Fetch(ctx context.Context, spec DataSourceSpec, deps FetchDeps) (any, error) {
+	return s.data, nil
 }
 
 func TestRunnerRunID(t *testing.T) {
