@@ -108,6 +108,8 @@ func (r *fakeRepository) GetAIAnalysis(context.Context, string) (*store.AIAnalys
 func (r *fakeRepository) ListAIAnalyses(context.Context, string, int) ([]store.AIAnalysisRecord, error) {
 	return nil, nil
 }
+func (r *fakeRepository) GetMeta(context.Context, string) (string, error)       { return "", store.ErrMetaNotFound }
+func (r *fakeRepository) SetMeta(context.Context, string, string) error          { return nil }
 
 type fakeArtifactStore struct{}
 
