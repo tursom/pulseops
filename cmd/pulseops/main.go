@@ -14,6 +14,7 @@ import (
 
 func main() {
 	configPath := flag.String("config", "configs/pulseops.toml", "pulseops config file path")
+	staticDir := flag.String("static-dir", "", "static files directory (leave empty to serve API only)")
 	flag.Parse()
 
 	baseDir, err := os.Getwd()
@@ -27,7 +28,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	application, err := app.New(ctx, baseDir, *configPath, logger)
+	application, err := app.New(ctx, baseDir, *configPath, *staticDir, logger)
 	if err != nil {
 		logger.Error("create pulseops app failed", "err", err)
 		os.Exit(1)

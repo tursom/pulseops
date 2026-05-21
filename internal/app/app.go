@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 
 	"pulseops/internal/ai"
@@ -27,7 +28,7 @@ type App struct {
 	server        *http.Server
 }
 
-func New(ctx context.Context, baseDir, configPath string, logger *slog.Logger) (*App, error) {
+func New(ctx context.Context, baseDir, configPath, staticDir string, logger *slog.Logger) (*App, error) {
 	cfg, err := config.LoadGlobal(baseDir, configPath)
 	if err != nil {
 		return nil, err
@@ -113,7 +114,17 @@ func New(ctx context.Context, baseDir, configPath string, logger *slog.Logger) (
 	}
 
 	taskWatcher := watch.New(cfg.Task.ConfigDir, cfg.Task.ReloadDebounce.Duration, manager, logger)
-	server := api.NewServer(cfg.Server, manager, stateStore, artifactStore, logger)
+
+	handler := api.Routes(staticDir, manager, stateStore, artifactStore, logger)
+	server := &http.Server{
+		Addr:         cfg.Server.Addr,
+		Handler:      handler,
+		ReadTimeout:  cfg.Server.ReadTimeout.Duration,
+		WriteTimeout: cfg.Server.WriteTimeout.Duration,
+		BaseContext: func(_ net.Listener) context.Context {
+			return context.WithValue(context.Background(), "logger", logger)
+		},
+	}
 	return &App{
 		config:        cfg,
 		logger:        logger,

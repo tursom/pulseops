@@ -5,15 +5,15 @@ import (
 	"database/sql"
 	"encoding/json"
 	"log/slog"
-	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"pulseops/internal/appctx"
-	"pulseops/internal/config"
 	"pulseops/internal/store"
 	"pulseops/internal/task"
 )
@@ -26,8 +26,10 @@ type TaskManager interface {
 	SetTaskEnabled(ctx context.Context, id string, enabled bool) error
 }
 
-func NewServer(cfg config.ServerConfig, manager TaskManager, repository store.Repository, artifactStore store.ArtifactStore, logger *slog.Logger) *http.Server {
+func Routes(staticDir string, manager TaskManager, repository store.Repository, artifactStore store.ArtifactStore, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
+
+	// API routes — register before static/file routes for specificity priority
 	mux.Handle("GET /metrics", promhttp.Handler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -159,19 +161,31 @@ func NewServer(cfg config.ServerConfig, manager TaskManager, repository store.Re
 		writeJSON(w, http.StatusOK, map[string]any{"status": "disabled"})
 	})
 
+	if staticDir != "" {
+		fs := http.FileServer(http.Dir(staticDir))
+
+		mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFile(w, r, filepath.Join(staticDir, "index.html"))
+		})
+
+		mux.Handle("GET /assets/{path...}", fs)
+
+		mux.HandleFunc("GET /{path...}", func(w http.ResponseWriter, r *http.Request) {
+			p := filepath.Clean(r.URL.Path)
+			full := filepath.Join(staticDir, p)
+			if _, err := os.Stat(full); os.IsNotExist(err) {
+				http.ServeFile(w, r, filepath.Join(staticDir, "index.html"))
+				return
+			}
+			fs.ServeHTTP(w, r)
+		})
+	}
+
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reqLogger := logger.With("method", r.Method, "path", r.URL.Path)
 		mux.ServeHTTP(w, r.WithContext(appctx.WithLogger(r.Context(), reqLogger)))
 	})
-	return &http.Server{
-		Addr:         cfg.Addr,
-		Handler:      handler,
-		ReadTimeout:  cfg.ReadTimeout.Duration,
-		WriteTimeout: cfg.WriteTimeout.Duration,
-		BaseContext: func(_ net.Listener) context.Context {
-			return appctx.WithLogger(context.Background(), logger)
-		},
-	}
+	return CORSMiddleware(handler)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

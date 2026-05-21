@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"pulseops/internal/config"
 	"pulseops/internal/store"
 	"pulseops/internal/task"
 )
@@ -19,7 +18,7 @@ import (
 func TestArtifactEndpoints(t *testing.T) {
 	t.Parallel()
 
-	server := NewServer(config.ServerConfig{Addr: ":8080"}, &fakeTaskManager{}, &fakeRepository{
+	handler := Routes("", &fakeTaskManager{}, &fakeRepository{
 		artifactsByRun: map[string][]store.ArtifactRef{
 			"task-a/run-1": {{
 				ArtifactID:  "artifact-1",
@@ -48,14 +47,14 @@ func TestArtifactEndpoints(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/tasks/task-a/runs/run-1/artifacts", nil)
 	rec := httptest.NewRecorder()
-	server.Handler.ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"artifact_id":"artifact-1"`) {
 		t.Fatalf("unexpected artifacts response: %d %s", rec.Code, rec.Body.String())
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/artifacts/artifact-1", nil)
 	rec = httptest.NewRecorder()
-	server.Handler.ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"download_url":"https://download.local/object"`) {
 		t.Fatalf("unexpected artifact detail response: %d %s", rec.Code, rec.Body.String())
 	}
