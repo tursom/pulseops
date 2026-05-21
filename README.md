@@ -43,6 +43,24 @@ cp configs/pulseops.example.toml configs/pulseops.toml
 ./pulseops --config configs/pulseops.toml
 ```
 
+### Docker 部署
+
+```bash
+# 1. 准备配置
+cp configs/pulseops.example.toml configs/pulseops.toml
+# 编辑 configs/pulseops.toml，将 state.dsn 和 artifact_store.endpoint
+# 指向你的 PostgreSQL 和 MinIO/S3 地址
+
+# 2. 构建并启动
+docker compose up -d
+
+# 3. 验证
+curl http://localhost:8088/healthz
+```
+
+> **注意**：docker-compose.yml 仅包含 pulseops 服务本身，PostgreSQL 和 MinIO 需要外部提供。
+> 配置文件 `configs/pulseops.toml` 已被 .gitignore 忽略，不会提交到仓库。
+
 ### 创建第一个任务
 
 ```bash
@@ -86,8 +104,11 @@ pulseops/
 │   └── watch/             # 配置文件热重载
 ├── configs/
 │   ├── tasks/             # 任务配置文件目录
-│   ├── pulseops.toml      # 主配置
+│   ├── pulseops.toml      # 主配置（gitignore）
 │   └── pulseops.example.toml
+├── Dockerfile             # 多阶段构建
+├── docker-compose.yml     # Docker Compose 启动
+├── .dockerignore
 └── doc/                   # 文档
 ```
 
@@ -111,7 +132,7 @@ pulseops/
 ## 开发
 
 ```bash
-# 构建
+# 本地构建
 GOWORK=off go build ./cmd/pulseops
 
 # 测试
@@ -119,4 +140,7 @@ GOWORK=off go test ./...
 
 # 代码检查
 GOWORK=off go vet ./...
+
+# Docker 构建
+DOCKER_BUILDKIT=1 docker build -t pulseops:latest .
 ```

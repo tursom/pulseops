@@ -1,0 +1,35 @@
+# Git
+.git/
+.gitignore
+
+# Local configs with credentials (gitignored)
+config.toml
+configs/pulseops.toml
+
+# Local data
+data/
+
+# Logs
+*.log
+logs/
+
+# Build artifacts
+pulseops
+/app
+
+# IDE
+.idea/
+.vscode/
+
+# OMC
+.omc/
+.claude/
+.opencode/
+.sisyphus/
+
+# Test files
+*_test.go
+
+# OS files
+.DS_Store
+Thumbs.db
