@@ -14,6 +14,7 @@ import {
   PoweroffOutlined,
   EditOutlined,
   DeleteOutlined,
+  PlusCircleOutlined,
 } from '@ant-design/icons'
 import { triggerTaskRun, enableTask, disableTask, deleteTaskDefinition } from '../../api/client'
 import type { TaskNodeType } from './types'
@@ -119,6 +120,14 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
           },
         })
         break
+      default:
+        if (key.startsWith('add-downstream:')) {
+          const downstreamKind = key.split(':')[1]
+          navigate(
+            `/task-defs/new?kind=${downstreamKind}&upstream_task_id=${taskId}&upstream_name=${encodeURIComponent(name)}&pipeline=${encodeURIComponent(pipelineId || '')}&from=/pipelines/${encodeURIComponent(pipelineId || '')}`
+          )
+        }
+        break
     }
   }
 
@@ -126,6 +135,15 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
     { key: 'run', label: '立即执行', icon: <PlayCircleOutlined /> },
     { key: 'toggle', label: enabled ? '禁用' : '启用', icon: <PoweroffOutlined /> },
     { key: 'edit', label: '编辑', icon: <EditOutlined /> },
+    {
+      key: 'add-downstream',
+      label: '添加下游任务',
+      icon: <PlusCircleOutlined />,
+      children: Object.entries(KIND_LABELS).map(([kindValue, label]) => ({
+        key: `add-downstream:${kindValue}`,
+        label: `创建${label}`,
+      })),
+    },
     { type: 'divider' as const },
     { key: 'delete', label: '删除', danger: true, icon: <DeleteOutlined /> },
   ]

@@ -54,15 +54,21 @@ export default function TaskEditor() {
   const [searchParams] = useSearchParams()
   const pipelineId = searchParams.get('pipeline')
   const from = searchParams.get('from')
+  const upstreamTaskId = searchParams.get('upstream_task_id')
+  const upstreamName = searchParams.get('upstream_name')
+  const initialKind = searchParams.get('kind')
   const returnUrl = from || (pipelineId ? `/pipelines/${pipelineId}` : '/pipelines')
   const isEdit = Boolean(id)
 
   const [initialValues, setInitialValues] = useState<
     Record<string, unknown> | undefined
   >(undefined)
-  const [pageTitle, setPageTitle] = useState(
-    isEdit ? 'Edit Task' : 'Create Task',
-  )
+  const getDefaultTitle = () => {
+    if (isEdit) return 'Edit Task'
+    if (upstreamName) return `为 "${upstreamName}" 创建下游任务`
+    return 'Create Task'
+  }
+  const [pageTitle, setPageTitle] = useState(getDefaultTitle())
   const [loading, setLoading] = useState(isEdit)
   const [error, setError] = useState<string | null>(null)
   const [pipelines, setPipelines] = useState<Pipeline[]>([])
@@ -90,13 +96,22 @@ export default function TaskEditor() {
       loadTaskDef()
     } else {
       const initial: Record<string, unknown> = { task_id: generateTaskId(), enabled: true, trigger: 'scheduled' }
+
+      if (initialKind) {
+        initial.kind = initialKind
+      }
+      if (upstreamTaskId) {
+        initial.trigger = 'on_run'
+        initial.watch_task_id = upstreamTaskId
+      }
       if (pipelineId) {
         initial.pipeline_id = pipelineId
       }
+
       setInitialValues(initial)
       setLoading(false)
     }
-  }, [isEdit, loadTaskDef, pipelineId])
+  }, [isEdit, loadTaskDef, pipelineId, upstreamTaskId, initialKind])
 
   useEffect(() => {
     fetchPipelines()

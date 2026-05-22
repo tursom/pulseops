@@ -1,10 +1,8 @@
-# syntax=docker/dockerfile:1.4
 # ===========================================================================
 # PulseOps — 三阶段构建 (Frontend + Backend → Runtime)
 # ===========================================================================
 # 构建指令:
-#   DOCKER_BUILDKIT=1 docker build -t pulseops:latest .
-# ===========================================================================
+#   docker compose build
 
 # ---------------------------------------------------------------------------
 # 阶段 1: 前端构建 (Node)
@@ -26,20 +24,18 @@ FROM golang:alpine AS backend
 
 ENV TZ="Asia/Shanghai"
 ENV GOWORK=off
+ENV GOPROXY=https://proxy.golang.org,direct
 
 WORKDIR /app
 
 RUN apk add --no-cache git ca-certificates
 
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
+RUN go mod download
 
 COPY . .
 
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -ldflags="-s -w" -o pulseops ./cmd/pulseops
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o pulseops ./cmd/pulseops
 
 # ---------------------------------------------------------------------------
 # 阶段 3: 运行时
