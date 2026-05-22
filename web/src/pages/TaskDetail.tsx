@@ -26,7 +26,7 @@ import {
   enableTask,
   disableTask,
 } from '../api/client'
-import type { TaskState, RunRecord, AIAnalysisRecord } from '../api/types'
+import type { TaskState, RunRecord, AIAnalysisRecord, TaskDefinition } from '../api/types'
 
 const { Title, Text } = Typography
 
@@ -446,6 +446,43 @@ export default function TaskDetail() {
           </Descriptions.Item>
         </Descriptions>
       </Card>
+
+      {task.kind === 'data_process' && (() => {
+        const def = (task as unknown as { definition?: TaskDefinition }).definition
+        const exprs = def?.params?.extract_exprs as Array<{ field: string; source: string; jq_expr: string; agg_mode?: string }> | undefined
+        if (!exprs || exprs.length === 0) return null
+        const sourceLabels: Record<string, string> = {
+          payload: 'Payload',
+          summary: 'Summary',
+          record: 'Record',
+          'artifact:payload': 'Artifact:Payload',
+          'artifact:stdout': 'Artifact:Stdout',
+          'artifact:stderr': 'Artifact:Stderr',
+        }
+        const aggLabels: Record<string, string> = {
+          '': '无',
+          sum: '求和',
+          avg: '平均值',
+          count: '计数',
+          min: '最小值',
+          max: '最大值',
+        }
+        return (
+          <Card title="数据处理规则" style={{ marginBottom: 24 }}>
+            <Table
+              dataSource={exprs.map((e, i) => ({ ...e, key: i }))}
+              pagination={false}
+              size="small"
+              columns={[
+                { title: '输出字段', dataIndex: 'field', key: 'field', render: (v: string) => <Text code>{v}</Text> },
+                { title: '数据源', dataIndex: 'source', key: 'source', render: (v: string) => <Tag>{sourceLabels[v] || v}</Tag> },
+                { title: 'JQ 表达式', dataIndex: 'jq_expr', key: 'jq_expr', render: (v: string) => <Text code>{v}</Text> },
+                { title: '聚合', dataIndex: 'agg_mode', key: 'agg_mode', render: (v: string) => <Tag>{aggLabels[v] || v}</Tag> },
+              ]}
+            />
+          </Card>
+        )
+      })()}
 
       <Card title={`运行历史 (${runs.length})`} style={{ marginBottom: 24 }}>
         <Table

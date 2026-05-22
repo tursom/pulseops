@@ -13,6 +13,7 @@ const KIND_COLORS: Record<string, string> = {
   schema_check: 'purple',
   custom: 'cyan',
   ai_analyze: 'red',
+  data_process: 'gold',
 }
 
 const STATUS_COLORS: Record<string, string> = {

@@ -457,6 +457,29 @@ export default function RunDetail() {
         </Card>
       ),
     },
+    ...(run.task_kind === 'data_process' && run.summary ? [{
+      key: 'extracted',
+      label: '提取数据',
+      children: (
+        <Card>
+          <Table
+            dataSource={Object.entries(run.summary).map(([field, value]) => ({
+              key: field,
+              field,
+              value: value === null || value === undefined ? '—' : typeof value === 'object' ? JSON.stringify(value) : String(value),
+              type: typeof value === 'number' ? 'number' : typeof value === 'boolean' ? 'boolean' : Array.isArray(value) ? 'array' : typeof value === 'object' ? 'object' : 'string',
+            }))}
+            pagination={false}
+            size="small"
+            columns={[
+              { title: '字段', dataIndex: 'field', key: 'field', render: (v: string) => <Text code>{v}</Text>, width: 160 },
+              { title: '值', dataIndex: 'value', key: 'value', render: (v: string) => <Text style={{ fontFamily: 'monospace' }}>{v}</Text> },
+              { title: '类型', dataIndex: 'type', key: 'type', render: (v: string) => <Tag>{v}</Tag>, width: 80 },
+            ]}
+          />
+        </Card>
+      ),
+    }] : []),
     {
       key: 'payload',
       label: '数据载荷',

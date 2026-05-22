@@ -9,6 +9,7 @@ import {
   PartitionOutlined,
   MonitorOutlined,
   RobotOutlined,
+  SwapOutlined,
   PlayCircleOutlined,
   PoweroffOutlined,
   EditOutlined,
@@ -24,6 +25,7 @@ const KIND_COLORS: Record<string, string> = {
   scenario_check: '#722ed1',
   process_check: '#13c2c2',
   ai_analyze: '#f5222d',
+  data_process: '#faad14',
 }
 
 const KIND_ICONS: Record<string, React.ReactNode> = {
@@ -33,6 +35,7 @@ const KIND_ICONS: Record<string, React.ReactNode> = {
   scenario_check: <PartitionOutlined />,
   process_check: <MonitorOutlined />,
   ai_analyze: <RobotOutlined />,
+  data_process: <SwapOutlined />,
 }
 
 const STATUS_DOT_COLORS: Record<string, string> = {
