@@ -41,7 +41,11 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		})
 	})
 	mux.HandleFunc("GET /api/tasks", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, manager.ListTasks())
+		tasks := manager.ListTasks()
+		if tasks == nil {
+			tasks = []store.TaskState{}
+		}
+		writeJSON(w, http.StatusOK, tasks)
 	})
 	mux.HandleFunc("GET /api/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
 		taskState, ok := manager.GetTask(r.PathValue("id"))
@@ -88,6 +92,9 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		if records == nil {
+			records = []store.RunRecord{}
+		}
 		writeJSON(w, http.StatusOK, records)
 	})
 	mux.HandleFunc("GET /api/tasks/{id}/runs/{runID}", func(w http.ResponseWriter, r *http.Request) {
@@ -121,6 +128,9 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		if records == nil {
+			records = []store.AIAnalysisRecord{}
+		}
 		writeJSON(w, http.StatusOK, records)
 	})
 	mux.HandleFunc("GET /api/tasks/{id}/runs/{runID}/artifacts", func(w http.ResponseWriter, r *http.Request) {
@@ -128,6 +138,9 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+		if artifacts == nil {
+			artifacts = []store.ArtifactRef{}
 		}
 		writeJSON(w, http.StatusOK, artifacts)
 	})
