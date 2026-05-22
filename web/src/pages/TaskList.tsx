@@ -3,7 +3,7 @@ import { Typography, Button, Space, Input, Select, Table, Tag, Switch, Spin, Ale
 import type { ColumnsType } from 'antd/es/table'
 import { ReloadOutlined, PlayCircleOutlined, PauseCircleOutlined, ThunderboltOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons'
 import { Link, useNavigate } from 'react-router-dom'
-import { fetchTasks, triggerTaskRun, enableTask, disableTask } from '../api/client'
+import { fetchTasks, fetchTaskDefinitions, triggerTaskRun, enableTask, disableTask } from '../api/client'
 import type { TaskState } from '../api/types'
 
 const KIND_COLORS: Record<string, string> = {
@@ -19,6 +19,7 @@ const STATUS_COLORS: Record<string, string> = {
   running: 'green',
   loaded: 'blue',
   disabled: 'default',
+  unloaded: 'orange',
 }
 
 const RUN_STATUS_COLORS: Record<string, string> = {
@@ -41,8 +42,33 @@ export default function TaskList() {
 
   const loadTasks = useCallback(async () => {
     try {
-      const data = await fetchTasks()
-      setTasks(data)
+      const [defs, states] = await Promise.all([fetchTaskDefinitions(), fetchTasks()])
+      const stateMap = new Map(states.map((s) => [s.task_id, s]))
+      const merged: TaskState[] = defs.map((def) => {
+        const state = stateMap.get(def.task_id)
+        if (state) return state
+        return {
+          task_id: def.task_id,
+          name: def.name || def.task_id,
+          kind: def.kind,
+          enabled: def.enabled,
+          status: 'unloaded',
+          labels: def.labels || {},
+          last_run_at: null,
+          next_run_at: null,
+          last_run_status: '',
+          last_check_status: '',
+          last_error: '',
+          last_duration_ms: 0,
+          last_reload_error: '',
+          last_sample_seed: 0,
+          last_sample_count: 0,
+          last_mismatch_count: 0,
+          source_path: '',
+          updated_at: '',
+        } as TaskState
+      })
+      setTasks(merged)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载任务失败')
@@ -182,6 +208,7 @@ export default function TaskList() {
         { text: '运行中', value: 'running' },
         { text: '已加载', value: 'loaded' },
         { text: '已禁用', value: 'disabled' },
+        { text: '未加载', value: 'unloaded' },
       ],
       onFilter: (value, record) => record.status === value,
     },
@@ -239,6 +266,7 @@ export default function TaskList() {
         >
           <Switch
             checked={record.enabled}
+            disabled={record.status === 'unloaded'}
             loading={actionLoading[record.task_id]}
             onChange={(checked) => handleToggleEnabled(record.task_id, checked)}
           />
@@ -246,6 +274,7 @@ export default function TaskList() {
             type="primary"
             size="small"
             icon={<PlayCircleOutlined />}
+            disabled={record.status === 'unloaded'}
             loading={actionLoading[record.task_id]}
             onClick={() => handleRunNow(record.task_id)}
           >
@@ -305,9 +334,10 @@ export default function TaskList() {
             allowClear
             style={{ width: 120 }}
             options={[
-              { label: '运行中', value: 'running' },
-              { label: '已加载', value: 'loaded' },
-              { label: '已禁用', value: 'disabled' },
+            { label: '运行中', value: 'running' },
+            { label: '已加载', value: 'loaded' },
+            { label: '已禁用', value: 'disabled' },
+            { label: '未加载', value: 'unloaded' },
             ]}
           />
           <Select
