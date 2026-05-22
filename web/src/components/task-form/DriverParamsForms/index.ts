@@ -5,6 +5,7 @@ import ScriptExecParams from './ScriptExecParams'
 import ProcessCheckParams from './ProcessCheckParams'
 import ScenarioCheckParams from './ScenarioCheckParams'
 import AIAnalyzeParams from './AIAnalyzeParams'
+import UpstreamDataParams from './UpstreamDataParams'
 
 export const driverForms: Record<string, FC> = {
   http_check: HTTPCheckParams,
@@ -13,4 +14,5 @@ export const driverForms: Record<string, FC> = {
   process_check: ProcessCheckParams,
   scenario_check: ScenarioCheckParams,
   ai_analyze: AIAnalyzeParams,
+  upstream_data: UpstreamDataParams,
 }

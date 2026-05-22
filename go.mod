@@ -4,8 +4,10 @@ go 1.26.2
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
+	github.com/ebitengine/purego v0.10.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/google/uuid v1.6.0
+	github.com/itchyny/gojq v0.12.19
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/minio/minio-go/v7 v7.0.99
 	github.com/pelletier/go-toml/v2 v2.2.4
@@ -17,8 +19,8 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/ebitengine/purego v0.10.0 // indirect
 	github.com/go-ini/ini v1.67.0 // indirect
+	github.com/itchyny/timefmt-go v0.1.8 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect

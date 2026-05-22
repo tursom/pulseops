@@ -1,0 +1,383 @@
+package task
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"strings"
+
+	"github.com/itchyny/gojq"
+
+	"pulseops/internal/config"
+	"pulseops/internal/store"
+)
+
+// ctxKey is defined locally to avoid an import cycle with the ai package.
+type ctxKey string
+
+const ctxTriggerRun ctxKey = "pulseops:triggerRun"
+
+type UpstreamDataParams struct {
+	SourceTaskID string        `json:"source_task_id"`
+	ExtractExprs []ExtractExpr `json:"extract_exprs"`
+}
+
+type ExtractExpr struct {
+	Field   string `json:"field"`
+	Source  string `json:"source"`
+	JQExpr  string `json:"jq_expr"`
+	AggMode string `json:"agg_mode"`
+}
+
+type UpstreamDataDriver struct {
+	repo     store.Repository
+	artStore store.ArtifactStore
+	logger   *slog.Logger
+}
+
+func NewUpstreamDataDriver(repo store.Repository, artStore store.ArtifactStore, logger *slog.Logger) *UpstreamDataDriver {
+	return &UpstreamDataDriver{repo: repo, artStore: artStore, logger: logger}
+}
+
+func (d *UpstreamDataDriver) Kind() string { return "upstream_data" }
+
+func (d *UpstreamDataDriver) Validate(spec config.TaskSpec) error {
+	params, err := DecodeParams[UpstreamDataParams](spec.Params)
+	if err != nil {
+		return fmt.Errorf("decode upstream_data params: %w", err)
+	}
+	if len(params.ExtractExprs) == 0 {
+		return fmt.Errorf("upstream_data requires at least one extract_expr")
+	}
+	for i, expr := range params.ExtractExprs {
+		if expr.Field == "" {
+			return fmt.Errorf("upstream_data extract_expr[%d].field must not be empty", i)
+		}
+		if expr.Source == "" {
+			return fmt.Errorf("upstream_data extract_expr[%d].source must not be empty", i)
+		}
+		if expr.JQExpr == "" {
+			return fmt.Errorf("upstream_data extract_expr[%d].jq_expr must not be empty", i)
+		}
+		switch {
+		case expr.Source == "payload", expr.Source == "summary", strings.HasPrefix(expr.Source, "artifact:"):
+		default:
+			return fmt.Errorf("upstream_data extract_expr[%d].source %q must be 'payload', 'summary', or 'artifact:<kind>'", i, expr.Source)
+		}
+	}
+	return nil
+}
+
+func (d *UpstreamDataDriver) NewRunner(spec config.TaskSpec, deps RunnerDeps) (Runner, error) {
+	params, err := DecodeParams[UpstreamDataParams](spec.Params)
+	if err != nil {
+		return nil, fmt.Errorf("decode upstream_data params: %w", err)
+	}
+	return &upstreamDataRunner{
+		spec:     spec,
+		params:   params,
+		repo:     d.repo,
+		artStore: d.artStore,
+		logger:   d.logger,
+		deps:     deps,
+	}, nil
+}
+
+type upstreamDataRunner struct {
+	spec     config.TaskSpec
+	params   UpstreamDataParams
+	repo     store.Repository
+	artStore store.ArtifactStore
+	logger   *slog.Logger
+	deps     RunnerDeps
+}
+
+func (r *upstreamDataRunner) Run(ctx context.Context, _ TriggerType) (Result, error) {
+	sourceRecord, ok := ctx.Value(ctxTriggerRun).(*store.RunRecord)
+	if !ok || sourceRecord == nil {
+		return Result{CheckStatus: "fail"}, fmt.Errorf("upstream_data requires a trigger run in context")
+	}
+
+	sourceTaskID := r.params.SourceTaskID
+	if sourceTaskID == "" {
+		sourceTaskID = r.spec.WatchTaskID
+	}
+
+	summary := map[string]any{}
+	var findings []store.Finding
+	var artifacts []store.ArtifactRef
+
+	for _, expr := range r.params.ExtractExprs {
+		srcData, err := r.resolveSource(ctx, expr.Source, sourceTaskID, sourceRecord, &artifacts)
+		if err != nil {
+			findings = append(findings, store.Finding{
+				Reason: fmt.Sprintf("resolve source %q for field %q: %v", expr.Source, expr.Field, err),
+			})
+			continue
+		}
+
+		result, jqErr := r.applyJQ(expr.JQExpr, srcData)
+		if jqErr != nil {
+			findings = append(findings, store.Finding{
+				Reason: fmt.Sprintf("jq expr %q for field %q: %v", expr.JQExpr, expr.Field, jqErr),
+			})
+			continue
+		}
+
+		if expr.AggMode != "" {
+			result = r.aggregate(expr.AggMode, result)
+		}
+
+		summary[expr.Field] = result
+	}
+
+	return Result{
+		CheckStatus: "pass",
+		Summary:     summary,
+		Payload:     summary,
+		Findings:    findings,
+	}, nil
+}
+
+func (r *upstreamDataRunner) resolveSource(
+	ctx context.Context,
+	source string,
+	sourceTaskID string,
+	sourceRecord *store.RunRecord,
+	artifacts *[]store.ArtifactRef,
+) (any, error) {
+	switch {
+	case source == "payload":
+		if len(sourceRecord.Payload) == 0 {
+			return nil, nil
+		}
+		var v any
+		if err := json.Unmarshal(sourceRecord.Payload, &v); err != nil {
+			return nil, fmt.Errorf("unmarshal payload: %w", err)
+		}
+		return v, nil
+
+	case source == "summary":
+		return sourceRecord.Summary, nil
+
+	case strings.HasPrefix(source, "artifact:"):
+		if err := r.ensureArtifacts(ctx, sourceTaskID, sourceRecord, artifacts); err != nil {
+			return nil, err
+		}
+		kind := strings.TrimPrefix(source, "artifact:")
+		var matched []store.ArtifactRef
+		for _, ref := range *artifacts {
+			if kind == "*" || ref.Kind == kind {
+				matched = append(matched, ref)
+			}
+		}
+		if len(matched) == 0 {
+			return nil, nil
+		}
+		if kind == "*" {
+			var results []map[string]any
+			for _, ref := range matched {
+				content, err := r.readArtifactContent(ctx, ref)
+				if err != nil {
+					return nil, fmt.Errorf("read artifact %s: %w", ref.ArtifactID, err)
+				}
+				results = append(results, map[string]any{
+					"kind":         ref.Kind,
+					"artifact_id":  ref.ArtifactID,
+					"content_type": ref.ContentType,
+					"content":      content,
+				})
+			}
+			return results, nil
+		}
+		if len(matched) == 1 {
+			return r.readArtifactContent(ctx, matched[0])
+		}
+		var results []any
+		for _, ref := range matched {
+			content, err := r.readArtifactContent(ctx, ref)
+			if err != nil {
+				return nil, fmt.Errorf("read artifact %s: %w", ref.ArtifactID, err)
+			}
+			results = append(results, content)
+		}
+		return results, nil
+
+	default:
+		return nil, fmt.Errorf("unknown source type %q", source)
+	}
+}
+
+func (r *upstreamDataRunner) ensureArtifacts(
+	ctx context.Context,
+	sourceTaskID string,
+	sourceRecord *store.RunRecord,
+	artifacts *[]store.ArtifactRef,
+) error {
+	if len(*artifacts) > 0 {
+		return nil
+	}
+	refs, err := r.repo.ListArtifactsByRun(ctx, sourceTaskID, sourceRecord.RunID)
+	if err != nil {
+		return fmt.Errorf("list artifacts for task %q run %q: %w", sourceTaskID, sourceRecord.RunID, err)
+	}
+	*artifacts = refs
+	return nil
+}
+
+func (r *upstreamDataRunner) readArtifactContent(ctx context.Context, ref store.ArtifactRef) (any, error) {
+	key, err := store.ObjectKeyFromURI(ref.URI)
+	if err != nil {
+		return nil, fmt.Errorf("parse artifact uri %q: %w", ref.URI, err)
+	}
+	reader, err := r.artStore.Get(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("get artifact %q: %w", key, err)
+	}
+	defer reader.Close()
+
+	raw, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("read artifact content: %w", err)
+	}
+	if strings.Contains(ref.ContentType, "json") {
+		var v any
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return nil, fmt.Errorf("unmarshal artifact json: %w", err)
+		}
+		return v, nil
+	}
+	return string(raw), nil
+}
+
+func (r *upstreamDataRunner) applyJQ(expr string, input any) (any, error) {
+	query, err := gojq.Parse(expr)
+	if err != nil {
+		return nil, fmt.Errorf("parse jq: %w", err)
+	}
+	code, err := gojq.Compile(query)
+	if err != nil {
+		return nil, fmt.Errorf("compile jq: %w", err)
+	}
+	iter := code.Run(input)
+	var results []any
+	for {
+		v, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if e, ok := v.(error); ok {
+			return nil, fmt.Errorf("jq iteration error: %w", e)
+		}
+		results = append(results, v)
+	}
+	switch len(results) {
+	case 0:
+		return nil, nil
+	case 1:
+		return results[0], nil
+	default:
+		return results, nil
+	}
+}
+
+func (r *upstreamDataRunner) aggregate(mode string, input any) any {
+	nums, ok := toFloat64Slice(input)
+	if !ok || len(nums) == 0 {
+		return input
+	}
+	switch mode {
+	case "sum":
+		var total float64
+		for _, n := range nums {
+			total += n
+		}
+		return total
+	case "avg":
+		var total float64
+		for _, n := range nums {
+			total += n
+		}
+		return total / float64(len(nums))
+	case "count":
+		return len(nums)
+	case "min":
+		minimum := nums[0]
+		for _, n := range nums[1:] {
+			if n < minimum {
+				minimum = n
+			}
+		}
+		return minimum
+	case "max":
+		maximum := nums[0]
+		for _, n := range nums[1:] {
+			if n > maximum {
+				maximum = n
+			}
+		}
+		return maximum
+	default:
+		return input
+	}
+}
+
+func toFloat64Slice(v any) ([]float64, bool) {
+	switch val := v.(type) {
+	case float64:
+		return []float64{val}, true
+	case float32:
+		return []float64{float64(val)}, true
+	case int:
+		return []float64{float64(val)}, true
+	case int64:
+		return []float64{float64(val)}, true
+	case int32:
+		return []float64{float64(val)}, true
+	case json.Number:
+		f, err := val.Float64()
+		if err != nil {
+			return nil, false
+		}
+		return []float64{f}, true
+	case []any:
+		var nums []float64
+		for _, item := range val {
+			n, ok := toFloat64Single(item)
+			if !ok {
+				return nil, false
+			}
+			nums = append(nums, n)
+		}
+		return nums, true
+	case []float64:
+		return val, true
+	default:
+		return nil, false
+	}
+}
+
+func toFloat64Single(v any) (float64, bool) {
+	switch val := v.(type) {
+	case float64:
+		return val, true
+	case float32:
+		return float64(val), true
+	case int:
+		return float64(val), true
+	case int64:
+		return float64(val), true
+	case int32:
+		return float64(val), true
+	case json.Number:
+		f, err := val.Float64()
+		if err != nil {
+			return 0, false
+		}
+		return f, true
+	default:
+		return 0, false
+	}
+}

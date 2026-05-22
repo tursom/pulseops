@@ -24,6 +24,7 @@ const KIND_OPTIONS = [
   { value: 'process_check', label: '进程检查' },
   { value: 'scenario_check', label: '场景检查' },
   { value: 'ai_analyze', label: 'AI 分析' },
+  { value: 'upstream_data', label: '上游数据' },
 ]
 
 const KIND_LABELS: Record<string, string> = {
@@ -33,6 +34,7 @@ const KIND_LABELS: Record<string, string> = {
   process_check: '进程检查',
   scenario_check: '场景检查',
   ai_analyze: 'AI 分析',
+  upstream_data: '上游数据',
 }
 
 function formListToRecord(

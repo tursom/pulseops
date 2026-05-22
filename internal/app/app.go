@@ -106,6 +106,7 @@ func New(ctx context.Context, baseDir, configPath, staticDir string, logger *slo
 		task.ScriptExecDriver{},
 		task.ProcessCheckDriver{},
 		task.ScenarioCheckDriver{},
+		task.NewUpstreamDataDriver(stateStore, artifactStore, logger),
 	}
 	if cfg.AI.Enabled {
 		aiClient := ai.NewClient(ai.ClientConfig{
