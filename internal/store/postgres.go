@@ -216,7 +216,7 @@ func (s *PostgresStore) InsertRun(ctx context.Context, record RunRecord) error {
 			run_id, task_id, task_kind, trigger_type, run_status, check_status,
 			started_at, ended_at, duration_ms, error_message, summary_json, payload,
 			stdout, stderr, labels_json
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15, $16::jsonb)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15::jsonb)
 	`, record.RunID, record.TaskID, record.TaskKind, record.TriggerType, record.RunStatus,
 		record.CheckStatus, record.StartedAt, record.EndedAt, record.DurationMS, record.ErrorMessage,
 		string(summaryJSON), payload, record.Stdout, record.Stderr, string(labelsJSON))
