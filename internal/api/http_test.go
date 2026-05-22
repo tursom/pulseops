@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"pulseops/internal/config"
 	"pulseops/internal/store"
 	"pulseops/internal/task"
 )
@@ -71,6 +72,10 @@ func (m *fakeTaskManager) RunTask(context.Context, string, task.TriggerType) (st
 }
 func (m *fakeTaskManager) ReloadTask(context.Context, string) error           { return nil }
 func (m *fakeTaskManager) SetTaskEnabled(context.Context, string, bool) error { return nil }
+func (m *fakeTaskManager) UpsertTaskFromDB(context.Context, config.TaskDefinition) (store.TaskState, error) {
+	return store.TaskState{}, nil
+}
+func (m *fakeTaskManager) RemoveTaskByID(context.Context, string) error { return nil }
 
 type fakeRepository struct {
 	artifactsByRun map[string][]store.ArtifactRef
@@ -107,8 +112,17 @@ func (r *fakeRepository) GetAIAnalysis(context.Context, string) (*store.AIAnalys
 func (r *fakeRepository) ListAIAnalyses(context.Context, string, int) ([]store.AIAnalysisRecord, error) {
 	return nil, nil
 }
-func (r *fakeRepository) GetMeta(context.Context, string) (string, error)       { return "", store.ErrMetaNotFound }
-func (r *fakeRepository) SetMeta(context.Context, string, string) error          { return nil }
+func (r *fakeRepository) ListTaskDefinitions(context.Context) ([]config.TaskDefinition, error) {
+	return nil, nil
+}
+func (r *fakeRepository) GetTaskDefinition(context.Context, string) (*config.TaskDefinition, error) {
+	return nil, sql.ErrNoRows
+}
+func (r *fakeRepository) InsertTaskDefinition(context.Context, config.TaskDefinition) error { return nil }
+func (r *fakeRepository) UpdateTaskDefinition(context.Context, config.TaskDefinition) error { return nil }
+func (r *fakeRepository) DeleteTaskDefinition(context.Context, string) error          { return nil }
+func (r *fakeRepository) GetMeta(context.Context, string) (string, error)             { return "", store.ErrMetaNotFound }
+func (r *fakeRepository) SetMeta(context.Context, string, string) error                { return nil }
 
 type fakeArtifactStore struct{}
 

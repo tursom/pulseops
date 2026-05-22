@@ -15,7 +15,6 @@ import (
 	"pulseops/internal/store"
 	"pulseops/internal/task"
 	"pulseops/internal/trace"
-	"pulseops/internal/watch"
 )
 
 type App struct {
@@ -24,7 +23,6 @@ type App struct {
 	store         *store.PostgresStore
 	artifactStore store.ArtifactStore
 	manager       *runtime.Manager
-	watcher       *watch.Watcher
 	server        *http.Server
 }
 
@@ -109,11 +107,9 @@ func New(ctx context.Context, baseDir, configPath, staticDir string, logger *slo
 		HTTPClient: httpClient,
 		Evaluators: evaluators,
 	}, stateStore, traceManager)
-	if err := manager.LoadAll(ctx); err != nil {
-		logger.ErrorContext(ctx, "load initial task configs failed", "err", err)
+	if err := manager.LoadAllFromDB(ctx); err != nil {
+		logger.ErrorContext(ctx, "load task definitions from db failed", "err", err)
 	}
-
-	taskWatcher := watch.New(cfg.Task.ConfigDir, cfg.Task.ReloadDebounce.Duration, manager, logger)
 
 	handler := api.Routes(staticDir, manager, stateStore, artifactStore, logger)
 	server := &http.Server{
@@ -131,15 +127,11 @@ func New(ctx context.Context, baseDir, configPath, staticDir string, logger *slo
 		store:         stateStore,
 		artifactStore: artifactStore,
 		manager:       manager,
-		watcher:       taskWatcher,
 		server:        server,
 	}, nil
 }
 
 func (a *App) Start(ctx context.Context) error {
-	if err := a.watcher.Start(ctx); err != nil {
-		return err
-	}
 	go func() {
 		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			a.logger.ErrorContext(ctx, "http server stopped unexpectedly", "err", err)
@@ -149,7 +141,6 @@ func (a *App) Start(ctx context.Context) error {
 }
 
 func (a *App) Shutdown(ctx context.Context) error {
-	_ = a.watcher.Close()
 	a.manager.Close()
 	if err := a.server.Shutdown(ctx); err != nil {
 		return err

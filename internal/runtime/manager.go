@@ -87,6 +87,46 @@ func (m *Manager) UpsertTaskFromPath(ctx context.Context, path string) error {
 	return nil
 }
 
+func (m *Manager) LoadAllFromDB(ctx context.Context) error {
+	defs, err := m.store.ListTaskDefinitions(ctx)
+	if err != nil {
+		return fmt.Errorf("load task definitions: %w", err)
+	}
+	var loadErrs []error
+	for _, def := range defs {
+		spec, err := def.ToTaskSpec()
+		if err != nil {
+			loadErrs = append(loadErrs, fmt.Errorf("task %s: %w", def.TaskID, err))
+			continue
+		}
+		spec.Normalize(m.cfg)
+		if err := spec.ValidateBasic(); err != nil {
+			loadErrs = append(loadErrs, fmt.Errorf("task %s: %w", def.TaskID, err))
+			continue
+		}
+		if err := m.UpsertTaskSpec(ctx, spec); err != nil {
+			loadErrs = append(loadErrs, err)
+		}
+	}
+	return errors.Join(loadErrs...)
+}
+
+func (m *Manager) UpsertTaskFromDB(ctx context.Context, def config.TaskDefinition) (store.TaskState, error) {
+	spec, err := def.ToTaskSpec()
+	if err != nil {
+		return store.TaskState{}, fmt.Errorf("convert task %s: %w", def.TaskID, err)
+	}
+	spec.Normalize(m.cfg)
+	if err := spec.ValidateBasic(); err != nil {
+		return store.TaskState{}, fmt.Errorf("validate task %s: %w", def.TaskID, err)
+	}
+	if err := m.UpsertTaskSpec(ctx, spec); err != nil {
+		return store.TaskState{}, err
+	}
+	state, _ := m.GetTask(def.TaskID)
+	return state, nil
+}
+
 func (m *Manager) UpsertTaskSpec(ctx context.Context, spec config.TaskSpec) error {
 	driver, ok := m.drivers.Get(spec.Kind)
 	if !ok {
@@ -122,7 +162,9 @@ func (m *Manager) UpsertTaskSpec(ctx context.Context, spec config.TaskSpec) erro
 		toStop = appendUniqueTask(toStop, oldByID)
 	}
 	m.tasks[spec.ID] = candidate
-	m.pathToID[spec.SourcePath] = spec.ID
+	if spec.SourcePath != "" {
+		m.pathToID[spec.SourcePath] = spec.ID
+	}
 	m.metrics.tasksLoaded.Set(float64(len(m.tasks)))
 
 	if candidate.spec.Trigger == "on_run" && candidate.spec.WatchTaskID != "" {
@@ -143,25 +185,44 @@ func (m *Manager) UpsertTaskSpec(ctx context.Context, spec config.TaskSpec) erro
 }
 
 func (m *Manager) RemoveTaskByPath(ctx context.Context, path string) error {
-	m.mu.Lock()
+	m.mu.RLock()
 	id, ok := m.pathToID[path]
+	taskEntry := m.tasks[id]
+	m.mu.RUnlock()
 	if !ok {
-		m.mu.Unlock()
 		return nil
 	}
-	taskEntry := m.tasks[id]
-	delete(m.pathToID, path)
-	delete(m.tasks, id)
-	m.removeDepTask(taskEntry)
+	m.removeTask(id, taskEntry)
 	m.metrics.tasksLoaded.Set(float64(len(m.tasks)))
-	m.mu.Unlock()
-	if taskEntry != nil {
-		taskEntry.stop()
-	}
 	if err := m.store.DeleteTaskState(ctx, id); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (m *Manager) RemoveTaskByID(ctx context.Context, taskID string) error {
+	m.mu.RLock()
+	mt, ok := m.tasks[taskID]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("task %q not found", taskID)
+	}
+	m.removeTask(taskID, mt)
+	return nil
+}
+
+func (m *Manager) removeTask(taskID string, mt *managedTask) {
+	m.mu.Lock()
+	delete(m.tasks, taskID)
+	for path, id := range m.pathToID {
+		if id == taskID {
+			delete(m.pathToID, path)
+			break
+		}
+	}
+	m.removeDepTask(mt)
+	m.mu.Unlock()
+	mt.stop()
 }
 
 func (m *Manager) removeDepTask(entry *managedTask) {

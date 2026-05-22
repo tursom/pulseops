@@ -14,6 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"pulseops/internal/appctx"
+	"pulseops/internal/config"
 	"pulseops/internal/store"
 	"pulseops/internal/task"
 )
@@ -24,6 +25,8 @@ type TaskManager interface {
 	RunTask(ctx context.Context, id string, trigger task.TriggerType) (store.RunRecord, error)
 	ReloadTask(ctx context.Context, id string) error
 	SetTaskEnabled(ctx context.Context, id string, enabled bool) error
+	UpsertTaskFromDB(ctx context.Context, def config.TaskDefinition) (store.TaskState, error)
+	RemoveTaskByID(ctx context.Context, taskID string) error
 }
 
 func Routes(staticDir string, manager TaskManager, repository store.Repository, artifactStore store.ArtifactStore, logger *slog.Logger) http.Handler {
@@ -46,7 +49,28 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 			writeError(w, http.StatusNotFound, "task not found")
 			return
 		}
-		writeJSON(w, http.StatusOK, taskState)
+		def, err := repository.GetTaskDefinition(r.Context(), r.PathValue("id"))
+		if err != nil && err != sql.ErrNoRows {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if def != nil {
+			if len(def.LabelsJSON) > 0 {
+				json.Unmarshal(def.LabelsJSON, &def.Labels)
+			}
+			if len(def.ParamsJSON) > 0 {
+				json.Unmarshal(def.ParamsJSON, &def.Params)
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"task_id":    taskState.TaskID,
+			"name":       taskState.Name,
+			"kind":       taskState.Kind,
+			"enabled":    taskState.Enabled,
+			"status":     taskState.Status,
+			"definition": def,
+			"runtime":    taskState,
+		})
 	})
 	mux.HandleFunc("GET /api/tasks/{id}/runs", func(w http.ResponseWriter, r *http.Request) {
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -159,6 +183,101 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "disabled"})
+	})
+
+	mux.HandleFunc("GET /api/task-defs", func(w http.ResponseWriter, r *http.Request) {
+		defs, err := repository.ListTaskDefinitions(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if defs == nil {
+			defs = []config.TaskDefinition{}
+		}
+		writeJSON(w, http.StatusOK, defs)
+	})
+
+	mux.HandleFunc("GET /api/task-defs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		def, err := repository.GetTaskDefinition(r.Context(), r.PathValue("id"))
+		if err != nil {
+			if err == sql.ErrNoRows {
+				writeError(w, http.StatusNotFound, "task definition not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, def)
+	})
+
+	mux.HandleFunc("POST /api/task-defs", func(w http.ResponseWriter, r *http.Request) {
+		var def config.TaskDefinition
+		if err := json.NewDecoder(r.Body).Decode(&def); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+			return
+		}
+		if def.TaskID == "" {
+			writeError(w, http.StatusBadRequest, "task_id is required")
+			return
+		}
+		if def.Kind == "" {
+			writeError(w, http.StatusBadRequest, "kind is required")
+			return
+		}
+		def.UpdatedAt = time.Now()
+		def.CreatedAt = time.Now()
+		if err := repository.InsertTaskDefinition(r.Context(), def); err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		if _, err := manager.UpsertTaskFromDB(r.Context(), def); err != nil {
+			writeError(w, http.StatusInternalServerError, "task created but failed to start: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, def)
+	})
+
+	mux.HandleFunc("PUT /api/task-defs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		existing, err := repository.GetTaskDefinition(r.Context(), id)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				writeError(w, http.StatusNotFound, "task definition not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		var updated config.TaskDefinition
+		if err := json.NewDecoder(r.Body).Decode(&updated); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+			return
+		}
+		updated.TaskID = existing.TaskID
+		updated.CreatedAt = existing.CreatedAt
+		updated.UpdatedAt = time.Now()
+		if err := repository.UpdateTaskDefinition(r.Context(), updated); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if _, err := manager.UpsertTaskFromDB(r.Context(), updated); err != nil {
+			writeError(w, http.StatusInternalServerError, "task updated but failed to reload: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, updated)
+	})
+
+	mux.HandleFunc("DELETE /api/task-defs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if err := manager.RemoveTaskByID(r.Context(), id); err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		if err := repository.DeleteTaskDefinition(r.Context(), id); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 	})
 
 	if staticDir != "" {
