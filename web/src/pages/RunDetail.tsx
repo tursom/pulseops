@@ -128,7 +128,9 @@ export default function RunDetail() {
     setPreviewLoading(true)
     try {
       const detail = await fetchArtifactDetail(artifactID)
-      const raw = detail.preview_text
+      const artifactData = (detail as unknown as Record<string, unknown>).artifact as Record<string, unknown> | undefined
+      const raw = (artifactData?.preview_text as string) || (detail as unknown as Record<string, unknown>).preview_text as string | undefined
+      const uri = (artifactData?.uri as string) || (detail as unknown as Record<string, unknown>).uri as string || artifactID
       if (!raw) {
         message.info('该产物无可预览的文本内容')
         setPreviewLoading(false)
@@ -141,7 +143,7 @@ export default function RunDetail() {
         // not valid JSON, show raw text
       }
       setPreviewArtifact({
-        title: detail.uri.split('/').pop() || detail.uri,
+        title: uri.split('/').pop() || uri,
         content: formatted,
       })
     } catch (err) {
