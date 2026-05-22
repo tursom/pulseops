@@ -1,6 +1,6 @@
 import { Routes, Route, useNavigate, useLocation } from 'react-router-dom'
 import { Layout, Menu } from 'antd'
-import { DashboardOutlined, UnorderedListOutlined } from '@ant-design/icons'
+import { DashboardOutlined, UnorderedListOutlined, ApartmentOutlined } from '@ant-design/icons'
 import Dashboard from './pages/Dashboard'
 import TaskDetail from './pages/TaskDetail'
 import './App.css'
@@ -10,6 +10,7 @@ const { Sider, Content } = Layout
 const menuItems = [
   { key: '/', icon: <DashboardOutlined />, label: 'Dashboard' },
   { key: '/tasks', icon: <UnorderedListOutlined />, label: 'Tasks' },
+  { key: '/pipeline', icon: <ApartmentOutlined />, label: 'Pipeline' },
 ]
 
 export default function App() {
@@ -49,6 +50,9 @@ export default function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/tasks" element={<Dashboard />} />
             <Route path="/tasks/:id" element={<TaskDetail />} />
+            <Route path="/pipeline" element={<div style={{ padding: 24 }}><h2>Pipeline Editor</h2><p>Coming soon...</p></div>} />
+            <Route path="/task-defs/new" element={<div style={{ padding: 24 }}><h2>Create Task</h2><p>Coming soon...</p></div>} />
+            <Route path="/task-defs/:id/edit" element={<div style={{ padding: 24 }}><h2>Edit Task</h2><p>Coming soon...</p></div>} />
           </Routes>
         </Content>
       </Layout>

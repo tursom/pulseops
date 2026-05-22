@@ -100,6 +100,57 @@ export interface HealthResponse {
   status: string
 }
 
+// === Task definition (DB-backed configuration) ===
+export interface TaskDefinition {
+  task_id: string
+  name: string
+  kind: string
+  enabled: boolean
+  interval: string        // e.g. "30s", empty string if not set
+  cron: string            // e.g. "0 */6 * * *"
+  timeout: string
+  labels: Record<string, string>
+  params: Record<string, unknown>  // driver-specific, heterogeneous
+  trigger: string         // "scheduled" | "manual" | "on_run"
+  watch_task_id: string
+  watch_condition: string
+  trace?: TracePolicy
+  alert?: AlertPolicy
+  created_at: string
+  updated_at: string
+}
+
+// === Trace policy (nested in TaskDefinition) ===
+export interface TracePolicy {
+  enabled: boolean
+  level: string
+  sinks: string[]
+  retain_days: number
+  store_stdout: boolean
+  store_stderr: boolean
+  store_result_payload: boolean
+  max_payload_bytes: number
+  mask_fields: string[]
+}
+
+// === Alert policy (nested in TaskDefinition) ===
+export interface AlertPolicy {
+  consecutive_failures: number
+  channels: string[]
+  recover_notify: boolean
+}
+
+// === Merged task detail (definition + runtime) ===
+export interface TaskDetailResponse {
+  task_id: string
+  name: string
+  kind: string
+  enabled: boolean
+  status: string
+  definition: TaskDefinition
+  runtime: TaskState
+}
+
 // === Reload/enable/disable response ===
 export interface ActionResponse {
   status: string

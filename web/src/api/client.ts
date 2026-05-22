@@ -1,5 +1,6 @@
 import type {
   TaskState,
+  TaskDefinition,
   RunRecord,
   AIAnalysisRecord,
   ArtifactRef,
@@ -100,4 +101,37 @@ export async function enableTask(id: string): Promise<ActionResponse> {
 // POST /api/tasks/{id}/disable
 export async function disableTask(id: string): Promise<ActionResponse> {
   return request<ActionResponse>(`/api/tasks/${encodeURIComponent(id)}/disable`, { method: 'POST' })
+}
+
+// GET /api/task-defs
+export async function fetchTaskDefinitions(): Promise<TaskDefinition[]> {
+  return request<TaskDefinition[]>('/api/task-defs')
+}
+
+// GET /api/task-defs/{id}
+export async function fetchTaskDefinition(id: string): Promise<TaskDefinition> {
+  return request<TaskDefinition>(`/api/task-defs/${encodeURIComponent(id)}`)
+}
+
+// POST /api/task-defs
+export async function createTaskDefinition(def: TaskDefinition): Promise<TaskDefinition> {
+  return request<TaskDefinition>('/api/task-defs', {
+    method: 'POST',
+    body: JSON.stringify(def),
+  })
+}
+
+// PUT /api/task-defs/{id}
+export async function updateTaskDefinition(id: string, def: TaskDefinition): Promise<TaskDefinition> {
+  return request<TaskDefinition>(`/api/task-defs/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(def),
+  })
+}
+
+// DELETE /api/task-defs/{id}
+export async function deleteTaskDefinition(id: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/task-defs/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  })
 }
