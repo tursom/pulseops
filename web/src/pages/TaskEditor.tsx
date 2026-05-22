@@ -13,6 +13,10 @@ import TaskForm from '../components/task-form/TaskForm'
 
 const { Title } = Typography
 
+function generateTaskId(): string {
+  return `task-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+}
+
 function recordToFormList(
   rec: Record<string, string> | undefined,
 ): { key: string; value: string }[] {
@@ -83,7 +87,7 @@ export default function TaskEditor() {
     if (isEdit) {
       loadTaskDef()
     } else {
-      const initial: Record<string, unknown> = { enabled: true, trigger: 'scheduled' }
+      const initial: Record<string, unknown> = { task_id: generateTaskId(), enabled: true, trigger: 'scheduled' }
       if (pipelineId) {
         initial.pipeline_id = pipelineId
       }

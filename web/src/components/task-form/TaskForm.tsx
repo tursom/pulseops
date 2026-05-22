@@ -141,16 +141,8 @@ export default function TaskForm({
     >
       {/* a) 基本信息 */}
       <Card title="基本信息" style={{ marginBottom: 24 }}>
-        <Form.Item
-          name="task_id"
-          label="任务ID"
-          rules={
-            mode === 'create'
-              ? [{ required: true, message: '请输入任务ID' }]
-              : []
-          }
-        >
-          <Input disabled={mode === 'edit'} placeholder="如 my-health-check" />
+        <Form.Item name="task_id" label="任务ID">
+          <Input disabled placeholder="自动生成" />
         </Form.Item>
 
         <Form.Item

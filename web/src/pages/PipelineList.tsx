@@ -9,6 +9,10 @@ import styles from './PipelineList.module.css'
 
 const { Title, Text } = Typography
 
+function generatePipelineId(): string {
+  return `pipe-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+}
+
 export default function PipelineList() {
   const navigate = useNavigate()
   const [pipelines, setPipelines] = useState<Pipeline[]>([])
@@ -49,6 +53,7 @@ export default function PipelineList() {
   const handleCreate = () => {
     setEditingPipeline(null)
     form.resetFields()
+    form.setFieldsValue({ id: generatePipelineId() })
     setModalOpen(true)
   }
 
@@ -209,15 +214,8 @@ export default function PipelineList() {
         destroyOnClose
       >
         <Form form={form} layout="vertical" preserve={false}>
-          <Form.Item
-            name="id"
-            label="管道ID"
-            rules={[
-              { required: true, message: '请输入管道ID' },
-              { pattern: /^[a-zA-Z0-9]+$/, message: '仅支持英文字母和数字' },
-            ]}
-          >
-            <Input placeholder="英文字母和数字组成的唯一标识" disabled={!!editingPipeline} />
+          <Form.Item name="id" label="管道ID">
+            <Input disabled />
           </Form.Item>
           <Form.Item
             name="name"
