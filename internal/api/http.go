@@ -96,28 +96,7 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 			writeError(w, http.StatusBadRequest, `query param "source" required: payload, summary, or record`)
 			return
 		}
-		taskID := r.PathValue("id")
-		def, err := repository.GetTaskDefinition(r.Context(), taskID)
-		if err != nil && err != sql.ErrNoRows {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if def == nil {
-			writeError(w, http.StatusNotFound, "task definition not found")
-			return
-		}
-		if len(def.ParamsJSON) > 0 {
-			json.Unmarshal(def.ParamsJSON, &def.Params)
-		}
-		upstreamTaskID, _ := def.Params["source_task_id"].(string)
-		if upstreamTaskID == "" {
-			upstreamTaskID = def.WatchTaskID
-		}
-		if upstreamTaskID == "" {
-			writeError(w, http.StatusBadRequest, "no upstream task configured")
-			return
-		}
-		resp, err := task.FetchSampleData(r.Context(), repository, upstreamTaskID, source)
+		resp, err := task.FetchSampleData(r.Context(), repository, r.PathValue("id"), source)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
