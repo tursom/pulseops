@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Typography, Button, Space, Input, Select, Table, Tag, Switch, Spin, Alert, Empty, message } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { ReloadOutlined, PlayCircleOutlined, PauseCircleOutlined, ThunderboltOutlined } from '@ant-design/icons'
-import { Link } from 'react-router-dom'
+import { ReloadOutlined, PlayCircleOutlined, PauseCircleOutlined, ThunderboltOutlined, EditOutlined } from '@ant-design/icons'
+import { Link, useNavigate } from 'react-router-dom'
 import { fetchTasks, triggerTaskRun, enableTask, disableTask } from '../api/client'
 import type { TaskState } from '../api/types'
 
@@ -27,6 +27,7 @@ const RUN_STATUS_COLORS: Record<string, string> = {
 }
 
 export default function TaskList() {
+  const navigate = useNavigate()
   const [tasks, setTasks] = useState<TaskState[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -249,6 +250,13 @@ export default function TaskList() {
             onClick={() => handleRunNow(record.task_id)}
           >
             立即执行
+          </Button>
+          <Button
+            size="small"
+            icon={<EditOutlined />}
+            onClick={() => navigate(`/task-defs/${encodeURIComponent(record.task_id)}/edit`)}
+          >
+            编辑
           </Button>
         </div>
       ),

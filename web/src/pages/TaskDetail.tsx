@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, Link, useNavigate } from 'react-router-dom'
 import {
   Spin,
   Alert,
@@ -17,7 +17,7 @@ import {
   message,
 } from 'antd'
 import type { TableColumnsType } from 'antd'
-import { PlayCircleOutlined, ArrowLeftOutlined } from '@ant-design/icons'
+import { PlayCircleOutlined, ArrowLeftOutlined, EditOutlined } from '@ant-design/icons'
 import {
   fetchTask,
   fetchTaskRuns,
@@ -48,6 +48,7 @@ const CHAR_LIMIT = 500
 
 export default function TaskDetail() {
   const { id } = useParams<{ id: string }>()
+  const navigate = useNavigate()
 
   const [task, setTask] = useState<TaskState | null>(null)
   const [runs, setRuns] = useState<RunRecord[]>([])
@@ -376,6 +377,12 @@ export default function TaskDetail() {
               loading={actionLoading}
             >
               立即执行
+            </Button>
+            <Button
+              icon={<EditOutlined />}
+              onClick={() => navigate(`/task-defs/${encodeURIComponent(id!)}/edit`)}
+            >
+              编辑
             </Button>
           </Space>
         </div>
