@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"pulseops/internal/config"
+
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -90,6 +92,11 @@ type Repository interface {
 	ListAIAnalyses(ctx context.Context, taskID string, limit int) ([]AIAnalysisRecord, error)
 	GetMeta(ctx context.Context, key string) (string, error)
 	SetMeta(ctx context.Context, key, value string) error
+	ListTaskDefinitions(ctx context.Context) ([]config.TaskDefinition, error)
+	GetTaskDefinition(ctx context.Context, taskID string) (*config.TaskDefinition, error)
+	InsertTaskDefinition(ctx context.Context, def config.TaskDefinition) error
+	UpdateTaskDefinition(ctx context.Context, def config.TaskDefinition) error
+	DeleteTaskDefinition(ctx context.Context, taskID string) error
 }
 
 type PostgresStore struct {
@@ -532,6 +539,109 @@ func (s *PostgresStore) SetMeta(ctx context.Context, key, value string) error {
 	)
 	if err != nil {
 		return fmt.Errorf("set meta %s: %w", key, err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) ListTaskDefinitions(ctx context.Context) ([]config.TaskDefinition, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT task_id, name, kind, enabled, interval, cron, timeout,
+		       labels_json, params_json, trigger, watch_task_id, watch_condition,
+		       trace_json, alert_json, created_at, updated_at
+		FROM task_definitions ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("list task definitions: %w", err)
+	}
+	defer rows.Close()
+	var defs []config.TaskDefinition
+	for rows.Next() {
+		var d config.TaskDefinition
+		if err := rows.Scan(&d.TaskID, &d.Name, &d.Kind, &d.Enabled,
+			&d.Interval, &d.Cron, &d.Timeout,
+			&d.LabelsJSON, &d.ParamsJSON, &d.Trigger, &d.WatchTaskID, &d.WatchCondition,
+			&d.TraceJSON, &d.AlertJSON, &d.CreatedAt, &d.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan task definition: %w", err)
+		}
+		if len(d.LabelsJSON) > 0 {
+			_ = json.Unmarshal(d.LabelsJSON, &d.Labels)
+		}
+		if len(d.ParamsJSON) > 0 {
+			_ = json.Unmarshal(d.ParamsJSON, &d.Params)
+		}
+		defs = append(defs, d)
+	}
+	return defs, rows.Err()
+}
+
+func (s *PostgresStore) GetTaskDefinition(ctx context.Context, taskID string) (*config.TaskDefinition, error) {
+	var d config.TaskDefinition
+	err := s.db.QueryRowContext(ctx, `
+		SELECT task_id, name, kind, enabled, interval, cron, timeout,
+		       labels_json, params_json, trigger, watch_task_id, watch_condition,
+		       trace_json, alert_json, created_at, updated_at
+		FROM task_definitions
+		WHERE task_id = $1
+	`, taskID).Scan(&d.TaskID, &d.Name, &d.Kind, &d.Enabled,
+		&d.Interval, &d.Cron, &d.Timeout,
+		&d.LabelsJSON, &d.ParamsJSON, &d.Trigger, &d.WatchTaskID, &d.WatchCondition,
+		&d.TraceJSON, &d.AlertJSON, &d.CreatedAt, &d.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("task definition %s: %w", taskID, sql.ErrNoRows)
+		}
+		return nil, fmt.Errorf("get task definition %s: %w", taskID, err)
+	}
+	if len(d.LabelsJSON) > 0 {
+		_ = json.Unmarshal(d.LabelsJSON, &d.Labels)
+	}
+	if len(d.ParamsJSON) > 0 {
+		_ = json.Unmarshal(d.ParamsJSON, &d.Params)
+	}
+	return &d, nil
+}
+
+func (s *PostgresStore) InsertTaskDefinition(ctx context.Context, def config.TaskDefinition) error {
+	now := time.Now()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO task_definitions (
+			task_id, name, kind, enabled, interval, cron, timeout,
+			labels_json, params_json, trigger, watch_task_id, watch_condition,
+			trace_json, alert_json, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13::jsonb, $14::jsonb, $15, $15)
+	`, def.TaskID, def.Name, def.Kind, def.Enabled,
+		def.Interval, def.Cron, def.Timeout,
+		string(def.LabelsJSON), string(def.ParamsJSON), def.Trigger, def.WatchTaskID, def.WatchCondition,
+		string(def.TraceJSON), string(def.AlertJSON), now)
+	if err != nil {
+		return fmt.Errorf("insert task definition %s: %w", def.TaskID, err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) UpdateTaskDefinition(ctx context.Context, def config.TaskDefinition) error {
+	now := time.Now()
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE task_definitions SET
+			name = $2, kind = $3, enabled = $4, interval = $5, cron = $6, timeout = $7,
+			labels_json = $8::jsonb, params_json = $9::jsonb, trigger = $10,
+			watch_task_id = $11, watch_condition = $12,
+			trace_json = $13::jsonb, alert_json = $14::jsonb, updated_at = $15
+		WHERE task_id = $1
+	`, def.TaskID, def.Name, def.Kind, def.Enabled,
+		def.Interval, def.Cron, def.Timeout,
+		string(def.LabelsJSON), string(def.ParamsJSON), def.Trigger,
+		def.WatchTaskID, def.WatchCondition,
+		string(def.TraceJSON), string(def.AlertJSON), now)
+	if err != nil {
+		return fmt.Errorf("update task definition %s: %w", def.TaskID, err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteTaskDefinition(ctx context.Context, taskID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM task_definitions WHERE task_id = $1`, taskID)
+	if err != nil {
+		return fmt.Errorf("delete task definition %s: %w", taskID, err)
 	}
 	return nil
 }

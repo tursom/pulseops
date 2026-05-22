@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -138,6 +139,103 @@ type AlertPolicy struct {
 	ConsecutiveFailures int      `toml:"consecutive_failures" json:"consecutive_failures"`
 	Channels            []string `toml:"channels" json:"channels"`
 	RecoverNotify       bool     `toml:"recover_notify" json:"recover_notify"`
+}
+
+type TaskDefinition struct {
+	TaskID         string            `json:"task_id" db:"task_id"`
+	Name           string            `json:"name" db:"name"`
+	Kind           string            `json:"kind" db:"kind"`
+	Enabled        bool              `json:"enabled" db:"enabled"`
+	Interval       string            `json:"interval" db:"interval"`
+	Cron           string            `json:"cron" db:"cron"`
+	Timeout        string            `json:"timeout" db:"timeout"`
+	Labels         map[string]string `json:"labels" db:"-"`
+	LabelsJSON     []byte            `json:"-" db:"labels_json"`
+	Params         map[string]any    `json:"params" db:"-"`
+	ParamsJSON     []byte            `json:"-" db:"params_json"`
+	Trigger        string            `json:"trigger" db:"trigger"`
+	WatchTaskID    string            `json:"watch_task_id" db:"watch_task_id"`
+	WatchCondition string            `json:"watch_condition" db:"watch_condition"`
+	TraceJSON      []byte            `json:"-" db:"trace_json"`
+	AlertJSON      []byte            `json:"-" db:"alert_json"`
+	CreatedAt      time.Time         `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at" db:"updated_at"`
+}
+
+func (d *TaskDefinition) ToTaskSpec() (TaskSpec, error) {
+	spec := TaskSpec{
+		ID:             d.TaskID,
+		Name:           d.Name,
+		Kind:           d.Kind,
+		Enabled:        d.Enabled,
+		Cron:           d.Cron,
+		Trigger:        d.Trigger,
+		WatchTaskID:    d.WatchTaskID,
+		WatchCondition: d.WatchCondition,
+	}
+	if d.Interval != "" {
+		if err := spec.Interval.UnmarshalText([]byte(d.Interval)); err != nil {
+			return spec, fmt.Errorf("parse interval: %w", err)
+		}
+	}
+	if d.Timeout != "" {
+		if err := spec.Timeout.UnmarshalText([]byte(d.Timeout)); err != nil {
+			return spec, fmt.Errorf("parse timeout: %w", err)
+		}
+	}
+	if len(d.LabelsJSON) > 0 {
+		spec.Labels = map[string]string{}
+		if err := json.Unmarshal(d.LabelsJSON, &spec.Labels); err != nil {
+			return spec, fmt.Errorf("unmarshal labels: %w", err)
+		}
+	}
+	if len(d.ParamsJSON) > 0 {
+		spec.Params = map[string]any{}
+		if err := json.Unmarshal(d.ParamsJSON, &spec.Params); err != nil {
+			return spec, fmt.Errorf("unmarshal params: %w", err)
+		}
+	}
+	if len(d.TraceJSON) > 0 {
+		if err := json.Unmarshal(d.TraceJSON, &spec.Trace); err != nil {
+			return spec, fmt.Errorf("unmarshal trace: %w", err)
+		}
+	}
+	if len(d.AlertJSON) > 0 {
+		if err := json.Unmarshal(d.AlertJSON, &spec.Alert); err != nil {
+			return spec, fmt.Errorf("unmarshal alert: %w", err)
+		}
+	}
+	return spec, nil
+}
+
+func FromTaskSpec(spec TaskSpec) TaskDefinition {
+	d := TaskDefinition{
+		TaskID:         spec.ID,
+		Name:           spec.Name,
+		Kind:           spec.Kind,
+		Enabled:        spec.Enabled,
+		Interval:       spec.Interval.String(),
+		Cron:           spec.Cron,
+		Timeout:        spec.Timeout.String(),
+		Trigger:        spec.Trigger,
+		WatchTaskID:    spec.WatchTaskID,
+		WatchCondition: spec.WatchCondition,
+	}
+	if labelsJSON, err := json.Marshal(spec.Labels); err == nil && string(labelsJSON) != "null" {
+		d.LabelsJSON = labelsJSON
+		d.Labels = spec.Labels
+	}
+	if paramsJSON, err := json.Marshal(spec.Params); err == nil && string(paramsJSON) != "null" {
+		d.ParamsJSON = paramsJSON
+		d.Params = spec.Params
+	}
+	if traceJSON, err := json.Marshal(spec.Trace); err == nil && string(traceJSON) != "null" {
+		d.TraceJSON = traceJSON
+	}
+	if alertJSON, err := json.Marshal(spec.Alert); err == nil && string(alertJSON) != "null" {
+		d.AlertJSON = alertJSON
+	}
+	return d
 }
 
 func (cfg *Config) Normalize() {
