@@ -63,6 +63,42 @@ function formatBytes(bytes: number): string {
   return `${mb.toFixed(1)} MB`
 }
 
+const jsonKeyColor = '#881280'
+const jsonStringColor = '#1a8000'
+const jsonNumberColor = '#1750ac'
+const jsonBooleanColor = '#b22452'
+const jsonNullColor = '#808080'
+
+function renderHighlightedJson(text: string): React.ReactNode {
+  const lines = text.split('\n')
+  return (
+    <code style={{ fontFamily: 'ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace', fontSize: 13, lineHeight: '1.5', whiteSpace: 'pre' }}>
+      {lines.map((line, i) => {
+        const indent = line.match(/^(\s*)/)?.[0] || ''
+        const content = line.slice(indent.length)
+        const highlighted = content
+          .replace(/(:\s*)("(?:[^"\\]|\\.)*")/g, (_m, prefix, str) => `${prefix}<span style="color:${jsonStringColor}">${str}</span>`)
+          .replace(/("(?:[^"\\]|\\.)*")(\s*:)/g, (_m, key, suffix) => `<span style="color:${jsonKeyColor}">${key}</span>${suffix}`)
+          .replace(/(?<!")(\b-?\d+\.?\d*(?:[eE][+-]?\d+)?\b)(?!\s*")/g, (_m, num) => {
+            if (_m.includes('span')) return _m
+            return `<span style="color:${jsonNumberColor}">${num}</span>`
+          })
+          .replace(/\b(true|false)\b/g, `<span style="color:${jsonBooleanColor}">$1</span>`)
+          .replace(/\bnull\b/g, `<span style="color:${jsonNullColor}">null</span>`)
+        return (
+          <div key={i} style={{ display: 'flex' }}>
+            <span style={{ color: '#aaa', userSelect: 'none', minWidth: '3em', textAlign: 'right', marginRight: '1em' }}>{i + 1}</span>
+            <span>
+              <span style={{ whiteSpace: 'pre' }}>{indent}</span>
+              <span dangerouslySetInnerHTML={{ __html: highlighted }} />
+            </span>
+          </div>
+        )
+      })}
+    </code>
+  )
+}
+
 export default function RunDetail() {
   const { id, runId } = useParams<{ id: string; runId: string }>()
 
@@ -551,10 +587,11 @@ export default function RunDetail() {
       onCancel={() => setPreviewArtifact(null)}
       footer={null}
       width={800}
+      styles={{ body: { padding: 0 } }}
     >
-      <pre style={{ maxHeight: 500, overflow: 'auto', background: '#f5f5f5', padding: 16, borderRadius: 8, fontSize: 13, margin: 0 }}>
-        {previewArtifact?.content}
-      </pre>
+      <div style={{ maxHeight: 500, overflow: 'auto', background: '#f8f8f8', padding: 16, borderRadius: '0 0 8px 8px', fontSize: 13 }}>
+        {previewArtifact?.content ? renderHighlightedJson(previewArtifact.content) : null}
+      </div>
     </Modal>
   </>
   )
