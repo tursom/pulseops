@@ -383,6 +383,11 @@ func TestDataSourceNames(t *testing.T) {
 	if !ok || s.Name() != "http_call" {
 		t.Fatal("http_call source not registered")
 	}
+
+	s, ok = reg.Get("upstream_output")
+	if !ok || s.Name() != "upstream_output" {
+		t.Fatal("upstream_output source not registered")
+	}
 }
 
 func TestDriverValidateAliasCollision(t *testing.T) {

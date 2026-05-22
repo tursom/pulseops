@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
@@ -49,6 +50,7 @@ func (r *DataSourceRegistry) registerBuiltins() {
 	r.Register("run_history", &runHistorySource{})
 	r.Register("previous_analysis", &previousAnalysisSource{})
 	r.Register("http_call", &httpCallSource{})
+	r.Register("upstream_output", &upstreamOutputSource{})
 }
 
 type runContextSource struct{}
@@ -111,4 +113,30 @@ func (s *previousAnalysisSource) Fetch(ctx context.Context, spec DataSourceSpec,
 		limit = int(l)
 	}
 	return deps.DBRepository.ListAIAnalyses(ctx, taskID, limit)
+}
+
+type upstreamOutputSource struct{}
+
+func (s *upstreamOutputSource) Name() string { return "upstream_output" }
+
+func (s *upstreamOutputSource) Fetch(ctx context.Context, spec DataSourceSpec, deps FetchDeps) (any, error) {
+	if deps.TriggerRun == nil {
+		return nil, fmt.Errorf("upstream_output requires a trigger run context (task must be triggered by an upstream task)")
+	}
+	result := map[string]any{
+		"run_id":       deps.TriggerRun.RunID,
+		"task_id":      deps.TriggerRun.TaskID,
+		"run_status":   deps.TriggerRun.RunStatus,
+		"check_status": deps.TriggerRun.CheckStatus,
+		"summary":      deps.TriggerRun.Summary,
+	}
+	if len(deps.TriggerRun.Payload) > 0 {
+		var payload any
+		if err := json.Unmarshal(deps.TriggerRun.Payload, &payload); err == nil {
+			result["payload"] = payload
+		} else {
+			result["payload"] = string(deps.TriggerRun.Payload)
+		}
+	}
+	return result, nil
 }

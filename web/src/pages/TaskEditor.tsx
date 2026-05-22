@@ -103,6 +103,14 @@ export default function TaskEditor() {
       if (upstreamTaskId) {
         initial.trigger = 'on_run'
         initial.watch_task_id = upstreamTaskId
+        // Auto-add upstream_output data source for AI analysis tasks
+        if (initialKind === 'ai_analyze') {
+          initial.params = {
+            data_sources: [
+              { type: 'upstream_output', alias: 'upstream', on_error: 'fail' },
+            ],
+          }
+        }
       }
       if (pipelineId) {
         initial.pipeline_id = pipelineId
