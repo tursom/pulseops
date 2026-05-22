@@ -38,6 +38,16 @@ const KIND_ICONS: Record<string, React.ReactNode> = {
   data_process: <SwapOutlined />,
 }
 
+const KIND_LABELS: Record<string, string> = {
+  http_check: 'HTTP 检查',
+  tcp_check: 'TCP 检查',
+  script_exec: '脚本执行',
+  scenario_check: '场景检查',
+  process_check: '进程检查',
+  ai_analyze: 'AI 分析',
+  data_process: '数据处理',
+}
+
 const STATUS_DOT_COLORS: Record<string, string> = {
   running: '#52c41a',
   loaded: '#1890ff',
@@ -181,7 +191,7 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
             }}
             icon={KIND_ICONS[kind]}
           >
-            {kind}
+            {KIND_LABELS[kind] || kind}
           </Tag>
         </div>
 

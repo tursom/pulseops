@@ -16,6 +16,16 @@ const KIND_COLORS: Record<string, string> = {
   data_process: 'gold',
 }
 
+const KIND_LABELS: Record<string, string> = {
+  http_check: 'HTTP 检查',
+  script_exec: '脚本执行',
+  data_compare: '数据对比',
+  schema_check: '格式检查',
+  custom: '自定义',
+  ai_analyze: 'AI 分析',
+  data_process: '数据处理',
+}
+
 const STATUS_COLORS: Record<string, string> = {
   running: 'green',
   loaded: 'blue',
@@ -193,9 +203,9 @@ export default function TaskList() {
       dataIndex: 'kind',
       key: 'kind',
       render: (kind: string) => (
-        <Tag color={KIND_COLORS[kind] || 'default'}>{kind}</Tag>
+        <Tag color={KIND_COLORS[kind] || 'default'}>{KIND_LABELS[kind] || kind}</Tag>
       ),
-      filters: Object.keys(KIND_COLORS).map((k) => ({ text: k, value: k })),
+      filters: Object.keys(KIND_COLORS).map((k) => ({ text: KIND_LABELS[k] || k, value: k })),
       onFilter: (value, record) => record.kind === value,
     },
     {
@@ -326,7 +336,7 @@ export default function TaskList() {
             onChange={(v) => setKindFilter(v as string | undefined)}
             allowClear
             style={{ width: 140 }}
-            options={Object.keys(KIND_COLORS).map((k) => ({ label: k, value: k }))}
+            options={Object.keys(KIND_COLORS).map((k) => ({ label: KIND_LABELS[k] || k, value: k }))}
           />
           <Select
             placeholder="状态"
