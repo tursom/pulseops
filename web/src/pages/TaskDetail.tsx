@@ -338,10 +338,10 @@ export default function TaskDetail() {
   return (
     <div>
       <div style={{ marginBottom: 24 }}>
-        <Link to="/" style={{ display: 'inline-block', marginBottom: 12 }}>
+        <Link to="/tasks" style={{ display: 'inline-block', marginBottom: 12 }}>
           <Space>
             <ArrowLeftOutlined />
-            <span>返回仪表盘</span>
+            <span>返回任务列表</span>
           </Space>
         </Link>
 

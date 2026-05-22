@@ -2,6 +2,7 @@ import { Routes, Route, useNavigate, useLocation } from 'react-router-dom'
 import { Layout, Menu } from 'antd'
 import { DashboardOutlined, UnorderedListOutlined, ApartmentOutlined, SettingOutlined } from '@ant-design/icons'
 import Dashboard from './pages/Dashboard'
+import TaskList from './pages/TaskList'
 import TaskDetail from './pages/TaskDetail'
 import TaskEditor from './pages/TaskEditor'
 import PipelineList from './pages/PipelineList'
@@ -53,7 +54,7 @@ export default function App() {
         <Content style={{ padding: 24 }}>
           <Routes>
             <Route path="/" element={<Dashboard />} />
-            <Route path="/tasks" element={<Dashboard />} />
+            <Route path="/tasks" element={<TaskList />} />
             <Route path="/tasks/:id" element={<TaskDetail />} />
             <Route path="/pipelines" element={<PipelineList />} />
             <Route path="/pipelines/:id" element={<PipelineEditor />} />
