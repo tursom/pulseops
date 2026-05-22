@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"pulseops/internal/config"
@@ -92,6 +93,8 @@ type Repository interface {
 	ListAIAnalyses(ctx context.Context, taskID string, limit int) ([]AIAnalysisRecord, error)
 	GetMeta(ctx context.Context, key string) (string, error)
 	SetMeta(ctx context.Context, key, value string) error
+	LoadGlobalSettings(ctx context.Context) (config.GlobalSettings, error)
+	SaveGlobalSettings(ctx context.Context, s config.GlobalSettings) error
 	ListTaskDefinitions(ctx context.Context) ([]config.TaskDefinition, error)
 	GetTaskDefinition(ctx context.Context, taskID string) (*config.TaskDefinition, error)
 	InsertTaskDefinition(ctx context.Context, def config.TaskDefinition) error
@@ -547,6 +550,36 @@ func (s *PostgresStore) SetMeta(ctx context.Context, key, value string) error {
 	)
 	if err != nil {
 		return fmt.Errorf("set meta %s: %w", key, err)
+	}
+	return nil
+}
+
+const (
+	settingsKeySinks      = "trace_sinks"
+	settingsKeyMaxBytes   = "trace_max_payload_bytes"
+	settingsKeyRetainDays = "trace_default_retain_days"
+)
+
+func (s *PostgresStore) LoadGlobalSettings(ctx context.Context) (config.GlobalSettings, error) {
+	sinksRaw, _ := s.GetMeta(ctx, settingsKeySinks)
+	maxBytesRaw, _ := s.GetMeta(ctx, settingsKeyMaxBytes)
+	retainDaysRaw, _ := s.GetMeta(ctx, settingsKeyRetainDays)
+	return config.ParseGlobalSettings(sinksRaw, maxBytesRaw, retainDaysRaw), nil
+}
+
+func (s *PostgresStore) SaveGlobalSettings(ctx context.Context, gs config.GlobalSettings) error {
+	sinksJSON, err := json.Marshal(gs.Sinks)
+	if err != nil {
+		return err
+	}
+	if err := s.SetMeta(ctx, settingsKeySinks, string(sinksJSON)); err != nil {
+		return err
+	}
+	if err := s.SetMeta(ctx, settingsKeyMaxBytes, strconv.Itoa(gs.MaxPayloadBytes)); err != nil {
+		return err
+	}
+	if err := s.SetMeta(ctx, settingsKeyRetainDays, strconv.Itoa(gs.DefaultRetainDays)); err != nil {
+		return err
 	}
 	return nil
 }

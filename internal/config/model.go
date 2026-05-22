@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -102,6 +103,40 @@ type SinkConfig struct {
 	Timeout Duration `toml:"timeout"`
 }
 
+type SinkEntry struct {
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`
+	URL     string `json:"url,omitempty"`
+	Timeout string `json:"timeout,omitempty"`
+}
+
+type GlobalSettings struct {
+	Sinks             []SinkEntry `json:"sinks"`
+	MaxPayloadBytes   int         `json:"max_payload_bytes"`
+	DefaultRetainDays int         `json:"default_retain_days"`
+}
+
+func ParseGlobalSettings(sinksRaw, maxBytesRaw, retainDaysRaw string) GlobalSettings {
+	s := GlobalSettings{
+		MaxPayloadBytes:   4096,
+		DefaultRetainDays: 30,
+	}
+	if sinksRaw != "" {
+		json.Unmarshal([]byte(sinksRaw), &s.Sinks)
+	}
+	if maxBytesRaw != "" {
+		if n, err := strconv.Atoi(maxBytesRaw); err == nil {
+			s.MaxPayloadBytes = n
+		}
+	}
+	if retainDaysRaw != "" {
+		if n, err := strconv.Atoi(retainDaysRaw); err == nil {
+			s.DefaultRetainDays = n
+		}
+	}
+	return s
+}
+
 type TaskSpec struct {
 	ID       string            `toml:"id" json:"id"`
 	Name     string            `toml:"name" json:"name"`
@@ -124,15 +159,9 @@ type TaskSpec struct {
 }
 
 type TracePolicy struct {
-	Enabled            bool     `toml:"enabled" json:"enabled"`
-	Level              string   `toml:"level" json:"level"`
-	Sinks              []string `toml:"sinks" json:"sinks"`
-	RetainDays         int      `toml:"retain_days" json:"retain_days"`
-	StoreStdout        bool     `toml:"store_stdout" json:"store_stdout"`
-	StoreStderr        bool     `toml:"store_stderr" json:"store_stderr"`
-	StoreResultPayload bool     `toml:"store_result_payload" json:"store_result_payload"`
-	MaxPayloadBytes    int      `toml:"max_payload_bytes" json:"max_payload_bytes"`
-	MaskFields         []string `toml:"mask_fields" json:"mask_fields"`
+	Level      string   `toml:"level" json:"level"`
+	RetainDays int      `toml:"retain_days" json:"retain_days"`
+	MaskFields []string `toml:"mask_fields" json:"mask_fields"`
 }
 
 type AlertPolicy struct {
@@ -341,18 +370,6 @@ func (spec *TaskSpec) Normalize(global Config) {
 	}
 	if spec.Trace.Level == "" {
 		spec.Trace.Level = global.Task.DefaultTraceLevel
-	}
-	if spec.Trace.MaxPayloadBytes == 0 {
-		spec.Trace.MaxPayloadBytes = 4096
-	}
-	if spec.Trace.Level != "" || len(spec.Trace.Sinks) > 0 || spec.Trace.StoreResultPayload || spec.Trace.StoreStdout || spec.Trace.StoreStderr {
-		spec.Trace.Enabled = true
-	}
-	if spec.Trace.Enabled && len(spec.Trace.Sinks) == 0 {
-		for name := range global.Trace.Sinks {
-			spec.Trace.Sinks = append(spec.Trace.Sinks, name)
-			break
-		}
 	}
 	if spec.Trigger == "" {
 		spec.Trigger = "scheduled"

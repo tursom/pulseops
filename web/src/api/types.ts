@@ -123,15 +123,24 @@ export interface TaskDefinition {
 
 // === Trace policy (nested in TaskDefinition) ===
 export interface TracePolicy {
-  enabled: boolean
   level: string
-  sinks: string[]
   retain_days: number
-  store_stdout: boolean
-  store_stderr: boolean
-  store_result_payload: boolean
-  max_payload_bytes: number
   mask_fields: string[]
+}
+
+// === Sink entry ===
+export interface SinkEntry {
+  name: string
+  kind: 'postgres' | 'webhook'
+  url?: string
+  timeout?: string
+}
+
+// === Global settings ===
+export interface GlobalSettings {
+  sinks: SinkEntry[]
+  max_payload_bytes: number
+  default_retain_days: number
 }
 
 // === Alert policy (nested in TaskDefinition) ===

@@ -418,6 +418,28 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "unassigned", "task_id": taskID})
 	})
 
+	mux.HandleFunc("GET /api/settings", func(w http.ResponseWriter, r *http.Request) {
+		settings, err := repository.LoadGlobalSettings(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, settings)
+	})
+
+	mux.HandleFunc("PUT /api/settings", func(w http.ResponseWriter, r *http.Request) {
+		var updated config.GlobalSettings
+		if err := json.NewDecoder(r.Body).Decode(&updated); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+			return
+		}
+		if err := repository.SaveGlobalSettings(r.Context(), updated); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, updated)
+	})
+
 	if staticDir != "" {
 		fs := http.FileServer(http.Dir(staticDir))
 

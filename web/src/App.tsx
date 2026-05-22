@@ -1,11 +1,12 @@
 import { Routes, Route, useNavigate, useLocation } from 'react-router-dom'
 import { Layout, Menu } from 'antd'
-import { DashboardOutlined, UnorderedListOutlined, ApartmentOutlined } from '@ant-design/icons'
+import { DashboardOutlined, UnorderedListOutlined, ApartmentOutlined, SettingOutlined } from '@ant-design/icons'
 import Dashboard from './pages/Dashboard'
 import TaskDetail from './pages/TaskDetail'
 import TaskEditor from './pages/TaskEditor'
 import PipelineList from './pages/PipelineList'
 import PipelineEditor from './pages/PipelineEditor'
+import Settings from './pages/Settings'
 import './App.css'
 
 const { Sider, Content } = Layout
@@ -14,6 +15,7 @@ const menuItems = [
   { key: '/', icon: <DashboardOutlined />, label: '仪表盘' },
   { key: '/tasks', icon: <UnorderedListOutlined />, label: '任务列表' },
   { key: '/pipelines', icon: <ApartmentOutlined />, label: '流水线' },
+  { key: '/settings', icon: <SettingOutlined />, label: '设置' },
 ]
 
 export default function App() {
@@ -57,6 +59,7 @@ export default function App() {
             <Route path="/pipelines/:id" element={<PipelineEditor />} />
             <Route path="/task-defs/new" element={<TaskEditor />} />
             <Route path="/task-defs/:id/edit" element={<TaskEditor />} />
+            <Route path="/settings" element={<Settings />} />
           </Routes>
         </Content>
       </Layout>

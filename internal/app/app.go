@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"time"
 
 	"pulseops/internal/ai"
 	"pulseops/internal/api"
@@ -40,27 +41,58 @@ func New(ctx context.Context, baseDir, configPath, staticDir string, logger *slo
 		_ = stateStore.Close()
 		return nil, err
 	}
-	traceManager := trace.NewManager(logger, artifactStore)
-	hasPostgresSink := false
-	for name, sinkCfg := range cfg.Trace.Sinks {
-		switch sinkCfg.Kind {
-		case "postgres":
-			if sinkCfg.DSN != "" && sinkCfg.DSN != cfg.State.DSN {
-				_ = stateStore.Close()
-				return nil, fmt.Errorf("trace sink %s dsn must match state.dsn", name)
+	traceManager := trace.NewManager(logger, artifactStore, 4096)
+	// Load settings from DB
+	settings, err := stateStore.LoadGlobalSettings(ctx)
+	if err != nil {
+		logger.WarnContext(ctx, "load global settings failed, using defaults", "err", err)
+		settings = config.GlobalSettings{
+			Sinks:           []config.SinkEntry{{Name: "postgres_main", Kind: "postgres"}},
+			MaxPayloadBytes: 4096,
+		}
+	}
+	// Seed from TOML if DB has no sinks (first run)
+	if len(settings.Sinks) == 0 && len(cfg.Trace.Sinks) > 0 {
+		for name, sinkCfg := range cfg.Trace.Sinks {
+			entry := config.SinkEntry{Name: name, Kind: sinkCfg.Kind}
+			if sinkCfg.Kind == "webhook" {
+				entry.URL = sinkCfg.URL
+				entry.Timeout = sinkCfg.Timeout.String()
 			}
+			settings.Sinks = append(settings.Sinks, entry)
+		}
+		// Persist seeded settings to DB
+		if err := stateStore.SaveGlobalSettings(ctx, settings); err != nil {
+			logger.WarnContext(ctx, "save seeded global settings failed", "err", err)
+		}
+	}
+	// If still no sinks (neither DB nor TOML), create default postgres sink
+	if len(settings.Sinks) == 0 {
+		settings.Sinks = []config.SinkEntry{{Name: "postgres_main", Kind: "postgres"}}
+		if err := stateStore.SaveGlobalSettings(ctx, settings); err != nil {
+			logger.WarnContext(ctx, "save default global settings failed", "err", err)
+		}
+	}
+	// Register sinks and enforce postgres requirement
+	hasPostgresSink := false
+	for _, entry := range settings.Sinks {
+		switch entry.Kind {
+		case "postgres":
 			hasPostgresSink = true
-			traceManager.Register(trace.NewPostgresSink(name, stateStore))
+			traceManager.Register(trace.NewPostgresSink(entry.Name, stateStore))
 		case "webhook":
-			traceManager.Register(trace.NewWebhookSink(name, sinkCfg.URL, sinkCfg.Timeout))
-		default:
-			_ = stateStore.Close()
-			return nil, fmt.Errorf("unsupported trace sink kind %q", sinkCfg.Kind)
+			timeout := 3 * time.Second
+			if entry.Timeout != "" {
+				if d, err := time.ParseDuration(entry.Timeout); err == nil {
+					timeout = d
+				}
+			}
+			traceManager.Register(trace.NewWebhookSink(entry.Name, entry.URL, timeout))
 		}
 	}
 	if !hasPostgresSink {
 		_ = stateStore.Close()
-		return nil, fmt.Errorf("at least one postgres trace sink is required")
+		return nil, fmt.Errorf("at least one postgres trace sink is required — configure in settings page")
 	}
 
 	evaluators := evaluator.NewRegistry()

@@ -9,6 +9,7 @@ import type {
   HealthResponse,
   ActionResponse,
   APIError,
+  GlobalSettings,
 } from './types'
 
 // Generic fetch wrapper
@@ -179,5 +180,16 @@ export async function assignTaskToPipeline(pipelineId: string, taskId: string): 
 export async function unassignTaskFromPipeline(pipelineId: string, taskId: string): Promise<{ status: string }> {
   return request<{ status: string }>(`/api/pipelines/${encodeURIComponent(pipelineId)}/tasks/${encodeURIComponent(taskId)}`, {
     method: 'DELETE',
+  })
+}
+
+export async function fetchSettings(): Promise<GlobalSettings> {
+  return request<GlobalSettings>('/api/settings')
+}
+
+export async function updateSettings(settings: GlobalSettings): Promise<GlobalSettings> {
+  return request<GlobalSettings>('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify(settings),
   })
 }

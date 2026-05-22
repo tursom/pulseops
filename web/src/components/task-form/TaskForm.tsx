@@ -294,64 +294,19 @@ export default function TaskForm({
             label: '追踪策略',
             children: (
               <>
-                <Form.Item
-                  name={['trace', 'enabled']}
-                  label="启用"
-                  valuePropName="checked"
-                >
-                  <Switch />
-                </Form.Item>
-
                 <Form.Item name={['trace', 'level']} label="级别">
                   <Select
                     options={[
-                      { value: 'none', label: 'None' },
-                      { value: 'summary', label: 'Summary' },
-                      { value: 'detail', label: 'Detail' },
-                      { value: 'debug', label: 'Debug' },
+                      { value: 'off', label: '关闭' },
+                      { value: 'summary', label: '摘要' },
+                      { value: 'detail', label: '详细' },
+                      { value: 'debug', label: '调试' },
                     ]}
                   />
                 </Form.Item>
-
-                <Form.Item name={['trace', 'sinks']} label="存储后端">
-                  <Select mode="tags" placeholder="e.g. console, file" />
-                </Form.Item>
-
                 <Form.Item name={['trace', 'retain_days']} label="保留天数">
-                  <InputNumber min={0} style={{ width: '100%' }} />
+                  <InputNumber min={0} style={{ width: '100%' }} placeholder="默认30天" />
                 </Form.Item>
-
-                <Form.Item
-                  name={['trace', 'store_stdout']}
-                  label="存储标准输出"
-                  valuePropName="checked"
-                >
-                  <Switch />
-                </Form.Item>
-
-                <Form.Item
-                  name={['trace', 'store_stderr']}
-                  label="存储标准错误"
-                  valuePropName="checked"
-                >
-                  <Switch />
-                </Form.Item>
-
-                <Form.Item
-                  name={['trace', 'store_result_payload']}
-                  label="存储结果数据"
-                  valuePropName="checked"
-                >
-                  <Switch />
-                </Form.Item>
-
-                <Form.Item
-                  name={['trace', 'max_payload_bytes']}
-                  label="最大数据字节"
-                >
-                  <InputNumber min={0} style={{ width: '100%' }} />
-                </Form.Item>
-
                 <Form.Item name={['trace', 'mask_fields']} label="脱敏字段">
                   <Select mode="tags" placeholder="要脱敏的字段名" />
                 </Form.Item>

@@ -132,6 +132,10 @@ func (r *fakeRepository) ListTaskDefinitionsByPipeline(context.Context, string) 
 func (r *fakeRepository) UpdateTaskPipeline(context.Context, string, *string) error   { return nil }
 func (r *fakeRepository) GetMeta(context.Context, string) (string, error)             { return "", store.ErrMetaNotFound }
 func (r *fakeRepository) SetMeta(context.Context, string, string) error                { return nil }
+func (r *fakeRepository) LoadGlobalSettings(context.Context) (config.GlobalSettings, error) {
+	return config.GlobalSettings{MaxPayloadBytes: 4096}, nil
+}
+func (r *fakeRepository) SaveGlobalSettings(context.Context, config.GlobalSettings) error { return nil }
 
 type fakeArtifactStore struct{}
 

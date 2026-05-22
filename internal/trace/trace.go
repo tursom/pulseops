@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"pulseops/internal/config"
@@ -21,16 +22,22 @@ type Sink interface {
 }
 
 type Manager struct {
-	logger        *slog.Logger
-	sinks         map[string]Sink
-	artifactStore store.ArtifactStore
+	logger          *slog.Logger
+	sinks           map[string]Sink
+	artifactStore   store.ArtifactStore
+	maxPayloadBytes int
+	mu              sync.RWMutex
 }
 
-func NewManager(logger *slog.Logger, artifactStore store.ArtifactStore) *Manager {
+func NewManager(logger *slog.Logger, artifactStore store.ArtifactStore, maxPayloadBytes int) *Manager {
+	if maxPayloadBytes <= 0 {
+		maxPayloadBytes = 4096
+	}
 	return &Manager{
-		logger:        logger,
-		sinks:         map[string]Sink{},
-		artifactStore: artifactStore,
+		logger:          logger,
+		sinks:           map[string]Sink{},
+		artifactStore:   artifactStore,
+		maxPayloadBytes: maxPayloadBytes,
 	}
 }
 
@@ -38,11 +45,13 @@ func (m *Manager) Register(sink Sink) {
 	if sink == nil {
 		return
 	}
+	m.mu.Lock()
 	m.sinks[sink.Name()] = sink
+	m.mu.Unlock()
 }
 
 func (m *Manager) Process(ctx context.Context, policy config.TracePolicy, record store.RunRecord) (store.RunRecord, error) {
-	if !policy.Enabled || strings.EqualFold(policy.Level, "none") {
+	if strings.EqualFold(policy.Level, "off") || strings.EqualFold(policy.Level, "none") {
 		record.Payload = nil
 		record.Stdout = ""
 		record.Stderr = ""
@@ -53,35 +62,39 @@ func (m *Manager) Process(ctx context.Context, policy config.TracePolicy, record
 	if processed.Summary == nil {
 		processed.Summary = map[string]any{}
 	}
+	maxBytes := m.maxPayloadBytes
+	if maxBytes <= 0 {
+		maxBytes = 4096
+	}
 	var errs []error
-	if policy.StoreResultPayload && len(processed.Payload) > 0 && policy.MaxPayloadBytes > 0 && len(processed.Payload) > policy.MaxPayloadBytes {
+	if len(processed.Payload) > maxBytes {
 		artifactRef, err := m.writeArtifact(ctx, processed, "payload", "payload.json", processed.Payload, "application/json")
 		if err != nil {
 			errs = append(errs, err)
 			processed.Summary["artifact_error"] = err.Error()
-			processed.Payload = processed.Payload[:policy.MaxPayloadBytes]
+			processed.Payload = processed.Payload[:maxBytes]
 		} else {
 			processed.ArtifactRefs = append(processed.ArtifactRefs, artifactRef)
 			processed.Payload = nil
 		}
 	}
-	if policy.StoreStdout && policy.MaxPayloadBytes > 0 && len(processed.Stdout) > policy.MaxPayloadBytes {
+	if len(processed.Stdout) > maxBytes {
 		artifactRef, err := m.writeArtifact(ctx, processed, "stdout", "stdout.txt", []byte(processed.Stdout), "text/plain")
 		if err != nil {
 			errs = append(errs, err)
 			processed.Summary["stdout_artifact_error"] = err.Error()
-			processed.Stdout = processed.Stdout[:policy.MaxPayloadBytes]
+			processed.Stdout = processed.Stdout[:maxBytes]
 		} else {
 			processed.ArtifactRefs = append(processed.ArtifactRefs, artifactRef)
 			processed.Stdout = ""
 		}
 	}
-	if policy.StoreStderr && policy.MaxPayloadBytes > 0 && len(processed.Stderr) > policy.MaxPayloadBytes {
+	if len(processed.Stderr) > maxBytes {
 		artifactRef, err := m.writeArtifact(ctx, processed, "stderr", "stderr.txt", []byte(processed.Stderr), "text/plain")
 		if err != nil {
 			errs = append(errs, err)
 			processed.Summary["stderr_artifact_error"] = err.Error()
-			processed.Stderr = processed.Stderr[:policy.MaxPayloadBytes]
+			processed.Stderr = processed.Stderr[:maxBytes]
 		} else {
 			processed.ArtifactRefs = append(processed.ArtifactRefs, artifactRef)
 			processed.Stderr = ""
@@ -91,17 +104,14 @@ func (m *Manager) Process(ctx context.Context, policy config.TracePolicy, record
 }
 
 func (m *Manager) Dispatch(ctx context.Context, policy config.TracePolicy, record store.RunRecord) {
-	if !policy.Enabled || strings.EqualFold(policy.Level, "none") {
+	if strings.EqualFold(policy.Level, "off") || strings.EqualFold(policy.Level, "none") {
 		return
 	}
-	for _, sinkName := range policy.Sinks {
-		sink, ok := m.sinks[sinkName]
-		if !ok {
-			m.logger.WarnContext(ctx, "trace sink not found", "sink", sinkName, "task_id", record.TaskID)
-			continue
-		}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, sink := range m.sinks {
 		if err := sink.Write(ctx, record); err != nil {
-			m.logger.ErrorContext(ctx, "write trace sink failed", "sink", sinkName, "task_id", record.TaskID, "err", err)
+			m.logger.ErrorContext(ctx, "write trace sink failed", "sink", sink.Name(), "task_id", record.TaskID, "err", err)
 		}
 	}
 }
@@ -116,32 +126,37 @@ func applyPolicy(policy config.TracePolicy, record store.RunRecord) store.RunRec
 		record.ArtifactRefs = nil
 		record.Stdout = ""
 		record.Stderr = ""
-	case "detail":
-		if !policy.StoreResultPayload {
-			record.Payload = nil
-		}
-		if !policy.StoreStdout {
-			record.Stdout = ""
-		}
-		if !policy.StoreStderr {
-			record.Stderr = ""
-		}
-	case "debug":
-		if !policy.StoreResultPayload {
-			record.Payload = nil
-		}
+	case "detail", "debug":
+		// keep everything (will be truncated by maxPayloadBytes in Process)
 	default:
-		if !policy.StoreResultPayload {
-			record.Payload = nil
-		}
-		if !policy.StoreStdout {
-			record.Stdout = ""
-		}
-		if !policy.StoreStderr {
-			record.Stderr = ""
-		}
+		// unknown level, treat as summary
+		record.Payload = nil
+		record.ArtifactRefs = nil
+		record.Stdout = ""
+		record.Stderr = ""
 	}
 	return record
+}
+
+func (m *Manager) ReloadSinks(entries []config.SinkEntry, store *store.PostgresStore) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sinks = map[string]Sink{}
+	for _, entry := range entries {
+		switch entry.Kind {
+		case "postgres":
+			m.sinks[entry.Name] = NewPostgresSink(entry.Name, store)
+		case "webhook":
+			timeout := 3 * time.Second
+			if entry.Timeout != "" {
+				if d, err := time.ParseDuration(entry.Timeout); err == nil {
+					timeout = d
+				}
+			}
+			m.sinks[entry.Name] = NewWebhookSink(entry.Name, entry.URL, timeout)
+		}
+	}
+	return nil
 }
 
 func (m *Manager) writeArtifact(ctx context.Context, record store.RunRecord, kind, artifactName string, body []byte, contentType string) (store.ArtifactRef, error) {
@@ -252,10 +267,10 @@ type WebhookSink struct {
 	client *http.Client
 }
 
-func NewWebhookSink(name, url string, timeout config.Duration) *WebhookSink {
+func NewWebhookSink(name, url string, timeout time.Duration) *WebhookSink {
 	client := &http.Client{}
-	if timeout.Duration > 0 {
-		client.Timeout = timeout.Duration
+	if timeout > 0 {
+		client.Timeout = timeout
 	}
 	return &WebhookSink{name: name, url: url, client: client}
 }
