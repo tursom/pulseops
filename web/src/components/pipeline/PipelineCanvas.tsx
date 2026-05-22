@@ -389,6 +389,10 @@ export default function PipelineCanvas({ pipelineId }: Props) {
       defaultEdgeOptions={defaultEdgeOptions}
       fitView
       fitViewOptions={{ padding: 0.2 }}
+      panOnScroll
+      zoomOnPinch
+      panOnScrollSpeed={1}
+      selectionOnDrag
       attributionPosition="bottom-left"
       style={{ background: '#f5f5f5' }}
       connectionLineStyle={{ stroke: '#faad14', strokeWidth: 1.5, strokeDasharray: '5,5' }}
