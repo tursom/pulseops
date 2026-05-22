@@ -164,10 +164,6 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 	if staticDir != "" {
 		fs := http.FileServer(http.Dir(staticDir))
 
-		mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-			http.ServeFile(w, r, filepath.Join(staticDir, "index.html"))
-		})
-
 		mux.Handle("GET /assets/{path...}", fs)
 
 		mux.HandleFunc("GET /{path...}", func(w http.ResponseWriter, r *http.Request) {
