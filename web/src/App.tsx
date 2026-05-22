@@ -47,6 +47,7 @@ export default function App() {
         <Content style={{ padding: 24 }}>
           <Routes>
             <Route path="/" element={<Dashboard />} />
+            <Route path="/tasks" element={<Dashboard />} />
             <Route path="/tasks/:id" element={<TaskDetail />} />
           </Routes>
         </Content>
