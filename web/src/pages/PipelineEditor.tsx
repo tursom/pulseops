@@ -20,18 +20,18 @@ export default function PipelineEditor() {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div>
             <Title level={3} style={{ margin: 0 }}>
-              Pipeline Editor
+              流水线编辑器
             </Title>
             <Text type="secondary">
-              Visual task orchestration — click a node to edit its definition.
+              可视化任务编排 — 点击节点编辑任务定义。
             </Text>
           </div>
           <Space>
             <Button icon={<ReloadOutlined />} onClick={handleRefresh}>
-              Refresh
+              刷新
             </Button>
             <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/task-defs/new')}>
-              Create Task
+              创建任务
             </Button>
           </Space>
         </div>

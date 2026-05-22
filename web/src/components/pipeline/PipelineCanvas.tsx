@@ -198,15 +198,14 @@ export default function PipelineCanvas() {
     let condition = ''
 
     Modal.confirm({
-      title: 'Create Dependency',
+      title: '创建依赖',
       content: (
         <div>
           <p>
-            Set <strong>{sourceDef.name}</strong> as watch_task
-            for <strong>{targetDef.name}</strong>?
+            将 <strong>{sourceDef.name}</strong> 设为 <strong>{targetDef.name}</strong> 的监听任务？
           </p>
           <Input
-            placeholder="watch_condition (optional, e.g. check_status == 'fail')"
+            placeholder="触发条件（可选，如 check_status == 'fail'）"
             onChange={e => { condition = e.target.value }}
           />
         </div>
@@ -219,7 +218,7 @@ export default function PipelineCanvas() {
             trigger: 'on_run',
             watch_condition: condition,
           })
-          message.success('Dependency created')
+          message.success('依赖已创建')
           loadData()
         } catch (err) {
           message.error(err instanceof Error ? err.message : 'Failed to create dependency')
@@ -238,28 +237,28 @@ export default function PipelineCanvas() {
     let newCondition = targetDef.watch_condition || ''
 
     Modal.confirm({
-      title: 'Edit Dependency',
+      title: '编辑依赖',
       content: (
         <div>
           <p>
             <strong>watch_task:</strong> {sourceId}
           </p>
           <Input
-            placeholder="watch_condition (optional)"
+            placeholder="触发条件（可选）"
             defaultValue={newCondition}
             onChange={e => { newCondition = e.target.value }}
           />
         </div>
       ),
-      okText: 'Save',
-      cancelText: 'Delete Dependency',
+      okText: '保存',
+      cancelText: '删除依赖',
       onOk: async () => {
         try {
           await updateTaskDefinition(targetId, {
             ...targetDef,
             watch_condition: newCondition,
           })
-          message.success('Dependency updated')
+          message.success('依赖已更新')
           loadData()
         } catch (err) {
           message.error(err instanceof Error ? err.message : 'Failed to update dependency')
@@ -267,9 +266,9 @@ export default function PipelineCanvas() {
       },
       onCancel: async () => {
         Modal.confirm({
-          title: 'Delete Dependency?',
-          content: <p>Remove on_run link to <strong>{sourceId}</strong>?</p>,
-          okText: 'Delete',
+          title: '删除依赖？',
+          content: <p>移除到 <strong>{sourceId}</strong> 的依赖链接？</p>,
+          okText: '删除',
           okButtonProps: { danger: true },
           onOk: async () => {
             try {
@@ -279,7 +278,7 @@ export default function PipelineCanvas() {
                 trigger: 'scheduled',
                 watch_condition: '',
               })
-              message.success('Dependency removed')
+              message.success('依赖已移除')
               loadData()
             } catch (err) {
               message.error(err instanceof Error ? err.message : 'Failed to remove dependency')
@@ -303,7 +302,7 @@ export default function PipelineCanvas() {
         })
       }
     }
-    message.success('Dependencies removed')
+    message.success('依赖已移除')
     loadData()
   }, [loadData])
 

@@ -6,15 +6,15 @@ export default function ScenarioCheckParams() {
     <>
       <Form.Item
         name={['params', 'source', 'url']}
-        label="Source URL"
-        rules={[{ required: true, message: 'Source URL is required' }]}
+        label="源数据URL"
+        rules={[{ required: true, message: '请输入源数据URL' }]}
       >
         <Input placeholder="https://api.example.com/sample" />
       </Form.Item>
 
       <Form.Item
         name={['params', 'source', 'method']}
-        label="Source Method"
+        label="请求方法"
         initialValue="GET"
       >
         <Select
@@ -27,7 +27,7 @@ export default function ScenarioCheckParams() {
         />
       </Form.Item>
 
-      <Form.Item label="Source Headers">
+      <Form.Item label="请求头">
         <Form.List name={['params', 'source', 'headers']}>
           {(fields, { add, remove }) => (
             <>
@@ -60,24 +60,24 @@ export default function ScenarioCheckParams() {
                 block
                 icon={<PlusOutlined />}
               >
-                Add Header
+                添加请求头
               </Button>
             </>
           )}
         </Form.List>
       </Form.Item>
 
-      <Form.Item name={['params', 'sample']} label="Sample">
-        <Input.TextArea rows={3} placeholder="Sample data (JSON)" />
+      <Form.Item name={['params', 'sample']} label="采样">
+        <Input.TextArea rows={3} placeholder="JSON 格式" />
       </Form.Item>
 
-      <Form.Item name={['params', 'fanout', 'url']} label="Fanout URL">
+      <Form.Item name={['params', 'fanout', 'url']} label="分发URL">
         <Input placeholder="https://api.example.com/resolve" />
       </Form.Item>
 
       <Form.Item
         name={['params', 'fanout', 'method']}
-        label="Fanout Method"
+        label="请求方法"
         initialValue="GET"
       >
         <Select
@@ -90,12 +90,12 @@ export default function ScenarioCheckParams() {
         />
       </Form.Item>
 
-      <Form.Item name={['params', 'evaluator', 'name']} label="Evaluator Name">
-        <Input placeholder="e.g. equality_check" />
+      <Form.Item name={['params', 'evaluator', 'name']} label="评估器名称">
+        <Input placeholder="如 equality_check" />
       </Form.Item>
 
-      <Form.Item name={['params', 'thresholds']} label="Thresholds">
-        <Input.TextArea rows={3} placeholder="Thresholds (JSON)" />
+      <Form.Item name={['params', 'thresholds']} label="阈值">
+        <Input.TextArea rows={3} placeholder="JSON 格式" />
       </Form.Item>
     </>
   )

@@ -4,10 +4,10 @@ export default function ProcessCheckParams() {
   return (
     <Form.Item
       name={['params', 'name']}
-      label="Process Name"
-      rules={[{ required: true, message: 'Process name is required' }]}
+      label="进程名"
+      rules={[{ required: true, message: '请输入进程名' }]}
     >
-      <Input placeholder="process name" />
+      <Input placeholder="进程名称" />
     </Form.Item>
   )
 }

@@ -6,13 +6,13 @@ export default function HTTPCheckParams() {
     <>
       <Form.Item
         name={['params', 'url']}
-        label="URL"
-        rules={[{ required: true, message: 'URL is required' }]}
+        label="URL地址"
+        rules={[{ required: true, message: '请输入URL地址' }]}
       >
         <Input placeholder="https://example.com/health" />
       </Form.Item>
 
-      <Form.Item name={['params', 'method']} label="Method" initialValue="GET">
+      <Form.Item name={['params', 'method']} label="请求方法" initialValue="GET">
         <Select
           options={[
             { value: 'GET', label: 'GET' },
@@ -24,7 +24,7 @@ export default function HTTPCheckParams() {
         />
       </Form.Item>
 
-      <Form.Item label="Headers">
+      <Form.Item label="请求头">
         <Form.List name={['params', 'headers']}>
           {(fields, { add, remove }) => (
             <>
@@ -37,16 +37,16 @@ export default function HTTPCheckParams() {
                   <Form.Item
                     {...restField}
                     name={[name, 'key']}
-                    rules={[{ required: true, message: 'Header name required' }]}
+                    rules={[{ required: true, message: '请输入请求头名称' }]}
                   >
-                    <Input placeholder="Header name" />
+                    <Input placeholder="请求头名称" />
                   </Form.Item>
                   <Form.Item
                     {...restField}
                     name={[name, 'value']}
-                    rules={[{ required: true, message: 'Value required' }]}
+                    rules={[{ required: true, message: '请输入值' }]}
                   >
-                    <Input placeholder="Value" />
+                    <Input placeholder="值" />
                   </Form.Item>
                   <MinusCircleOutlined onClick={() => remove(name)} />
                 </Space>
@@ -57,23 +57,23 @@ export default function HTTPCheckParams() {
                 block
                 icon={<PlusOutlined />}
               >
-                Add Header
+                添加请求头
               </Button>
             </>
           )}
         </Form.List>
       </Form.Item>
 
-      <Form.Item name={['params', 'body']} label="Body">
-        <Input.TextArea rows={4} placeholder="Request body (JSON)" />
+      <Form.Item name={['params', 'body']} label="请求体">
+        <Input.TextArea rows={4} placeholder="请求体 (JSON)" />
       </Form.Item>
 
-      <Form.Item name={['params', 'expect_status']} label="Expect Status">
-        <Select mode="tags" placeholder="e.g. 200, 201" />
+      <Form.Item name={['params', 'expect_status']} label="期望状态码">
+        <Select mode="tags" placeholder="如 200, 201" />
       </Form.Item>
 
-      <Form.Item name={['params', 'expect_body_contains']} label="Expect Body Contains">
-        <Input placeholder="Text expected in response body" />
+      <Form.Item name={['params', 'expect_body_contains']} label="期望响应包含">
+        <Input placeholder="响应体中应包含的文本" />
       </Form.Item>
     </>
   )

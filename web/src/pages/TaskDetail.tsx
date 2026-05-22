@@ -72,7 +72,7 @@ export default function TaskDetail() {
       setAnalyses(a)
       setError(null)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load task')
+      setError(err instanceof Error ? err.message : '加载任务失败')
     } finally {
       setLoading(false)
     }
@@ -92,10 +92,10 @@ export default function TaskDetail() {
     setActionLoading(true)
     try {
       await triggerTaskRun(id)
-      message.success('Task triggered')
+      message.success('任务已触发')
       await fetchData()
     } catch (err) {
-      message.error(err instanceof Error ? err.message : 'Failed to trigger task')
+      message.error(err instanceof Error ? err.message : '触发失败')
     } finally {
       setActionLoading(false)
     }
@@ -107,14 +107,14 @@ export default function TaskDetail() {
     try {
       if (enabled) {
         await enableTask(id)
-        message.success('Task enabled')
+        message.success('任务已启用')
       } else {
         await disableTask(id)
-        message.success('Task disabled')
+        message.success('任务已禁用')
       }
       await fetchData()
     } catch (err) {
-      message.error(err instanceof Error ? err.message : 'Failed to toggle task')
+      message.error(err instanceof Error ? err.message : '操作失败')
     } finally {
       setActionLoading(false)
     }
@@ -139,7 +139,13 @@ export default function TaskDetail() {
       timeout: 'warning',
       running: 'processing',
     }
-    return <Badge status={map[status] || 'default'} text={status} />
+    const labels: Record<string, string> = {
+      success: '成功',
+      failed: '失败',
+      timeout: '超时',
+      running: '运行中',
+    }
+    return <Badge status={map[status] || 'default'} text={labels[status] || status} />
   }
 
   const checkStatusBadge = (status: string) => {
@@ -147,7 +153,11 @@ export default function TaskDetail() {
       pass: 'success',
       fail: 'error',
     }
-    return <Badge status={map[status] || 'default'} text={status} />
+    const labels: Record<string, string> = {
+      pass: '通过',
+      fail: '失败',
+    }
+    return <Badge status={map[status] || 'default'} text={labels[status] || status} />
   }
 
   const triggerTypeTag = (tt: string) => {
@@ -157,7 +167,13 @@ export default function TaskDetail() {
       rerun: 'orange',
       dependent: 'purple',
     }
-    return <Tag color={colors[tt] || 'default'}>{tt}</Tag>
+    const labels: Record<string, string> = {
+      scheduled: '定时',
+      manual: '手动',
+      rerun: '重跑',
+      dependent: '依赖触发',
+    }
+    return <Tag color={colors[tt] || 'default'}>{labels[tt] || tt}</Tag>
   }
 
   const taskStatusBadge = (status: string) => {
@@ -187,7 +203,7 @@ export default function TaskDetail() {
     return (
       <Alert
         type="error"
-        message="Failed to load task"
+        message="加载任务失败"
         description={error}
         showIcon
       />
@@ -195,36 +211,36 @@ export default function TaskDetail() {
   }
 
   if (!task) {
-    return <Alert type="warning" message="Task not found" showIcon />
+    return <Alert type="warning" message="任务未找到" showIcon />
   }
 
   const runColumns: TableColumnsType<RunRecord> = [
     {
-      title: 'Run ID',
+      title: '运行ID',
       dataIndex: 'run_id',
       key: 'run_id',
       render: (v: string) => <Text code>{shortRunID(v)}</Text>,
     },
     {
-      title: 'Trigger',
+      title: '触发方式',
       dataIndex: 'trigger_type',
       key: 'trigger_type',
       render: (v: string) => triggerTypeTag(v),
     },
     {
-      title: 'Status',
+      title: '状态',
       dataIndex: 'run_status',
       key: 'run_status',
       render: (v: string) => runStatusBadge(v),
     },
     {
-      title: 'Check',
+      title: '检查',
       dataIndex: 'check_status',
       key: 'check_status',
       render: (v: string) => checkStatusBadge(v),
     },
     {
-      title: 'Started',
+      title: '开始时间',
       dataIndex: 'started_at',
       key: 'started_at',
       render: (v: string) => formatTime(v),
@@ -233,13 +249,13 @@ export default function TaskDetail() {
       defaultSortOrder: 'descend',
     },
     {
-      title: 'Duration',
+      title: '耗时',
       dataIndex: 'duration_ms',
       key: 'duration_ms',
       render: (v: number) => formatDuration(v),
     },
     {
-      title: 'Error',
+      title: '错误',
       dataIndex: 'error_message',
       key: 'error_message',
       render: (v: string) => {
@@ -259,7 +275,7 @@ export default function TaskDetail() {
     <div style={{ padding: '8px 0' }}>
       {record.summary && (
         <div style={{ marginBottom: 12 }}>
-          <Text strong>Summary</Text>
+          <Text strong>摘要</Text>
           <pre
             style={{
               background: '#f5f5f5',
@@ -277,7 +293,7 @@ export default function TaskDetail() {
       )}
       {record.stdout && (
         <div style={{ marginBottom: 12 }}>
-          <Text strong>Stdout</Text>
+          <Text strong>标准输出</Text>
           <pre
             style={{
               background: '#f5f5f5',
@@ -295,7 +311,7 @@ export default function TaskDetail() {
       )}
       {record.stderr && (
         <div style={{ marginBottom: 12 }}>
-          <Text strong>Stderr</Text>
+          <Text strong>标准错误</Text>
           <pre
             style={{
               background: '#fff2f0',
@@ -314,7 +330,7 @@ export default function TaskDetail() {
         </div>
       )}
       {!record.summary && !record.stdout && !record.stderr && (
-        <Text type="secondary">No additional details</Text>
+        <Text type="secondary">无详细信息</Text>
       )}
     </div>
   )
@@ -325,7 +341,7 @@ export default function TaskDetail() {
         <Link to="/" style={{ display: 'inline-block', marginBottom: 12 }}>
           <Space>
             <ArrowLeftOutlined />
-            <span>Back to Dashboard</span>
+            <span>返回仪表盘</span>
           </Space>
         </Link>
 
@@ -347,7 +363,7 @@ export default function TaskDetail() {
           </Space>
 
           <Space>
-            <span>Enabled</span>
+            <span>已启用</span>
             <Switch
               checked={task.enabled}
               onChange={handleToggleEnabled}
@@ -359,38 +375,38 @@ export default function TaskDetail() {
               onClick={handleRun}
               loading={actionLoading}
             >
-              Run Now
+              立即执行
             </Button>
           </Space>
         </div>
       </div>
 
-      <Card title="Task Information" style={{ marginBottom: 24 }}>
+      <Card title="任务信息" style={{ marginBottom: 24 }}>
         <Descriptions bordered column={{ xs: 1, sm: 2, lg: 3 }}>
-          <Descriptions.Item label="Task ID">
+          <Descriptions.Item label="任务ID">
             <Text code>{task.task_id}</Text>
           </Descriptions.Item>
-          <Descriptions.Item label="Kind">
+          <Descriptions.Item label="类型">
             <Tag>{task.kind}</Tag>
           </Descriptions.Item>
-          <Descriptions.Item label="Status">
+          <Descriptions.Item label="状态">
             {taskStatusBadge(task.status)}
           </Descriptions.Item>
-          <Descriptions.Item label="Enabled">
+          <Descriptions.Item label="已启用">
             <Tag color={task.enabled ? 'green' : 'red'}>
-              {task.enabled ? 'Yes' : 'No'}
+              {task.enabled ? '是' : '否'}
             </Tag>
           </Descriptions.Item>
-          <Descriptions.Item label="Last Run At">
+          <Descriptions.Item label="上次运行">
             {formatTime(task.last_run_at)}
           </Descriptions.Item>
-          <Descriptions.Item label="Next Run At">
+          <Descriptions.Item label="下次运行">
             {formatTime(task.next_run_at)}
           </Descriptions.Item>
-          <Descriptions.Item label="Last Status">
+          <Descriptions.Item label="上次状态">
             {runStatusBadge(task.last_run_status)}
           </Descriptions.Item>
-          <Descriptions.Item label="Last Error">
+          <Descriptions.Item label="上次错误">
             {task.last_error ? (
               <Text type="danger" ellipsis style={{ maxWidth: 300 }}>
                 {task.last_error}
@@ -399,16 +415,16 @@ export default function TaskDetail() {
               <Text type="secondary">—</Text>
             )}
           </Descriptions.Item>
-          <Descriptions.Item label="Last Duration">
+          <Descriptions.Item label="上次耗时">
             {formatDuration(task.last_duration_ms)}
           </Descriptions.Item>
-          <Descriptions.Item label="Source Path">
+          <Descriptions.Item label="来源路径">
             <Text code>{task.source_path}</Text>
           </Descriptions.Item>
-          <Descriptions.Item label="Updated At">
+          <Descriptions.Item label="更新时间">
             {formatTime(task.updated_at)}
           </Descriptions.Item>
-          <Descriptions.Item label="Labels">
+          <Descriptions.Item label="标签">
             {Object.keys(task.labels).length > 0 ? (
               <Space wrap size={[4, 4]}>
                 {Object.entries(task.labels).map(([k, v]) => (
@@ -424,7 +440,7 @@ export default function TaskDetail() {
         </Descriptions>
       </Card>
 
-      <Card title={`Run History (${runs.length})`} style={{ marginBottom: 24 }}>
+      <Card title={`运行历史 (${runs.length})`} style={{ marginBottom: 24 }}>
         <Table
           columns={runColumns}
           dataSource={runs}
@@ -443,10 +459,10 @@ export default function TaskDetail() {
         items={[
           {
             key: 'ai',
-            label: `AI Analyses (${analyses.length})`,
+            label: `AI 分析 (${analyses.length})`,
             children:
               analyses.length === 0 ? (
-                <Text type="secondary">No AI analyses available</Text>
+                <Text type="secondary">暂无AI分析</Text>
               ) : (
                 <div>
                   {analyses.map((a) => {
@@ -459,19 +475,19 @@ export default function TaskDetail() {
                         title={
                           <Space wrap>
                             <Tag color="purple">{a.analysis_type}</Tag>
-                            <Text type="secondary">Model: {a.model}</Text>
+                            <Text type="secondary">模型: {a.model}</Text>
                             <Badge
                               status={
                                 a.status === 'success' ? 'success' : 'error'
                               }
-                              text={a.status}
+                              text={a.status === 'success' ? '成功' : '失败'}
                             />
                           </Space>
                         }
                         extra={
                           <Space>
                             <Text type="secondary">
-                              Tokens: {a.tokens_in} in / {a.tokens_out} out
+                              Token: {a.tokens_in} 输入 / {a.tokens_out} 输出
                             </Text>
                             <Text type="secondary">
                               {formatTime(a.created_at)}
@@ -481,7 +497,7 @@ export default function TaskDetail() {
                       >
                         <div style={{ marginBottom: 8 }}>
                           <Text type="secondary">
-                            Duration: {formatDuration(a.duration_ms)}
+                            耗时: {formatDuration(a.duration_ms)}
                           </Text>
                         </div>
                         <div>
@@ -489,12 +505,12 @@ export default function TaskDetail() {
                             onClick={() => toggleAnalysisExpand(a.id)}
                             style={{ cursor: 'pointer', userSelect: 'none' }}
                           >
-                            {isExpanded ? 'Hide' : 'Show'} prompt &amp; response
+                            {isExpanded ? '隐藏' : '显示'}提示词和回复
                           </a>
                           {isExpanded && (
                             <div style={{ marginTop: 8 }}>
                               <div style={{ marginBottom: 8 }}>
-                                <Text strong>Prompt</Text>
+                                <Text strong>提示词</Text>
                                 <pre
                                   style={{
                                     background: '#f5f5f5',
@@ -514,7 +530,7 @@ export default function TaskDetail() {
                                 </pre>
                               </div>
                               <div>
-                                <Text strong>Response</Text>
+                                <Text strong>回复</Text>
                                 <pre
                                   style={{
                                     background: '#f5f5f5',

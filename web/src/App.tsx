@@ -9,9 +9,9 @@ import './App.css'
 const { Sider, Content } = Layout
 
 const menuItems = [
-  { key: '/', icon: <DashboardOutlined />, label: 'Dashboard' },
-  { key: '/tasks', icon: <UnorderedListOutlined />, label: 'Tasks' },
-  { key: '/pipeline', icon: <ApartmentOutlined />, label: 'Pipeline' },
+  { key: '/', icon: <DashboardOutlined />, label: '仪表盘' },
+  { key: '/tasks', icon: <UnorderedListOutlined />, label: '任务列表' },
+  { key: '/pipeline', icon: <ApartmentOutlined />, label: '流水线' },
 ]
 
 export default function App() {

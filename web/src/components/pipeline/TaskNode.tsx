@@ -63,7 +63,7 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
       case 'run':
         try {
           await triggerTaskRun(taskId)
-          message.success('Task triggered')
+          message.success('任务已触发')
           onRefresh?.()
         } catch (err) {
           message.error(err instanceof Error ? err.message : 'Failed to trigger task')
@@ -73,10 +73,10 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
         try {
           if (enabled) {
             await disableTask(taskId)
-            message.success('Task disabled')
+            message.success('任务已禁用')
           } else {
             await enableTask(taskId)
-            message.success('Task enabled')
+            message.success('任务已启用')
           }
           onRefresh?.()
         } catch (err) {
@@ -88,14 +88,14 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
         break
       case 'delete':
         Modal.confirm({
-          title: 'Delete Task',
-          content: `Are you sure you want to delete "${name}"? This action cannot be undone.`,
-          okText: 'Delete',
+          title: '删除任务',
+          content: `确定要删除 "${name}" 吗？此操作不可撤销。`,
+          okText: '删除',
           okButtonProps: { danger: true },
           onOk: async () => {
             try {
               await deleteTaskDefinition(taskId)
-              message.success('Task deleted')
+               message.success('任务已删除')
               window.location.reload()
             } catch (err) {
               message.error(err instanceof Error ? err.message : 'Failed to delete task')
@@ -107,11 +107,11 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
   }
 
   const menuItems = [
-    { key: 'run', label: 'Run Now', icon: <PlayCircleOutlined /> },
-    { key: 'toggle', label: enabled ? 'Disable' : 'Enable', icon: <PoweroffOutlined /> },
-    { key: 'edit', label: 'Edit', icon: <EditOutlined /> },
+    { key: 'run', label: '立即执行', icon: <PlayCircleOutlined /> },
+    { key: 'toggle', label: enabled ? '禁用' : '启用', icon: <PoweroffOutlined /> },
+    { key: 'edit', label: '编辑', icon: <EditOutlined /> },
     { type: 'divider' as const },
-    { key: 'delete', label: 'Delete', danger: true, icon: <DeleteOutlined /> },
+    { key: 'delete', label: '删除', danger: true, icon: <DeleteOutlined /> },
   ]
 
   return (

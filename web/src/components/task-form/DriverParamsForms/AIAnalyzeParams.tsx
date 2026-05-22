@@ -5,8 +5,8 @@ export default function AIAnalyzeParams() {
     <>
       <Form.Item
         name={['params', 'analysis_type']}
-        label="Analysis Type"
-        rules={[{ required: true, message: 'Analysis type is required' }]}
+        label="分析类型"
+        rules={[{ required: true, message: '请选择分析类型' }]}
       >
         <Select
           options={[
@@ -17,16 +17,16 @@ export default function AIAnalyzeParams() {
         />
       </Form.Item>
 
-      <Form.Item name={['params', 'data_sources']} label="Data Sources">
-        <Select mode="tags" placeholder="e.g. prometheus, logs" />
+      <Form.Item name={['params', 'data_sources']} label="数据源">
+        <Select mode="tags" placeholder="如 prometheus, logs" />
       </Form.Item>
 
-      <Form.Item name={['params', 'prompt']} label="Prompt">
-        <Input.TextArea rows={6} placeholder="AI analysis prompt" />
+      <Form.Item name={['params', 'prompt']} label="提示词">
+        <Input.TextArea rows={6} placeholder="AI 分析提示词" />
       </Form.Item>
 
-      <Form.Item name={['params', 'outputs']} label="Outputs">
-        <Select mode="tags" placeholder="Output field names" />
+      <Form.Item name={['params', 'outputs']} label="输出字段">
+        <Select mode="tags" placeholder="输出字段名" />
       </Form.Item>
     </>
   )

@@ -6,21 +6,21 @@ export default function ScriptExecParams() {
     <>
       <Form.Item
         name={['params', 'command']}
-        label="Command"
-        rules={[{ required: true, message: 'Command is required' }]}
+        label="命令"
+        rules={[{ required: true, message: '请输入命令' }]}
       >
-        <Input placeholder="/usr/local/bin/check.sh" />
+        <Input placeholder="可执行命令路径" />
       </Form.Item>
 
-      <Form.Item name={['params', 'args']} label="Args">
-        <Select mode="tags" placeholder="Command arguments" />
+      <Form.Item name={['params', 'args']} label="参数">
+        <Select mode="tags" placeholder="命令行参数" />
       </Form.Item>
 
-      <Form.Item name={['params', 'work_dir']} label="Work Dir">
+      <Form.Item name={['params', 'work_dir']} label="工作目录">
         <Input placeholder="/opt/app" />
       </Form.Item>
 
-      <Form.Item label="Env">
+      <Form.Item label="环境变量">
         <Form.List name={['params', 'env']}>
           {(fields, { add, remove }) => (
             <>
@@ -53,7 +53,7 @@ export default function ScriptExecParams() {
                 block
                 icon={<PlusOutlined />}
               >
-                Add Env Var
+                添加环境变量
               </Button>
             </>
           )}

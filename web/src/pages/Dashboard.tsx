@@ -50,7 +50,7 @@ export default function Dashboard() {
       setTasks(data)
       setError(null)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch tasks')
+      setError(err instanceof Error ? err.message : '加载任务失败')
     } finally {
       setLoading(false)
     }
@@ -68,14 +68,14 @@ export default function Dashboard() {
       try {
         if (enabled) {
           await enableTask(taskId)
-          message.success('Task enabled')
+          message.success('任务已启用')
         } else {
           await disableTask(taskId)
-          message.success('Task disabled')
+          message.success('任务已禁用')
         }
         await loadTasks()
       } catch (err) {
-        message.error(err instanceof Error ? err.message : 'Operation failed')
+        message.error(err instanceof Error ? err.message : '操作失败')
       } finally {
         setActionLoading((prev) => ({ ...prev, [taskId]: false }))
       }
@@ -88,10 +88,10 @@ export default function Dashboard() {
       setActionLoading((prev) => ({ ...prev, [taskId]: true }))
       try {
         await triggerTaskRun(taskId)
-        message.success('Task triggered')
+        message.success('任务已触发')
         await loadTasks()
       } catch (err) {
-        message.error(err instanceof Error ? err.message : 'Trigger failed')
+        message.error(err instanceof Error ? err.message : '触发失败')
       } finally {
         setActionLoading((prev) => ({ ...prev, [taskId]: false }))
       }
@@ -100,7 +100,7 @@ export default function Dashboard() {
   )
   const columns: ColumnsType<TaskState> = [
     {
-      title: 'Task Name',
+      title: '任务名称',
       dataIndex: 'name',
       key: 'name',
       render: (name: string, record: TaskState) => (
@@ -109,7 +109,7 @@ export default function Dashboard() {
       sorter: (a, b) => a.name.localeCompare(b.name),
     },
     {
-      title: 'Kind',
+      title: '类型',
       dataIndex: 'kind',
       key: 'kind',
       render: (kind: string) => (
@@ -119,21 +119,21 @@ export default function Dashboard() {
       onFilter: (value, record) => record.kind === value,
     },
     {
-      title: 'Status',
+      title: '状态',
       dataIndex: 'status',
       key: 'status',
       render: (status: string) => (
         <Tag color={STATUS_COLORS[status] || 'default'}>{status}</Tag>
       ),
       filters: [
-        { text: 'Running', value: 'running' },
-        { text: 'Loaded', value: 'loaded' },
-        { text: 'Disabled', value: 'disabled' },
+        { text: '运行中', value: 'running' },
+        { text: '已加载', value: 'loaded' },
+        { text: '已禁用', value: 'disabled' },
       ],
       onFilter: (value, record) => record.status === value,
     },
     {
-      title: 'Last Run',
+      title: '上次运行',
       dataIndex: 'last_run_at',
       key: 'last_run_at',
       render: (val: string | null) =>
@@ -145,7 +145,7 @@ export default function Dashboard() {
       },
     },
     {
-      title: 'Last Status',
+      title: '上次状态',
       dataIndex: 'last_run_status',
       key: 'last_run_status',
       render: (status: string) => {
@@ -155,13 +155,13 @@ export default function Dashboard() {
         )
       },
       filters: [
-        { text: 'Success', value: 'success' },
-        { text: 'Failed', value: 'failed' },
+        { text: '成功', value: 'success' },
+        { text: '失败', value: 'failed' },
       ],
       onFilter: (value, record) => record.last_run_status === value,
     },
     {
-      title: 'Labels',
+      title: '标签',
       dataIndex: 'labels',
       key: 'labels',
       render: (labels: Record<string, string>) => {
@@ -177,7 +177,7 @@ export default function Dashboard() {
       },
     },
     {
-      title: 'Actions',
+      title: '操作',
       key: 'actions',
       render: (_val, record: TaskState) => (
         <div
@@ -196,7 +196,7 @@ export default function Dashboard() {
             loading={actionLoading[record.task_id]}
             onClick={() => handleRunNow(record.task_id)}
           >
-            Run Now
+            立即执行
           </Button>
         </div>
       ),
@@ -211,7 +211,7 @@ export default function Dashboard() {
       <div style={{ padding: 24 }}>
         <Alert
           type="error"
-          message="Failed to load tasks"
+          message="加载任务失败"
           description={error}
           showIcon
         />
@@ -222,7 +222,7 @@ export default function Dashboard() {
   return (
     <div style={{ padding: 24 }}>
       <Typography.Title level={3} style={{ marginBottom: 24 }}>
-        Dashboard
+        仪表盘
       </Typography.Title>
 
       {loading ? (
@@ -234,7 +234,7 @@ export default function Dashboard() {
           <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
             <Col xs={24} sm={12} md={6}>
               <Card>
-                <Typography.Text type="secondary">Total Tasks</Typography.Text>
+                <Typography.Text type="secondary">任务总数</Typography.Text>
                 <Typography.Title level={2} style={{ margin: '8px 0 0' }}>
                   {totalTasks}
                 </Typography.Title>
@@ -242,7 +242,7 @@ export default function Dashboard() {
             </Col>
             <Col xs={24} sm={12} md={6}>
               <Card>
-                <Typography.Text type="secondary">Enabled</Typography.Text>
+                <Typography.Text type="secondary">已启用</Typography.Text>
                 <Typography.Title
                   level={2}
                   style={{ margin: '8px 0 0', color: '#52c41a' }}
@@ -253,7 +253,7 @@ export default function Dashboard() {
             </Col>
             <Col xs={24} sm={12} md={6}>
               <Card>
-                <Typography.Text type="secondary">Failed</Typography.Text>
+                <Typography.Text type="secondary">失败</Typography.Text>
                 <Typography.Title
                   level={2}
                   style={{ margin: '8px 0 0', color: '#ff4d4f' }}
@@ -264,7 +264,7 @@ export default function Dashboard() {
             </Col>
             <Col xs={24} sm={12} md={6}>
               <Card>
-                <Typography.Text type="secondary">With Errors</Typography.Text>
+                <Typography.Text type="secondary">有错误</Typography.Text>
                 <Typography.Title
                   level={2}
                   style={{ margin: '8px 0 0', color: '#faad14' }}
@@ -276,7 +276,7 @@ export default function Dashboard() {
           </Row>
 
           {tasks.length === 0 ? (
-            <Empty description="No tasks configured" />
+            <Empty description="暂无任务" />
           ) : (
             <Table<TaskState>
               columns={columns}
@@ -286,7 +286,7 @@ export default function Dashboard() {
                 pageSize: 20,
                 showSizeChanger: true,
                 showTotal: (total, range) =>
-                  `${range[0]}-${range[1]} of ${total} tasks`,
+                  `第${range[0]}-${range[1]}条/共${total}条`,
               }}
             />
           )}

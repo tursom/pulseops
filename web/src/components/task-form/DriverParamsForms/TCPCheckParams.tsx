@@ -4,8 +4,8 @@ export default function TCPCheckParams() {
   return (
     <Form.Item
       name={['params', 'address']}
-      label="Address"
-      rules={[{ required: true, message: 'Address is required' }]}
+      label="地址"
+      rules={[{ required: true, message: '请输入地址' }]}
     >
       <Input placeholder="host:port" />
     </Form.Item>

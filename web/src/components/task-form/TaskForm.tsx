@@ -18,21 +18,21 @@ import { fetchTaskDefinitions } from '../../api/client'
 import { driverForms } from './DriverParamsForms'
 
 const KIND_OPTIONS = [
-  { value: 'http_check', label: 'HTTP Check' },
-  { value: 'tcp_check', label: 'TCP Check' },
-  { value: 'script_exec', label: 'Script Exec' },
-  { value: 'process_check', label: 'Process Check' },
-  { value: 'scenario_check', label: 'Scenario Check' },
-  { value: 'ai_analyze', label: 'AI Analyze' },
+  { value: 'http_check', label: 'HTTP 检查' },
+  { value: 'tcp_check', label: 'TCP 检查' },
+  { value: 'script_exec', label: '脚本执行' },
+  { value: 'process_check', label: '进程检查' },
+  { value: 'scenario_check', label: '场景检查' },
+  { value: 'ai_analyze', label: 'AI 分析' },
 ]
 
 const KIND_LABELS: Record<string, string> = {
-  http_check: 'HTTP Check',
-  tcp_check: 'TCP Check',
-  script_exec: 'Script Exec',
-  process_check: 'Process Check',
-  scenario_check: 'Scenario Check',
-  ai_analyze: 'AI Analyze',
+  http_check: 'HTTP 检查',
+  tcp_check: 'TCP 检查',
+  script_exec: '脚本执行',
+  process_check: '进程检查',
+  scenario_check: '场景检查',
+  ai_analyze: 'AI 分析',
 }
 
 function formListToRecord(
@@ -120,7 +120,7 @@ export default function TaskForm({
       const cron = form.getFieldValue('cron')
       if (interval && cron) {
         return Promise.reject(
-          new Error('Cannot set both interval and cron — choose one'),
+          new Error('不能同时设置间隔和Cron表达式'),
         )
       }
       return Promise.resolve()
@@ -139,67 +139,67 @@ export default function TaskForm({
       initialValues={initialValues}
       scrollToFirstError
     >
-      {/* a) Basic Info */}
-      <Card title="Basic Info" style={{ marginBottom: 24 }}>
+      {/* a) 基本信息 */}
+      <Card title="基本信息" style={{ marginBottom: 24 }}>
         <Form.Item
           name="task_id"
-          label="Task ID"
+          label="任务ID"
           rules={
             mode === 'create'
-              ? [{ required: true, message: 'Task ID is required' }]
+              ? [{ required: true, message: '请输入任务ID' }]
               : []
           }
         >
-          <Input disabled={mode === 'edit'} placeholder="e.g. my-health-check" />
+          <Input disabled={mode === 'edit'} placeholder="如 my-health-check" />
         </Form.Item>
 
         <Form.Item
           name="name"
-          label="Name"
-          rules={[{ required: true, message: 'Name is required' }]}
+          label="名称"
+          rules={[{ required: true, message: '请输入名称' }]}
         >
-          <Input placeholder="Task display name" />
+          <Input placeholder="任务显示名称" />
         </Form.Item>
 
         <Form.Item
           name="kind"
-          label="Kind"
-          rules={[{ required: true, message: 'Kind is required' }]}
+          label="类型"
+          rules={[{ required: true, message: '请选择任务类型' }]}
         >
-          <Select options={KIND_OPTIONS} placeholder="Select task kind" />
+          <Select options={KIND_OPTIONS} placeholder="选择任务类型" />
         </Form.Item>
 
-        <Form.Item name="enabled" label="Enabled" valuePropName="checked">
+        <Form.Item name="enabled" label="启用" valuePropName="checked">
           <Switch />
         </Form.Item>
       </Card>
 
-      {/* b) Schedule */}
-      <Card title="Schedule" style={{ marginBottom: 24 }}>
+      {/* b) 调度配置 */}
+      <Card title="调度配置" style={{ marginBottom: 24 }}>
         <Form.Item
           name="interval"
-          label="Interval"
+          label="间隔"
           rules={[makeScheduleValidator()]}
         >
-          <Input placeholder="e.g. 30s, 5m, 1h" />
+          <Input placeholder="如 30s, 5m, 1h" />
         </Form.Item>
 
         <Form.Item
           name="cron"
-          label="Cron"
+          label="Cron表达式"
           rules={[makeScheduleValidator()]}
         >
-          <Input placeholder="e.g. 0 */6 * * *" />
+          <Input placeholder="如 0 */6 * * *" />
         </Form.Item>
 
-        <Form.Item name="timeout" label="Timeout">
-          <Input placeholder="e.g. 10s" />
+        <Form.Item name="timeout" label="超时">
+          <Input placeholder="如 10s" />
         </Form.Item>
       </Card>
 
       {/* c) Params */}
       <Card
-        title={kind ? `${KIND_LABELS[kind] || kind} Params` : 'Params'}
+          title={kind ? `${KIND_LABELS[kind] || kind} 参数` : '参数'}
         style={{ marginBottom: 24 }}
       >
         {DriverForm ? (
@@ -208,18 +208,18 @@ export default function TaskForm({
           <div
             style={{ color: '#999', padding: '16px 0', textAlign: 'center' }}
           >
-            Select a task kind to configure parameters
+            选择任务类型以配置参数
           </div>
         )}
       </Card>
 
-      {/* d) Trigger */}
-      <Card title="Trigger" style={{ marginBottom: 24 }}>
-        <Form.Item name="trigger" label="Trigger Type">
+      {/* d) 触发器 */}
+      <Card title="触发器" style={{ marginBottom: 24 }}>
+        <Form.Item name="trigger" label="触发类型">
           <Radio.Group>
-            <Radio value="scheduled">Scheduled</Radio>
-            <Radio value="manual">Manual</Radio>
-            <Radio value="on_run">On Run</Radio>
+            <Radio value="scheduled">定时</Radio>
+            <Radio value="manual">手动</Radio>
+            <Radio value="on_run">依赖触发</Radio>
           </Radio.Group>
         </Form.Item>
 
@@ -227,15 +227,15 @@ export default function TaskForm({
           <>
             <Form.Item
               name="watch_task_id"
-              label="Watch Task"
-              rules={[{ required: true, message: 'Watch task is required when trigger is On Run' }]}
+              label="监听任务"
+              rules={[{ required: true, message: '依赖触发时需要选择监听任务' }]}
             >
               <Select
                 loading={taskDefsLoading}
                 notFoundContent={
-                  taskDefsLoading ? <Spin size="small" /> : 'No enabled tasks'
+                  taskDefsLoading ? <Spin size="small" /> : '没有启用的任务'
                 }
-                placeholder="Select a task to watch"
+                placeholder="选择要监听的任务"
                 options={taskDefs.map((d) => ({
                   value: d.task_id,
                   label: `${d.name} (${d.task_id})`,
@@ -245,15 +245,15 @@ export default function TaskForm({
               />
             </Form.Item>
 
-            <Form.Item name="watch_condition" label="Watch Condition">
-              <Input placeholder="e.g. status == 'success'" />
+            <Form.Item name="watch_condition" label="触发条件">
+              <Input placeholder="如 status == 'success'" />
             </Form.Item>
           </>
         )}
       </Card>
 
-      {/* e) Labels */}
-      <Card title="Labels" style={{ marginBottom: 24 }}>
+      {/* e) 标签 */}
+      <Card title="标签" style={{ marginBottom: 24 }}>
         <Form.List name="labels">
           {(fields, { add, remove }) => (
             <>
@@ -266,16 +266,16 @@ export default function TaskForm({
                   <Form.Item
                     {...restField}
                     name={[name, 'key']}
-                    rules={[{ required: true, message: 'Key required' }]}
+                    rules={[{ required: true, message: '请输入键' }]}
                   >
-                    <Input placeholder="Key" />
+                    <Input placeholder="键" />
                   </Form.Item>
                   <Form.Item
                     {...restField}
                     name={[name, 'value']}
-                    rules={[{ required: true, message: 'Value required' }]}
+                    rules={[{ required: true, message: '请输入值' }]}
                   >
-                    <Input placeholder="Value" />
+                    <Input placeholder="值" />
                   </Form.Item>
                   <MinusCircleOutlined onClick={() => remove(name)} />
                 </Space>
@@ -286,7 +286,7 @@ export default function TaskForm({
                 block
                 icon={<PlusOutlined />}
               >
-                Add Label
+                添加标签
               </Button>
             </>
           )}
@@ -299,18 +299,18 @@ export default function TaskForm({
         items={[
           {
             key: 'trace',
-            label: 'Trace Policy',
+            label: '追踪策略',
             children: (
               <>
                 <Form.Item
                   name={['trace', 'enabled']}
-                  label="Enabled"
+                  label="启用"
                   valuePropName="checked"
                 >
                   <Switch />
                 </Form.Item>
 
-                <Form.Item name={['trace', 'level']} label="Level">
+                <Form.Item name={['trace', 'level']} label="级别">
                   <Select
                     options={[
                       { value: 'none', label: 'None' },
@@ -321,17 +321,17 @@ export default function TaskForm({
                   />
                 </Form.Item>
 
-                <Form.Item name={['trace', 'sinks']} label="Sinks">
+                <Form.Item name={['trace', 'sinks']} label="存储后端">
                   <Select mode="tags" placeholder="e.g. console, file" />
                 </Form.Item>
 
-                <Form.Item name={['trace', 'retain_days']} label="Retain Days">
+                <Form.Item name={['trace', 'retain_days']} label="保留天数">
                   <InputNumber min={0} style={{ width: '100%' }} />
                 </Form.Item>
 
                 <Form.Item
                   name={['trace', 'store_stdout']}
-                  label="Store Stdout"
+                  label="存储标准输出"
                   valuePropName="checked"
                 >
                   <Switch />
@@ -339,7 +339,7 @@ export default function TaskForm({
 
                 <Form.Item
                   name={['trace', 'store_stderr']}
-                  label="Store Stderr"
+                  label="存储标准错误"
                   valuePropName="checked"
                 >
                   <Switch />
@@ -347,7 +347,7 @@ export default function TaskForm({
 
                 <Form.Item
                   name={['trace', 'store_result_payload']}
-                  label="Store Result Payload"
+                  label="存储结果数据"
                   valuePropName="checked"
                 >
                   <Switch />
@@ -355,13 +355,13 @@ export default function TaskForm({
 
                 <Form.Item
                   name={['trace', 'max_payload_bytes']}
-                  label="Max Payload Bytes"
+                  label="最大数据字节"
                 >
                   <InputNumber min={0} style={{ width: '100%' }} />
                 </Form.Item>
 
-                <Form.Item name={['trace', 'mask_fields']} label="Mask Fields">
-                  <Select mode="tags" placeholder="Field names to mask" />
+                <Form.Item name={['trace', 'mask_fields']} label="脱敏字段">
+                  <Select mode="tags" placeholder="要脱敏的字段名" />
                 </Form.Item>
               </>
             ),
@@ -375,26 +375,26 @@ export default function TaskForm({
         items={[
           {
             key: 'alert',
-            label: 'Alert Policy',
+            label: '告警策略',
             children: (
               <>
                 <Form.Item
                   name={['alert', 'consecutive_failures']}
-                  label="Consecutive Failures"
+                  label="连续失败次数"
                 >
                   <InputNumber min={1} style={{ width: '100%' }} />
                 </Form.Item>
 
-                <Form.Item name={['alert', 'channels']} label="Channels">
+                <Form.Item name={['alert', 'channels']} label="通知渠道">
                   <Select
                     mode="tags"
-                    placeholder="e.g. slack, email"
+                    placeholder="如 slack, email"
                   />
                 </Form.Item>
 
                 <Form.Item
                   name={['alert', 'recover_notify']}
-                  label="Recover Notify"
+                  label="恢复通知"
                   valuePropName="checked"
                 >
                   <Switch />
@@ -408,7 +408,7 @@ export default function TaskForm({
       {/* Submit */}
       <Form.Item style={{ textAlign: 'right' }}>
         <Button type="primary" htmlType="submit" loading={submitLoading}>
-          {mode === 'create' ? 'Create Task' : 'Update Task'}
+          {mode === 'create' ? '创建任务' : '保存修改'}
         </Button>
       </Form.Item>
     </Form>
