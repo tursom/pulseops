@@ -16,6 +16,7 @@ import {
   Breadcrumb,
   Tooltip,
   Modal,
+  message,
 } from 'antd'
 import type { TableColumnsType } from 'antd'
 import {
@@ -127,9 +128,15 @@ export default function RunDetail() {
     setPreviewLoading(true)
     try {
       const detail = await fetchArtifactDetail(artifactID)
-      let formatted = detail.preview_text
+      const raw = detail.preview_text
+      if (!raw) {
+        message.info('该产物无可预览的文本内容')
+        setPreviewLoading(false)
+        return
+      }
+      let formatted = raw
       try {
-        formatted = JSON.stringify(JSON.parse(detail.preview_text), null, 2)
+        formatted = JSON.stringify(JSON.parse(raw), null, 2)
       } catch {
         // not valid JSON, show raw text
       }
@@ -137,8 +144,8 @@ export default function RunDetail() {
         title: detail.uri.split('/').pop() || detail.uri,
         content: formatted,
       })
-    } catch {
-      // ignore preview errors
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '加载产物内容失败')
     } finally {
       setPreviewLoading(false)
     }
