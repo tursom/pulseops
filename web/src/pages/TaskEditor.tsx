@@ -53,6 +53,8 @@ export default function TaskEditor() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const pipelineId = searchParams.get('pipeline')
+  const from = searchParams.get('from')
+  const returnUrl = from || (pipelineId ? `/pipelines/${pipelineId}` : '/pipelines')
   const isEdit = Boolean(id)
 
   const [initialValues, setInitialValues] = useState<
@@ -116,7 +118,7 @@ export default function TaskEditor() {
         await createTaskDefinition(def)
         message.success('Task created')
       }
-      navigate(selectedPipelineId ? `/pipelines/${selectedPipelineId}` : '/pipelines')
+      navigate(returnUrl)
     } catch (err) {
       message.error(err instanceof Error ? err.message : 'Operation failed')
     }
@@ -140,13 +142,10 @@ export default function TaskEditor() {
   if (error) {
     return (
       <div>
-        <Link
-          to={pipelineId ? `/pipelines/${pipelineId}` : '/pipelines'}
-          style={{ display: 'inline-block', marginBottom: 16 }}
-        >
+        <Link to={returnUrl} style={{ display: 'inline-block', marginBottom: 16 }}>
           <Space>
             <ArrowLeftOutlined />
-            <span>Back to Pipeline</span>
+            <span>返回</span>
           </Space>
         </Link>
         <Alert
@@ -161,10 +160,10 @@ export default function TaskEditor() {
 
   return (
     <div>
-      <Link to={pipelineId ? `/pipelines/${pipelineId}` : '/pipelines'} style={{ display: 'inline-block', marginBottom: 16 }}>
+      <Link to={returnUrl} style={{ display: 'inline-block', marginBottom: 16 }}>
         <Space>
           <ArrowLeftOutlined />
-          <span>Back to Pipeline</span>
+          <span>返回</span>
         </Space>
       </Link>
 

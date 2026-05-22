@@ -254,7 +254,7 @@ export default function TaskList() {
           <Button
             size="small"
             icon={<EditOutlined />}
-            onClick={() => navigate(`/task-defs/${encodeURIComponent(record.task_id)}/edit`)}
+            onClick={() => navigate(`/task-defs/${encodeURIComponent(record.task_id)}/edit?from=/tasks`)}
           >
             编辑
           </Button>

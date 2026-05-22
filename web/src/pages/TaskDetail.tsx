@@ -380,7 +380,7 @@ export default function TaskDetail() {
             </Button>
             <Button
               icon={<EditOutlined />}
-              onClick={() => navigate(`/task-defs/${encodeURIComponent(id!)}/edit`)}
+              onClick={() => navigate(`/task-defs/${encodeURIComponent(id!)}/edit?from=/tasks/${encodeURIComponent(id!)}`)}
             >
               编辑
             </Button>
