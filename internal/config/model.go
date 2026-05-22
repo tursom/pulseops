@@ -156,7 +156,9 @@ type TaskDefinition struct {
 	Trigger        string            `json:"trigger" db:"trigger"`
 	WatchTaskID    string            `json:"watch_task_id" db:"watch_task_id"`
 	WatchCondition string            `json:"watch_condition" db:"watch_condition"`
+	Trace          TracePolicy       `json:"trace,omitempty" db:"-"`
 	TraceJSON      []byte            `json:"-" db:"trace_json"`
+	Alert          AlertPolicy       `json:"alert,omitempty" db:"-"`
 	AlertJSON      []byte            `json:"-" db:"alert_json"`
 	CreatedAt      time.Time         `json:"created_at" db:"created_at"`
 	UpdatedAt      time.Time         `json:"updated_at" db:"updated_at"`

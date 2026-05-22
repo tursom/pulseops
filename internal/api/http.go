@@ -224,6 +224,7 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 			writeError(w, http.StatusBadRequest, "kind is required")
 			return
 		}
+		populateJSONBytes(&def)
 		def.UpdatedAt = time.Now()
 		def.CreatedAt = time.Now()
 		if err := repository.InsertTaskDefinition(r.Context(), def); err != nil {
@@ -256,6 +257,7 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		updated.TaskID = existing.TaskID
 		updated.CreatedAt = existing.CreatedAt
 		updated.UpdatedAt = time.Now()
+		populateJSONBytes(&updated)
 		if err := repository.UpdateTaskDefinition(r.Context(), updated); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -311,4 +313,19 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func populateJSONBytes(def *config.TaskDefinition) {
+	def.LabelsJSON = marshalOrDefault(def.Labels)
+	def.ParamsJSON = marshalOrDefault(def.Params)
+	def.TraceJSON = marshalOrDefault(def.Trace)
+	def.AlertJSON = marshalOrDefault(def.Alert)
+}
+
+func marshalOrDefault(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil || string(b) == "null" {
+		return []byte("{}")
+	}
+	return b
 }

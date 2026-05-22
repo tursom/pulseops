@@ -568,6 +568,12 @@ func (s *PostgresStore) ListTaskDefinitions(ctx context.Context) ([]config.TaskD
 		if len(d.ParamsJSON) > 0 {
 			_ = json.Unmarshal(d.ParamsJSON, &d.Params)
 		}
+		if len(d.TraceJSON) > 0 {
+			_ = json.Unmarshal(d.TraceJSON, &d.Trace)
+		}
+		if len(d.AlertJSON) > 0 {
+			_ = json.Unmarshal(d.AlertJSON, &d.Alert)
+		}
 		defs = append(defs, d)
 	}
 	return defs, rows.Err()
@@ -596,6 +602,12 @@ func (s *PostgresStore) GetTaskDefinition(ctx context.Context, taskID string) (*
 	}
 	if len(d.ParamsJSON) > 0 {
 		_ = json.Unmarshal(d.ParamsJSON, &d.Params)
+	}
+	if len(d.TraceJSON) > 0 {
+		_ = json.Unmarshal(d.TraceJSON, &d.Trace)
+	}
+	if len(d.AlertJSON) > 0 {
+		_ = json.Unmarshal(d.AlertJSON, &d.Alert)
 	}
 	return &d, nil
 }
