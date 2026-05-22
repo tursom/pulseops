@@ -3,6 +3,7 @@ import { Layout, Menu } from 'antd'
 import { DashboardOutlined, UnorderedListOutlined, ApartmentOutlined } from '@ant-design/icons'
 import Dashboard from './pages/Dashboard'
 import TaskDetail from './pages/TaskDetail'
+import TaskEditor from './pages/TaskEditor'
 import './App.css'
 
 const { Sider, Content } = Layout
@@ -51,8 +52,8 @@ export default function App() {
             <Route path="/tasks" element={<Dashboard />} />
             <Route path="/tasks/:id" element={<TaskDetail />} />
             <Route path="/pipeline" element={<div style={{ padding: 24 }}><h2>Pipeline Editor</h2><p>Coming soon...</p></div>} />
-            <Route path="/task-defs/new" element={<div style={{ padding: 24 }}><h2>Create Task</h2><p>Coming soon...</p></div>} />
-            <Route path="/task-defs/:id/edit" element={<div style={{ padding: 24 }}><h2>Edit Task</h2><p>Coming soon...</p></div>} />
+            <Route path="/task-defs/new" element={<TaskEditor />} />
+            <Route path="/task-defs/:id/edit" element={<TaskEditor />} />
           </Routes>
         </Content>
       </Layout>
