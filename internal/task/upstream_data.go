@@ -11,13 +11,9 @@ import (
 	"github.com/itchyny/gojq"
 
 	"pulseops/internal/config"
+	"pulseops/internal/ctxkey"
 	"pulseops/internal/store"
 )
-
-// ctxKey is defined locally to avoid an import cycle with the ai package.
-type ctxKey string
-
-const ctxTriggerRun ctxKey = "pulseops:triggerRun"
 
 type UpstreamDataParams struct {
 	SourceTaskID string        `json:"source_task_id"`
@@ -62,9 +58,9 @@ func (d *UpstreamDataDriver) Validate(spec config.TaskSpec) error {
 			return fmt.Errorf("data_process extract_expr[%d].jq_expr must not be empty", i)
 		}
 		switch {
-		case expr.Source == "payload", expr.Source == "summary", strings.HasPrefix(expr.Source, "artifact:"):
+		case expr.Source == "payload", expr.Source == "summary", expr.Source == "record", strings.HasPrefix(expr.Source, "artifact:"):
 		default:
-			return fmt.Errorf("data_process extract_expr[%d].source %q must be 'payload', 'summary', or 'artifact:<kind>'", i, expr.Source)
+			return fmt.Errorf("data_process extract_expr[%d].source %q must be 'payload', 'summary', 'record', or 'artifact:<kind>'", i, expr.Source)
 		}
 	}
 	return nil
@@ -95,7 +91,7 @@ type upstreamDataRunner struct {
 }
 
 func (r *upstreamDataRunner) Run(ctx context.Context, _ TriggerType) (Result, error) {
-	sourceRecord, ok := ctx.Value(ctxTriggerRun).(*store.RunRecord)
+	sourceRecord, ok := ctx.Value(ctxkey.CtxTriggerRun).(*store.RunRecord)
 	if !ok || sourceRecord == nil {
 		return Result{CheckStatus: "fail"}, fmt.Errorf("data_process requires a trigger run in context")
 	}
@@ -161,6 +157,20 @@ func (r *upstreamDataRunner) resolveSource(
 
 	case source == "summary":
 		return sourceRecord.Summary, nil
+
+	case source == "record":
+		return map[string]any{
+			"run_id":        sourceRecord.RunID,
+			"task_id":       sourceRecord.TaskID,
+			"task_kind":     sourceRecord.TaskKind,
+			"trigger_type":  sourceRecord.TriggerType,
+			"run_status":    sourceRecord.RunStatus,
+			"check_status":  sourceRecord.CheckStatus,
+			"started_at":    sourceRecord.StartedAt,
+			"ended_at":      sourceRecord.EndedAt,
+			"duration_ms":   sourceRecord.DurationMS,
+			"error_message": sourceRecord.ErrorMessage,
+		}, nil
 
 	case strings.HasPrefix(source, "artifact:"):
 		if err := r.ensureArtifacts(ctx, sourceTaskID, sourceRecord, artifacts); err != nil {

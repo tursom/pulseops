@@ -14,10 +14,10 @@ import (
 	"github.com/robfig/cron/v3"
 
 	"pulseops/internal/config"
+	"pulseops/internal/ctxkey"
 	"pulseops/internal/store"
 	"pulseops/internal/task"
 	"pulseops/internal/trace"
-	"pulseops/internal/ai"
 )
 
 type Manager struct {
@@ -613,9 +613,9 @@ func (t *managedTask) execute(trigger task.TriggerType, sourceRecord *store.RunR
 	}
 	defer cancel()
 
-	runCtx = context.WithValue(runCtx, ai.CtxRunID, runID)
+	runCtx = context.WithValue(runCtx, ctxkey.CtxRunID, runID)
 	if sourceRecord != nil {
-		runCtx = context.WithValue(runCtx, ai.CtxTriggerRun, sourceRecord)
+		runCtx = context.WithValue(runCtx, ctxkey.CtxTriggerRun, sourceRecord)
 	}
 
 	result, err := t.runner.Run(runCtx, trigger)

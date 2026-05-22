@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"pulseops/internal/ctxkey"
 )
 
-type ctxKey string
-
-const (
-	CtxRunID      ctxKey = "pulseops:runID"
-	CtxTriggerRun ctxKey = "pulseops:triggerRun"
+var (
+	CtxRunID      = ctxkey.CtxRunID
+	CtxTriggerRun = ctxkey.CtxTriggerRun
 )
 
 func runnerRunID(ctx context.Context, taskID string) string {

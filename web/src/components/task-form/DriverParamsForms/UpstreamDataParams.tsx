@@ -5,6 +5,7 @@ import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
 const sourceOptions = [
   { value: 'payload', label: 'payload' },
   { value: 'summary', label: 'summary' },
+  { value: 'record', label: 'record' },
   { value: 'artifact:payload', label: 'artifact:payload' },
   { value: 'artifact:stdout', label: 'artifact:stdout' },
   { value: 'artifact:stderr', label: 'artifact:stderr' },
