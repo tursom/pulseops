@@ -219,7 +219,7 @@ export default function TaskDetail() {
       title: '运行ID',
       dataIndex: 'run_id',
       key: 'run_id',
-      render: (v: string) => <Text code>{shortRunID(v)}</Text>,
+      render: (v: string) => <Link to={`/tasks/${id}/runs/${v}`}><Text code>{shortRunID(v)}</Text></Link>,
     },
     {
       title: '触发方式',

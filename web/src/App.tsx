@@ -4,6 +4,7 @@ import { DashboardOutlined, UnorderedListOutlined, ApartmentOutlined, SettingOut
 import Dashboard from './pages/Dashboard'
 import TaskList from './pages/TaskList'
 import TaskDetail from './pages/TaskDetail'
+import RunDetail from './pages/RunDetail'
 import TaskEditor from './pages/TaskEditor'
 import PipelineList from './pages/PipelineList'
 import PipelineEditor from './pages/PipelineEditor'
@@ -55,6 +56,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/tasks" element={<TaskList />} />
+            <Route path="/tasks/:id/runs/:runId" element={<RunDetail />} />
             <Route path="/tasks/:id" element={<TaskDetail />} />
             <Route path="/pipelines" element={<PipelineList />} />
             <Route path="/pipelines/:id" element={<PipelineEditor />} />
