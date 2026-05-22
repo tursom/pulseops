@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Typography, Button, Space, Input, Select, Table, Tag, Switch, Spin, Alert, Empty, message } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { ReloadOutlined, PlayCircleOutlined, PauseCircleOutlined, ThunderboltOutlined, EditOutlined } from '@ant-design/icons'
+import { ReloadOutlined, PlayCircleOutlined, PauseCircleOutlined, ThunderboltOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons'
 import { Link, useNavigate } from 'react-router-dom'
 import { fetchTasks, triggerTaskRun, enableTask, disableTask } from '../api/client'
 import type { TaskState } from '../api/types'
@@ -275,7 +275,10 @@ export default function TaskList() {
     <div style={{ padding: 24 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <Typography.Title level={3} style={{ margin: 0 }}>任务列表</Typography.Title>
-        <Button icon={<ReloadOutlined />} onClick={loadTasks}>刷新</Button>
+        <Space>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/task-defs/new?from=/tasks')}>创建任务</Button>
+          <Button icon={<ReloadOutlined />} onClick={loadTasks}>刷新</Button>
+        </Space>
       </div>
 
       <div style={{ marginBottom: 16 }}>
