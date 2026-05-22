@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   ReactFlow,
   Controls,
@@ -8,9 +8,11 @@ import {
   useEdgesState,
   MarkerType,
 } from '@xyflow/react'
+import type { Connection, Edge } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
+import { Modal, Input, message } from 'antd'
 
-import { fetchTaskDefinitions, fetchTasks } from '../../api/client'
+import { fetchTaskDefinitions, fetchTasks, updateTaskDefinition } from '../../api/client'
 import type { TaskDefinition, TaskState } from '../../api/types'
 import TaskNode from './TaskNode'
 import DependencyEdge from './DependencyEdge'
@@ -58,7 +60,7 @@ function buildGraph(
     if (def.trigger === 'on_run' && def.watch_task_id !== '') {
       edges.push({
         id: `dep-${def.watch_task_id}->${def.task_id}`,
-      type: 'dependencyEdge' as const,
+        type: 'dependencyEdge' as const,
         source: def.watch_task_id,
         target: def.task_id,
         data: { condition: def.watch_condition || undefined },
@@ -146,13 +148,22 @@ export default function PipelineCanvas() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
+  const taskDefsRef = useRef<TaskDefinition[]>([])
+  const loadDataRef = useRef<() => Promise<void>>(async () => {})
+
   const loadData = useCallback(async () => {
     try {
       const [defs, states] = await Promise.all([
         fetchTaskDefinitions(),
         fetchTasks(),
       ])
+      taskDefsRef.current = defs
       const graph = buildGraph(defs, states)
+
+      for (const node of graph.nodes) {
+        node.data.onRefresh = () => { loadDataRef.current() }
+      }
+
       setNodes(graph.nodes)
       setEdges(graph.edges)
       setError(null)
@@ -164,14 +175,141 @@ export default function PipelineCanvas() {
   }, [setNodes, setEdges])
 
   useEffect(() => {
+    loadDataRef.current = loadData
+  }, [loadData])
+
+  useEffect(() => {
     loadData()
     const interval = setInterval(loadData, 10_000)
     return () => clearInterval(interval)
   }, [loadData])
 
+  const onConnect = useCallback(async (connection: Connection) => {
+    const sourceId = connection.source
+    const targetId = connection.target
+    if (!sourceId || !targetId) return
+    if (sourceId === targetId) return
+
+    const defs = taskDefsRef.current
+    const sourceDef = defs.find(d => d.task_id === sourceId)
+    const targetDef = defs.find(d => d.task_id === targetId)
+    if (!sourceDef || !targetDef) return
+
+    let condition = ''
+
+    Modal.confirm({
+      title: 'Create Dependency',
+      content: (
+        <div>
+          <p>
+            Set <strong>{sourceDef.name}</strong> as watch_task
+            for <strong>{targetDef.name}</strong>?
+          </p>
+          <Input
+            placeholder="watch_condition (optional, e.g. check_status == 'fail')"
+            onChange={e => { condition = e.target.value }}
+          />
+        </div>
+      ),
+      onOk: async () => {
+        try {
+          await updateTaskDefinition(targetId, {
+            ...targetDef,
+            watch_task_id: sourceId,
+            trigger: 'on_run',
+            watch_condition: condition,
+          })
+          message.success('Dependency created')
+          loadData()
+        } catch (err) {
+          message.error(err instanceof Error ? err.message : 'Failed to create dependency')
+        }
+      },
+    })
+  }, [loadData])
+
+  const onEdgeClick = useCallback(async (_event: React.MouseEvent, edge: Edge) => {
+    const targetId = edge.target
+    const sourceId = edge.source
+    const defs = taskDefsRef.current
+    const targetDef = defs.find(d => d.task_id === targetId)
+    if (!targetDef) return
+
+    let newCondition = targetDef.watch_condition || ''
+
+    Modal.confirm({
+      title: 'Edit Dependency',
+      content: (
+        <div>
+          <p>
+            <strong>watch_task:</strong> {sourceId}
+          </p>
+          <Input
+            placeholder="watch_condition (optional)"
+            defaultValue={newCondition}
+            onChange={e => { newCondition = e.target.value }}
+          />
+        </div>
+      ),
+      okText: 'Save',
+      cancelText: 'Delete Dependency',
+      onOk: async () => {
+        try {
+          await updateTaskDefinition(targetId, {
+            ...targetDef,
+            watch_condition: newCondition,
+          })
+          message.success('Dependency updated')
+          loadData()
+        } catch (err) {
+          message.error(err instanceof Error ? err.message : 'Failed to update dependency')
+        }
+      },
+      onCancel: async () => {
+        Modal.confirm({
+          title: 'Delete Dependency?',
+          content: <p>Remove on_run link to <strong>{sourceId}</strong>?</p>,
+          okText: 'Delete',
+          okButtonProps: { danger: true },
+          onOk: async () => {
+            try {
+              await updateTaskDefinition(targetId, {
+                ...targetDef,
+                watch_task_id: '',
+                trigger: 'scheduled',
+                watch_condition: '',
+              })
+              message.success('Dependency removed')
+              loadData()
+            } catch (err) {
+              message.error(err instanceof Error ? err.message : 'Failed to remove dependency')
+            }
+          },
+        })
+      },
+    })
+  }, [loadData])
+
+  const onEdgesDelete = useCallback(async (deletedEdges: Edge[]) => {
+    const defs = taskDefsRef.current
+    for (const edge of deletedEdges) {
+      const targetDef = defs.find(d => d.task_id === edge.target)
+      if (targetDef) {
+        await updateTaskDefinition(targetDef.task_id, {
+          ...targetDef,
+          watch_task_id: '',
+          trigger: 'scheduled',
+          watch_condition: '',
+        })
+      }
+    }
+    message.success('Dependencies removed')
+    loadData()
+  }, [loadData])
+
   const defaultEdgeOptions = useMemo(
     () => ({
-      type: 'dependencyEdge',
+      type: 'dependencyEdge' as const,
       markerEnd: {
         type: MarkerType.ArrowClosed,
         width: 14,
@@ -222,6 +360,9 @@ export default function PipelineCanvas() {
       edges={edges}
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
+      onConnect={onConnect}
+      onEdgeClick={onEdgeClick}
+      onEdgesDelete={onEdgesDelete}
       nodeTypes={NODE_TYPES}
       edgeTypes={EDGE_TYPES}
       defaultEdgeOptions={defaultEdgeOptions}
@@ -229,6 +370,7 @@ export default function PipelineCanvas() {
       fitViewOptions={{ padding: 0.2 }}
       attributionPosition="bottom-left"
       style={{ background: '#f5f5f5' }}
+      connectionLineStyle={{ stroke: '#faad14', strokeWidth: 1.5, strokeDasharray: '5,5' }}
     >
       <Controls />
       <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#d9d9d9" />

@@ -7,6 +7,7 @@ export interface TaskNodeData extends Record<string, unknown> {
   enabled: boolean
   status?: string
   lastRunStatus?: string
+  onRefresh?: () => void
 }
 
 export interface DependencyEdgeData extends Record<string, unknown> {
