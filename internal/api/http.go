@@ -63,13 +63,22 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"task_id":    taskState.TaskID,
-			"name":       taskState.Name,
-			"kind":       taskState.Kind,
-			"enabled":    taskState.Enabled,
-			"status":     taskState.Status,
-			"definition": def,
-			"runtime":    taskState,
+			"task_id":            taskState.TaskID,
+			"name":               taskState.Name,
+			"kind":               taskState.Kind,
+			"enabled":            taskState.Enabled,
+			"status":             taskState.Status,
+			"labels":             taskState.Labels,
+			"last_run_at":        taskState.LastRunAt,
+			"next_run_at":        taskState.NextRunAt,
+			"last_run_status":    taskState.LastRunStatus,
+			"last_check_status":  taskState.LastCheckStatus,
+			"last_error":         taskState.LastError,
+			"last_duration_ms":   taskState.LastDurationMS,
+			"last_reload_error":  taskState.LastReloadError,
+			"source_path":        taskState.SourcePath,
+			"updated_at":         taskState.UpdatedAt,
+			"definition":         def,
 		})
 	})
 	mux.HandleFunc("GET /api/tasks/{id}/runs", func(w http.ResponseWriter, r *http.Request) {
