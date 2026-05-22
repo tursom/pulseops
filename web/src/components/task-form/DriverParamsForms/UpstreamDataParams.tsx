@@ -1,8 +1,10 @@
-import React from 'react';
-import { Form, Input, Select, Button, Space, Tooltip, Typography } from 'antd';
+import React, { useState, useEffect } from 'react';
+import { Form, Input, Select, Button, Space, Tooltip, Typography, Spin } from 'antd';
 import type { FormInstance } from 'antd';
 import { MinusCircleOutlined, PlusOutlined, QuestionCircleOutlined } from '@ant-design/icons';
 import JsonFieldPicker from '../../JsonFieldPicker';
+import { fetchTaskDefinitions } from '../../../api/client';
+import type { TaskDefinition } from '../../../api/types';
 
 const { Text } = Typography;
 
@@ -35,14 +37,37 @@ const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
   const trigger = form ? Form.useWatch('trigger', form) as string : undefined;
   const watchTaskId = form ? Form.useWatch('watch_task_id', form) as string : undefined;
   const resolvedTaskId = sourceTaskId || (trigger === 'on_run' ? watchTaskId : null) || null;
+
+  const [taskDefs, setTaskDefs] = useState<TaskDefinition[]>([]);
+  const [taskDefsLoading, setTaskDefsLoading] = useState(false);
+
+  useEffect(() => {
+    setTaskDefsLoading(true);
+    fetchTaskDefinitions()
+      .then((defs) => setTaskDefs(defs.filter((d) => d.enabled)))
+      .catch(() => {})
+      .finally(() => setTaskDefsLoading(false));
+  }, []);
+
   return (
     <>
       <Form.Item
         name={['params', 'source_task_id']}
-        label="源任务 ID"
+        label="源任务"
         extra="留空则使用依赖触发（watch_task）的上游任务作为数据源"
       >
-        <Input placeholder="留空默认使用 watch_task" />
+        <Select
+          allowClear
+          loading={taskDefsLoading}
+          notFoundContent={taskDefsLoading ? <Spin size="small" /> : '没有启用的任务'}
+          placeholder="留空默认使用 watch_task"
+          options={taskDefs.map((d) => ({
+            value: d.task_id,
+            label: `${d.name} (${d.task_id})`,
+          }))}
+          showSearch
+          optionFilterProp="label"
+        />
       </Form.Item>
 
       <div style={{ marginBottom: 12 }}>
