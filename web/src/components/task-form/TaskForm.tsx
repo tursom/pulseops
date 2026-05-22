@@ -240,7 +240,14 @@ export default function TaskForm({
             </Form.Item>
 
             <Form.Item name="watch_condition" label="触发条件">
-              <Input placeholder="如 status == 'success'" />
+              <Select
+                allowClear
+                placeholder="不限制（总是触发）"
+                options={[
+                  { value: 'check_status == pass', label: '上游检查通过时触发' },
+                  { value: 'run_status == success', label: '上游运行成功时触发' },
+                ]}
+              />
             </Form.Item>
           </>
         )}
