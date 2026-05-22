@@ -306,6 +306,9 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		updated.TaskID = existing.TaskID
 		updated.CreatedAt = existing.CreatedAt
 		updated.UpdatedAt = time.Now()
+		if updated.PipelineID == nil {
+			updated.PipelineID = existing.PipelineID
+		}
 		populateJSONBytes(&updated)
 		if err := repository.UpdateTaskDefinition(r.Context(), updated); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())

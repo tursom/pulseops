@@ -108,7 +108,7 @@ export default function TaskEditor() {
     try {
       if (selectedPipelineId) {
         def.pipeline_id = selectedPipelineId
-      } else if (def.pipeline_id === undefined) {
+      } else if (!isEdit && def.pipeline_id === undefined) {
         def.pipeline_id = null
       }
       if (isEdit && id) {
