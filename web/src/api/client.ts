@@ -81,6 +81,19 @@ export async function fetchArtifactDetail(artifactID: string): Promise<ArtifactD
   return request<ArtifactDetail>(`/api/artifacts/${encodeURIComponent(artifactID)}`)
 }
 
+// GET /api/artifacts/{artifactID}/content
+export async function fetchArtifactContent(artifactID: string): Promise<string> {
+  const res = await fetch(`/api/artifacts/${encodeURIComponent(artifactID)}/content`, {
+    headers: { 'Content-Type': 'application/json' },
+    cache: 'no-store',
+  })
+  if (!res.ok) {
+    const body = await res.json().catch((): { error: string } => ({ error: res.statusText }))
+    throw new Error(body.error || `HTTP ${res.status}`)
+  }
+  return res.text()
+}
+
 // POST /api/tasks/{id}/run
 export async function triggerTaskRun(id: string): Promise<RunRecord> {
   return request<RunRecord>(`/api/tasks/${encodeURIComponent(id)}/run`, { method: 'POST' })

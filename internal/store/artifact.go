@@ -197,8 +197,9 @@ func ObjectKeyFromURI(raw string) (string, error) {
 func derivePreviewText(raw []byte, contentType string) string {
 	if strings.Contains(contentType, "json") || strings.HasPrefix(contentType, "text/") {
 		text := string(raw)
-		if len(text) > 256 {
-			return text[:256]
+		const maxLen = 1 << 20
+		if len(text) > maxLen {
+			return text[:maxLen]
 		}
 		return text
 	}

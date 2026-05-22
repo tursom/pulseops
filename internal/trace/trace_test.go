@@ -27,10 +27,8 @@ func TestApplyPolicySummaryMasksAndStripsVerboseFields(t *testing.T) {
 	}
 
 	trimmed := applyPolicy(config.TracePolicy{
-		Enabled:            true,
-		Level:              "summary",
-		StoreResultPayload: true,
-		MaskFields:         []string{"token", "password"},
+		Level:      "summary",
+		MaskFields: []string{"token", "password"},
 	}, record)
 
 	if trimmed.Payload != nil {
@@ -48,7 +46,7 @@ func TestManagerProcessExternalizesLargePayloadAfterMasking(t *testing.T) {
 	t.Parallel()
 
 	artifactStore := &fakeArtifactStore{}
-	manager := NewManager(slog.New(slog.NewTextHandler(io.Discard, nil)), artifactStore)
+	manager := NewManager(slog.New(slog.NewTextHandler(io.Discard, nil)), artifactStore, 20)
 	record := store.RunRecord{
 		RunID:     "run-1",
 		TaskID:    "task-1",
@@ -58,11 +56,8 @@ func TestManagerProcessExternalizesLargePayloadAfterMasking(t *testing.T) {
 	}
 
 	processed, err := manager.Process(context.Background(), config.TracePolicy{
-		Enabled:            true,
-		Level:              "detail",
-		StoreResultPayload: true,
-		MaxPayloadBytes:    20,
-		MaskFields:         []string{"token"},
+		Level:      "detail",
+		MaskFields: []string{"token"},
 	}, record)
 	if err != nil {
 		t.Fatalf("process trace record: %v", err)
@@ -82,14 +77,12 @@ func TestManagerDispatchWritesRegisteredSink(t *testing.T) {
 	t.Parallel()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	manager := NewManager(logger, &fakeArtifactStore{})
+	manager := NewManager(logger, &fakeArtifactStore{}, 4096)
 	sink := &captureSink{name: "capture", kind: "webhook"}
 	manager.Register(sink)
 
 	manager.Dispatch(context.Background(), config.TracePolicy{
-		Enabled: true,
-		Level:   "detail",
-		Sinks:   []string{"capture"},
+		Level: "detail",
 	}, store.RunRecord{RunID: "run-1", TaskID: "task-1"})
 
 	if sink.called != 1 {

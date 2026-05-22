@@ -30,6 +30,7 @@ import {
   fetchRunAIAnalysis,
   fetchRunArtifacts,
   fetchArtifactDetail,
+  fetchArtifactContent,
 } from '../api/client'
 import type {
   RunRecord,
@@ -68,6 +69,31 @@ const jsonStringColor = '#1a8000'
 const jsonNumberColor = '#1750ac'
 const jsonBooleanColor = '#b22452'
 const jsonNullColor = '#808080'
+
+function deepParseJSON(value: unknown): unknown {
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+      try {
+        return deepParseJSON(JSON.parse(trimmed))
+      } catch {
+        return value
+      }
+    }
+    return value
+  }
+  if (Array.isArray(value)) {
+    return value.map(deepParseJSON)
+  }
+  if (value && typeof value === 'object') {
+    const result: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      result[k] = deepParseJSON(v)
+    }
+    return result
+  }
+  return value
+}
 
 function renderHighlightedJson(text: string): React.ReactNode {
   const lines = text.split('\n')
@@ -165,16 +191,27 @@ export default function RunDetail() {
     try {
       const detail = await fetchArtifactDetail(artifactID)
       const artifactData = (detail as unknown as Record<string, unknown>).artifact as Record<string, unknown> | undefined
-      const raw = (artifactData?.preview_text as string) || (detail as unknown as Record<string, unknown>).preview_text as string | undefined
+      let raw = (artifactData?.preview_text as string) || (detail as unknown as Record<string, unknown>).preview_text as string | undefined
       const uri = (artifactData?.uri as string) || (detail as unknown as Record<string, unknown>).uri as string || artifactID
       if (!raw) {
         message.info('该产物无可预览的文本内容')
         setPreviewLoading(false)
         return
       }
+      const sizeBytes = (artifactData?.size_bytes as number) || (detail as unknown as Record<string, unknown>).size_bytes as number || 0
+      const truncated = raw.length < sizeBytes && !(raw.trim().endsWith('}') || raw.trim().endsWith(']') || raw.trim().endsWith('"'))
+      if (truncated) {
+        try {
+          raw = await fetchArtifactContent(artifactID)
+        } catch {
+          // fall back to truncated preview_text
+        }
+      }
       let formatted = raw
       try {
-        formatted = JSON.stringify(JSON.parse(raw), null, 2)
+        const parsed = JSON.parse(raw)
+        const deep = deepParseJSON(parsed)
+        formatted = JSON.stringify(deep, null, 2)
       } catch {
         // not valid JSON, show raw text
       }

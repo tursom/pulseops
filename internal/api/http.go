@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -169,6 +170,31 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 			"artifact":     artifact,
 			"download_url": downloadURL,
 		})
+	})
+	mux.HandleFunc("GET /api/artifacts/{artifactID}/content", func(w http.ResponseWriter, r *http.Request) {
+		artifact, err := repository.GetArtifact(r.Context(), r.PathValue("artifactID"))
+		if err != nil {
+			if err == sql.ErrNoRows {
+				writeError(w, http.StatusNotFound, "artifact not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		key, err := store.ObjectKeyFromURI(artifact.URI)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		reader, err := artifactStore.Get(r.Context(), key)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer reader.Close()
+		w.Header().Set("Content-Type", artifact.ContentType)
+		w.WriteHeader(http.StatusOK)
+		io.Copy(w, reader)
 	})
 	mux.HandleFunc("POST /api/tasks/{id}/run", func(w http.ResponseWriter, r *http.Request) {
 		record, err := manager.RunTask(r.Context(), r.PathValue("id"), task.TriggerManual)

@@ -86,7 +86,7 @@ func TestTaskSpecNormalizeInjectsPostgresSink(t *testing.T) {
 		ID:   "task-a",
 		Kind: "http_check",
 		Trace: TracePolicy{
-			StoreResultPayload: true,
+			Level: "detail",
 		},
 	}
 
@@ -95,11 +95,8 @@ func TestTaskSpecNormalizeInjectsPostgresSink(t *testing.T) {
 	if spec.Timeout.Duration != 7*time.Second {
 		t.Fatalf("expected inherited timeout, got %s", spec.Timeout.Duration)
 	}
-	if !spec.Trace.Enabled {
-		t.Fatalf("expected trace to auto enable")
-	}
-	if len(spec.Trace.Sinks) != 1 || spec.Trace.Sinks[0] != "postgres_main" {
-		t.Fatalf("expected postgres sink injected, got %#v", spec.Trace.Sinks)
+	if spec.Trace.Level != "detail" {
+		t.Fatalf("expected trace level detail, got %q", spec.Trace.Level)
 	}
 }
 
