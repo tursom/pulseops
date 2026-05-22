@@ -22,82 +22,82 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   return res.json()
 }
 
-// GET /healthz
+// GET /api/healthz
 export async function fetchHealth(): Promise<HealthResponse> {
-  return request<HealthResponse>('/healthz')
+  return request<HealthResponse>('/api/healthz')
 }
 
-// GET /tasks
+// GET /api/tasks
 export async function fetchTasks(): Promise<TaskState[]> {
-  return request<TaskState[]>('/tasks')
+  return request<TaskState[]>('/api/tasks')
 }
 
-// GET /tasks/{id}
+// GET /api/tasks/{id}
 export async function fetchTask(id: string): Promise<TaskState> {
-  return request<TaskState>(`/tasks/${encodeURIComponent(id)}`)
+  return request<TaskState>(`/api/tasks/${encodeURIComponent(id)}`)
 }
 
-// GET /tasks/{id}/runs
+// GET /api/tasks/{id}/runs
 export async function fetchTaskRuns(id: string, limit?: number): Promise<RunRecord[]> {
   const params = new URLSearchParams()
   if (limit !== undefined) {
     params.set('limit', String(limit))
   }
   const qs = params.toString()
-  return request<RunRecord[]>(`/tasks/${encodeURIComponent(id)}/runs${qs ? `?${qs}` : ''}`)
+  return request<RunRecord[]>(`/api/tasks/${encodeURIComponent(id)}/runs${qs ? `?${qs}` : ''}`)
 }
 
-// GET /tasks/{id}/runs/{runID}
+// GET /api/tasks/{id}/runs/{runID}
 export async function fetchTaskRun(id: string, runID: string): Promise<RunRecord> {
-  return request<RunRecord>(`/tasks/${encodeURIComponent(id)}/runs/${encodeURIComponent(runID)}`)
+  return request<RunRecord>(`/api/tasks/${encodeURIComponent(id)}/runs/${encodeURIComponent(runID)}`)
 }
 
-// GET /tasks/{id}/runs/{runID}/ai
+// GET /api/tasks/{id}/runs/{runID}/ai
 export async function fetchRunAIAnalysis(id: string, runID: string): Promise<AIAnalysisRecord> {
-  return request<AIAnalysisRecord>(`/tasks/${encodeURIComponent(id)}/runs/${encodeURIComponent(runID)}/ai`)
+  return request<AIAnalysisRecord>(`/api/tasks/${encodeURIComponent(id)}/runs/${encodeURIComponent(runID)}/ai`)
 }
 
-// GET /tasks/{id}/ai
+// GET /api/tasks/{id}/ai
 export async function fetchTaskAIAnalyses(id: string, limit?: number): Promise<AIAnalysisRecord[]> {
   const params = new URLSearchParams()
   if (limit !== undefined) {
     params.set('limit', String(limit))
   }
   const qs = params.toString()
-  return request<AIAnalysisRecord[]>(`/tasks/${encodeURIComponent(id)}/ai${qs ? `?${qs}` : ''}`)
+  return request<AIAnalysisRecord[]>(`/api/tasks/${encodeURIComponent(id)}/ai${qs ? `?${qs}` : ''}`)
 }
 
-// GET /tasks/{id}/runs/{runID}/artifacts
+// GET /api/tasks/{id}/runs/{runID}/artifacts
 export async function fetchRunArtifacts(id: string, runID: string): Promise<ArtifactRef[]> {
-  return request<ArtifactRef[]>(`/tasks/${encodeURIComponent(id)}/runs/${encodeURIComponent(runID)}/artifacts`)
+  return request<ArtifactRef[]>(`/api/tasks/${encodeURIComponent(id)}/runs/${encodeURIComponent(runID)}/artifacts`)
 }
 
-// GET /artifacts/{artifactID}
+// GET /api/artifacts/{artifactID}
 export async function fetchArtifactDetail(artifactID: string): Promise<ArtifactDetail> {
-  return request<ArtifactDetail>(`/artifacts/${encodeURIComponent(artifactID)}`)
+  return request<ArtifactDetail>(`/api/artifacts/${encodeURIComponent(artifactID)}`)
 }
 
-// POST /tasks/{id}/run
+// POST /api/tasks/{id}/run
 export async function triggerTaskRun(id: string): Promise<RunRecord> {
-  return request<RunRecord>(`/tasks/${encodeURIComponent(id)}/run`, { method: 'POST' })
+  return request<RunRecord>(`/api/tasks/${encodeURIComponent(id)}/run`, { method: 'POST' })
 }
 
-// POST /tasks/{id}/runs/{runID}/rerun
+// POST /api/tasks/{id}/runs/{runID}/rerun
 export async function retriggerTaskRun(id: string, runID: string): Promise<RunRecord> {
-  return request<RunRecord>(`/tasks/${encodeURIComponent(id)}/runs/${encodeURIComponent(runID)}/rerun`, { method: 'POST' })
+  return request<RunRecord>(`/api/tasks/${encodeURIComponent(id)}/runs/${encodeURIComponent(runID)}/rerun`, { method: 'POST' })
 }
 
-// POST /tasks/{id}/reload
+// POST /api/tasks/{id}/reload
 export async function reloadTask(id: string): Promise<ActionResponse> {
-  return request<ActionResponse>(`/tasks/${encodeURIComponent(id)}/reload`, { method: 'POST' })
+  return request<ActionResponse>(`/api/tasks/${encodeURIComponent(id)}/reload`, { method: 'POST' })
 }
 
-// POST /tasks/{id}/enable
+// POST /api/tasks/{id}/enable
 export async function enableTask(id: string): Promise<ActionResponse> {
-  return request<ActionResponse>(`/tasks/${encodeURIComponent(id)}/enable`, { method: 'POST' })
+  return request<ActionResponse>(`/api/tasks/${encodeURIComponent(id)}/enable`, { method: 'POST' })
 }
 
-// POST /tasks/{id}/disable
+// POST /api/tasks/{id}/disable
 export async function disableTask(id: string): Promise<ActionResponse> {
-  return request<ActionResponse>(`/tasks/${encodeURIComponent(id)}/disable`, { method: 'POST' })
+  return request<ActionResponse>(`/api/tasks/${encodeURIComponent(id)}/disable`, { method: 'POST' })
 }

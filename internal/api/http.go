@@ -31,16 +31,16 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 
 	// API routes — register before static/file routes for specificity priority
 	mux.Handle("GET /metrics", promhttp.Handler())
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status": "ok",
 			"time":   time.Now().Format(time.RFC3339),
 		})
 	})
-	mux.HandleFunc("GET /tasks", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/tasks", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, manager.ListTasks())
 	})
-	mux.HandleFunc("GET /tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
 		taskState, ok := manager.GetTask(r.PathValue("id"))
 		if !ok {
 			writeError(w, http.StatusNotFound, "task not found")
@@ -48,7 +48,7 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		}
 		writeJSON(w, http.StatusOK, taskState)
 	})
-	mux.HandleFunc("GET /tasks/{id}/runs", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/tasks/{id}/runs", func(w http.ResponseWriter, r *http.Request) {
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		records, err := repository.ListRuns(r.Context(), r.PathValue("id"), limit)
 		if err != nil {
@@ -57,7 +57,7 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		}
 		writeJSON(w, http.StatusOK, records)
 	})
-	mux.HandleFunc("GET /tasks/{id}/runs/{runID}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/tasks/{id}/runs/{runID}", func(w http.ResponseWriter, r *http.Request) {
 		record, err := repository.GetRun(r.Context(), r.PathValue("id"), r.PathValue("runID"))
 		if err != nil {
 			if err == sql.ErrNoRows {
@@ -69,7 +69,7 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		}
 		writeJSON(w, http.StatusOK, record)
 	})
-	mux.HandleFunc("GET /tasks/{id}/runs/{runID}/ai", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/tasks/{id}/runs/{runID}/ai", func(w http.ResponseWriter, r *http.Request) {
 		analysis, err := repository.GetAIAnalysis(r.Context(), r.PathValue("runID"))
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -81,7 +81,7 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		}
 		writeJSON(w, http.StatusOK, analysis)
 	})
-	mux.HandleFunc("GET /tasks/{id}/ai", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/tasks/{id}/ai", func(w http.ResponseWriter, r *http.Request) {
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		records, err := repository.ListAIAnalyses(r.Context(), r.PathValue("id"), limit)
 		if err != nil {
@@ -90,7 +90,7 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		}
 		writeJSON(w, http.StatusOK, records)
 	})
-	mux.HandleFunc("GET /tasks/{id}/runs/{runID}/artifacts", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/tasks/{id}/runs/{runID}/artifacts", func(w http.ResponseWriter, r *http.Request) {
 		artifacts, err := repository.ListArtifactsByRun(r.Context(), r.PathValue("id"), r.PathValue("runID"))
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -98,7 +98,7 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		}
 		writeJSON(w, http.StatusOK, artifacts)
 	})
-	mux.HandleFunc("GET /artifacts/{artifactID}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/artifacts/{artifactID}", func(w http.ResponseWriter, r *http.Request) {
 		artifact, err := repository.GetArtifact(r.Context(), r.PathValue("artifactID"))
 		if err != nil {
 			if err == sql.ErrNoRows {
@@ -123,7 +123,7 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 			"download_url": downloadURL,
 		})
 	})
-	mux.HandleFunc("POST /tasks/{id}/run", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/tasks/{id}/run", func(w http.ResponseWriter, r *http.Request) {
 		record, err := manager.RunTask(r.Context(), r.PathValue("id"), task.TriggerManual)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -131,7 +131,7 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		}
 		writeJSON(w, http.StatusOK, record)
 	})
-	mux.HandleFunc("POST /tasks/{id}/runs/{runID}/rerun", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/tasks/{id}/runs/{runID}/rerun", func(w http.ResponseWriter, r *http.Request) {
 		record, err := manager.RunTask(r.Context(), r.PathValue("id"), task.TriggerRerun)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -139,21 +139,21 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		}
 		writeJSON(w, http.StatusOK, record)
 	})
-	mux.HandleFunc("POST /tasks/{id}/reload", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/tasks/{id}/reload", func(w http.ResponseWriter, r *http.Request) {
 		if err := manager.ReloadTask(r.Context(), r.PathValue("id")); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "reloaded"})
 	})
-	mux.HandleFunc("POST /tasks/{id}/enable", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/tasks/{id}/enable", func(w http.ResponseWriter, r *http.Request) {
 		if err := manager.SetTaskEnabled(r.Context(), r.PathValue("id"), true); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "enabled"})
 	})
-	mux.HandleFunc("POST /tasks/{id}/disable", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/tasks/{id}/disable", func(w http.ResponseWriter, r *http.Request) {
 		if err := manager.SetTaskEnabled(r.Context(), r.PathValue("id"), false); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return

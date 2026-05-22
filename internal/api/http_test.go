@@ -45,14 +45,14 @@ func TestArtifactEndpoints(t *testing.T) {
 		},
 	}, &fakeArtifactStore{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	req := httptest.NewRequest(http.MethodGet, "/tasks/task-a/runs/run-1/artifacts", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/task-a/runs/run-1/artifacts", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"artifact_id":"artifact-1"`) {
 		t.Fatalf("unexpected artifacts response: %d %s", rec.Code, rec.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/artifacts/artifact-1", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/artifacts/artifact-1", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"download_url":"https://download.local/object"`) {
