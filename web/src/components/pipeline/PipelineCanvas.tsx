@@ -10,7 +10,7 @@ import {
 } from '@xyflow/react'
 import type { Connection, Edge } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { Modal, Input, Card, Empty, message } from 'antd'
+import { Modal, Select, Card, Empty, message, Space, Button } from 'antd'
 
 import { fetchPipelineTasks, fetchTasks, updateTaskDefinition } from '../../api/client'
 import type { TaskDefinition, TaskState } from '../../api/types'
@@ -156,6 +156,11 @@ export default function PipelineCanvas({ pipelineId }: Props) {
   const taskDefsRef = useRef<TaskDefinition[]>([])
   const loadDataRef = useRef<() => Promise<void>>(async () => {})
 
+  const [depEditorOpen, setDepEditorOpen] = useState(false)
+  const [depEditorSource, setDepEditorSource] = useState('')
+  const [depEditorTarget, setDepEditorTarget] = useState('')
+  const [depEditorCondition, setDepEditorCondition] = useState('')
+
   const loadData = useCallback(async () => {
     try {
       const [defs, states] = await Promise.all([
@@ -204,14 +209,21 @@ export default function PipelineCanvas({ pipelineId }: Props) {
 
     Modal.confirm({
       title: '创建依赖',
+      maskClosable: true,
       content: (
         <div>
           <p>
             将 <strong>{sourceDef.name}</strong> 设为 <strong>{targetDef.name}</strong> 的监听任务？
           </p>
-          <Input
-            placeholder="触发条件（可选，如 check_status == 'fail'）"
-            onChange={e => { condition = e.target.value }}
+          <Select
+            allowClear
+            placeholder="不限制（总是触发）"
+            style={{ width: '100%' }}
+            onChange={(v) => { condition = v || '' }}
+            options={[
+              { value: 'check_status == pass', label: '上游检查通过时触发' },
+              { value: 'run_status == success', label: '上游运行成功时触发' },
+            ]}
           />
         </div>
       ),
@@ -232,67 +244,59 @@ export default function PipelineCanvas({ pipelineId }: Props) {
     })
   }, [loadData])
 
-  const onEdgeClick = useCallback(async (_event: React.MouseEvent, edge: Edge) => {
-    const targetId = edge.target
-    const sourceId = edge.source
+  const onEdgeClick = useCallback((_event: React.MouseEvent, edge: Edge) => {
     const defs = taskDefsRef.current
-    const targetDef = defs.find(d => d.task_id === targetId)
+    const targetDef = defs.find(d => d.task_id === edge.target)
     if (!targetDef) return
+    setDepEditorSource(edge.source)
+    setDepEditorTarget(edge.target)
+    setDepEditorCondition(targetDef.watch_condition || '')
+    setDepEditorOpen(true)
+  }, [])
 
-    let newCondition = targetDef.watch_condition || ''
+  const handleSaveDependency = useCallback(async () => {
+    const defs = taskDefsRef.current
+    const targetDef = defs.find(d => d.task_id === depEditorTarget)
+    if (!targetDef) return
+    try {
+      await updateTaskDefinition(depEditorTarget, {
+        ...targetDef,
+        watch_condition: depEditorCondition,
+      })
+      message.success('依赖已更新')
+      loadData()
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '更新失败')
+    }
+    setDepEditorOpen(false)
+  }, [depEditorTarget, depEditorCondition, loadData])
 
+  const handleDeleteDependency = useCallback(async () => {
+    const defs = taskDefsRef.current
+    const targetDef = defs.find(d => d.task_id === depEditorTarget)
+    if (!targetDef) return
     Modal.confirm({
-      title: '编辑依赖',
-      content: (
-        <div>
-          <p>
-            <strong>watch_task:</strong> {sourceId}
-          </p>
-          <Input
-            placeholder="触发条件（可选）"
-            defaultValue={newCondition}
-            onChange={e => { newCondition = e.target.value }}
-          />
-        </div>
-      ),
-      okText: '保存',
-      cancelText: '删除依赖',
+      title: '删除依赖？',
+      content: <p>移除到 <strong>{depEditorSource}</strong> 的依赖链接？</p>,
+      okText: '删除',
+      okButtonProps: { danger: true },
       onOk: async () => {
         try {
-          await updateTaskDefinition(targetId, {
+          await updateTaskDefinition(depEditorTarget, {
             ...targetDef,
-            watch_condition: newCondition,
+            watch_task_id: '',
+            trigger: 'scheduled',
+            watch_condition: '',
           })
-          message.success('依赖已更新')
+          message.success('依赖已移除')
           loadData()
         } catch (err) {
-          message.error(err instanceof Error ? err.message : 'Failed to update dependency')
+          message.error(err instanceof Error ? err.message : '删除失败')
         }
       },
-      onCancel: async () => {
-        Modal.confirm({
-          title: '删除依赖？',
-          content: <p>移除到 <strong>{sourceId}</strong> 的依赖链接？</p>,
-          okText: '删除',
-          okButtonProps: { danger: true },
-          onOk: async () => {
-            try {
-              await updateTaskDefinition(targetId, {
-                ...targetDef,
-                watch_task_id: '',
-                trigger: 'scheduled',
-                watch_condition: '',
-              })
-              message.success('依赖已移除')
-              loadData()
-            } catch (err) {
-              message.error(err instanceof Error ? err.message : 'Failed to remove dependency')
-            }
-          },
-        })
-      },
     })
-  }, [loadData])
+    setDepEditorOpen(false)
+  }, [depEditorSource, depEditorTarget, loadData])
 
   const onEdgesDelete = useCallback(async (deletedEdges: Edge[]) => {
     const defs = taskDefsRef.current
@@ -377,29 +381,65 @@ export default function PipelineCanvas({ pipelineId }: Props) {
   }
 
   return (
-    <ReactFlow
-      nodes={nodes}
-      edges={edges}
-      onNodesChange={onNodesChange}
-      onEdgesChange={onEdgesChange}
-      onConnect={onConnect}
-      onEdgeClick={onEdgeClick}
-      onEdgesDelete={onEdgesDelete}
-      nodeTypes={NODE_TYPES}
-      edgeTypes={EDGE_TYPES}
-      defaultEdgeOptions={defaultEdgeOptions}
-      fitView
-      fitViewOptions={{ padding: 0.2 }}
-      panOnScroll
-      zoomOnPinch
-      panOnScrollSpeed={1}
-      selectionOnDrag
-      attributionPosition="bottom-left"
-      style={{ background: '#f5f5f5' }}
-      connectionLineStyle={{ stroke: '#faad14', strokeWidth: 1.5, strokeDasharray: '5,5' }}
-    >
-      <Controls />
-      <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#d9d9d9" />
-    </ReactFlow>
+    <>
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
+        onConnect={onConnect}
+        onEdgeClick={onEdgeClick}
+        onEdgesDelete={onEdgesDelete}
+        nodeTypes={NODE_TYPES}
+        edgeTypes={EDGE_TYPES}
+        defaultEdgeOptions={defaultEdgeOptions}
+        fitView
+        fitViewOptions={{ padding: 0.2 }}
+        panOnScroll
+        zoomOnPinch
+        panOnScrollSpeed={1}
+        selectionOnDrag
+        attributionPosition="bottom-left"
+        style={{ background: '#f5f5f5' }}
+        connectionLineStyle={{ stroke: '#faad14', strokeWidth: 1.5, strokeDasharray: '5,5' }}
+      >
+        <Controls />
+        <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#d9d9d9" />
+      </ReactFlow>
+
+      <Modal
+        title="编辑依赖"
+        open={depEditorOpen}
+        onCancel={() => setDepEditorOpen(false)}
+        maskClosable
+        footer={
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <Button danger onClick={handleDeleteDependency}>删除依赖</Button>
+            <Space>
+              <Button onClick={() => setDepEditorOpen(false)}>取消</Button>
+              <Button type="primary" onClick={handleSaveDependency}>保存</Button>
+            </Space>
+          </div>
+        }
+      >
+        <p>
+          <strong>监听任务:</strong> {depEditorSource}
+        </p>
+        <div style={{ marginTop: 12 }}>
+          <p style={{ marginBottom: 6 }}><strong>触发条件:</strong></p>
+          <Select
+            allowClear
+            placeholder="不限制（总是触发）"
+            value={depEditorCondition || undefined}
+            onChange={(v) => setDepEditorCondition(v || '')}
+            style={{ width: '100%' }}
+            options={[
+              { value: 'check_status == pass', label: '上游检查通过时触发' },
+              { value: 'run_status == success', label: '上游运行成功时触发' },
+            ]}
+          />
+        </div>
+      </Modal>
+    </>
   )
 }
