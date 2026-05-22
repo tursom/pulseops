@@ -4,6 +4,7 @@ import { DashboardOutlined, UnorderedListOutlined, ApartmentOutlined } from '@an
 import Dashboard from './pages/Dashboard'
 import TaskDetail from './pages/TaskDetail'
 import TaskEditor from './pages/TaskEditor'
+import PipelineEditor from './pages/PipelineEditor'
 import './App.css'
 
 const { Sider, Content } = Layout
@@ -51,7 +52,7 @@ export default function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/tasks" element={<Dashboard />} />
             <Route path="/tasks/:id" element={<TaskDetail />} />
-            <Route path="/pipeline" element={<div style={{ padding: 24 }}><h2>Pipeline Editor</h2><p>Coming soon...</p></div>} />
+            <Route path="/pipeline" element={<PipelineEditor />} />
             <Route path="/task-defs/new" element={<TaskEditor />} />
             <Route path="/task-defs/:id/edit" element={<TaskEditor />} />
           </Routes>
