@@ -41,30 +41,30 @@ func NewUpstreamDataDriver(repo store.Repository, artStore store.ArtifactStore, 
 	return &UpstreamDataDriver{repo: repo, artStore: artStore, logger: logger}
 }
 
-func (d *UpstreamDataDriver) Kind() string { return "upstream_data" }
+func (d *UpstreamDataDriver) Kind() string { return "data_process" }
 
 func (d *UpstreamDataDriver) Validate(spec config.TaskSpec) error {
 	params, err := DecodeParams[UpstreamDataParams](spec.Params)
 	if err != nil {
-		return fmt.Errorf("decode upstream_data params: %w", err)
+		return fmt.Errorf("decode data_process params: %w", err)
 	}
 	if len(params.ExtractExprs) == 0 {
-		return fmt.Errorf("upstream_data requires at least one extract_expr")
+		return fmt.Errorf("data_process requires at least one extract_expr")
 	}
 	for i, expr := range params.ExtractExprs {
 		if expr.Field == "" {
-			return fmt.Errorf("upstream_data extract_expr[%d].field must not be empty", i)
+			return fmt.Errorf("data_process extract_expr[%d].field must not be empty", i)
 		}
 		if expr.Source == "" {
-			return fmt.Errorf("upstream_data extract_expr[%d].source must not be empty", i)
+			return fmt.Errorf("data_process extract_expr[%d].source must not be empty", i)
 		}
 		if expr.JQExpr == "" {
-			return fmt.Errorf("upstream_data extract_expr[%d].jq_expr must not be empty", i)
+			return fmt.Errorf("data_process extract_expr[%d].jq_expr must not be empty", i)
 		}
 		switch {
 		case expr.Source == "payload", expr.Source == "summary", strings.HasPrefix(expr.Source, "artifact:"):
 		default:
-			return fmt.Errorf("upstream_data extract_expr[%d].source %q must be 'payload', 'summary', or 'artifact:<kind>'", i, expr.Source)
+			return fmt.Errorf("data_process extract_expr[%d].source %q must be 'payload', 'summary', or 'artifact:<kind>'", i, expr.Source)
 		}
 	}
 	return nil
@@ -73,7 +73,7 @@ func (d *UpstreamDataDriver) Validate(spec config.TaskSpec) error {
 func (d *UpstreamDataDriver) NewRunner(spec config.TaskSpec, deps RunnerDeps) (Runner, error) {
 	params, err := DecodeParams[UpstreamDataParams](spec.Params)
 	if err != nil {
-		return nil, fmt.Errorf("decode upstream_data params: %w", err)
+		return nil, fmt.Errorf("decode data_process params: %w", err)
 	}
 	return &upstreamDataRunner{
 		spec:     spec,
@@ -97,7 +97,7 @@ type upstreamDataRunner struct {
 func (r *upstreamDataRunner) Run(ctx context.Context, _ TriggerType) (Result, error) {
 	sourceRecord, ok := ctx.Value(ctxTriggerRun).(*store.RunRecord)
 	if !ok || sourceRecord == nil {
-		return Result{CheckStatus: "fail"}, fmt.Errorf("upstream_data requires a trigger run in context")
+		return Result{CheckStatus: "fail"}, fmt.Errorf("data_process requires a trigger run in context")
 	}
 
 	sourceTaskID := r.params.SourceTaskID

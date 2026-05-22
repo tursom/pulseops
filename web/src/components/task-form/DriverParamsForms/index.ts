@@ -14,5 +14,5 @@ export const driverForms: Record<string, FC> = {
   process_check: ProcessCheckParams,
   scenario_check: ScenarioCheckParams,
   ai_analyze: AIAnalyzeParams,
-  upstream_data: UpstreamDataParams,
+  data_process: UpstreamDataParams,
 }
