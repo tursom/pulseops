@@ -114,6 +114,7 @@ export interface TaskDefinition {
   trigger: string         // "scheduled" | "manual" | "on_run"
   watch_task_id: string
   watch_condition: string
+  pipeline_id?: string | null
   trace?: TracePolicy
   alert?: AlertPolicy
   created_at: string
@@ -154,4 +155,12 @@ export interface TaskDetailResponse {
 // === Reload/enable/disable response ===
 export interface ActionResponse {
   status: string
+}
+
+export interface Pipeline {
+  id: string
+  name: string
+  description: string
+  created_at: string
+  updated_at: string
 }

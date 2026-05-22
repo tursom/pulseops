@@ -1,6 +1,7 @@
 import type {
   TaskState,
   TaskDefinition,
+  Pipeline,
   RunRecord,
   AIAnalysisRecord,
   ArtifactRef,
@@ -133,6 +134,50 @@ export async function updateTaskDefinition(id: string, def: TaskDefinition): Pro
 // DELETE /api/task-defs/{id}
 export async function deleteTaskDefinition(id: string): Promise<{ status: string }> {
   return request<{ status: string }>(`/api/task-defs/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  })
+}
+
+export async function fetchPipelines(): Promise<Pipeline[]> {
+  return request<Pipeline[]>('/api/pipelines')
+}
+
+export async function fetchPipeline(id: string): Promise<Pipeline> {
+  return request<Pipeline>(`/api/pipelines/${encodeURIComponent(id)}`)
+}
+
+export async function createPipeline(p: Pick<Pipeline, 'id' | 'name' | 'description'>): Promise<Pipeline> {
+  return request<Pipeline>('/api/pipelines', {
+    method: 'POST',
+    body: JSON.stringify(p),
+  })
+}
+
+export async function updatePipeline(id: string, p: Pick<Pipeline, 'name' | 'description'>): Promise<Pipeline> {
+  return request<Pipeline>(`/api/pipelines/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(p),
+  })
+}
+
+export async function deletePipeline(id: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/pipelines/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  })
+}
+
+export async function fetchPipelineTasks(pipelineId: string): Promise<TaskDefinition[]> {
+  return request<TaskDefinition[]>(`/api/pipelines/${encodeURIComponent(pipelineId)}/tasks`)
+}
+
+export async function assignTaskToPipeline(pipelineId: string, taskId: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/pipelines/${encodeURIComponent(pipelineId)}/tasks/${encodeURIComponent(taskId)}`, {
+    method: 'PUT',
+  })
+}
+
+export async function unassignTaskFromPipeline(pipelineId: string, taskId: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/pipelines/${encodeURIComponent(pipelineId)}/tasks/${encodeURIComponent(taskId)}`, {
     method: 'DELETE',
   })
 }

@@ -121,6 +121,15 @@ func (r *fakeRepository) GetTaskDefinition(context.Context, string) (*config.Tas
 func (r *fakeRepository) InsertTaskDefinition(context.Context, config.TaskDefinition) error { return nil }
 func (r *fakeRepository) UpdateTaskDefinition(context.Context, config.TaskDefinition) error { return nil }
 func (r *fakeRepository) DeleteTaskDefinition(context.Context, string) error          { return nil }
+func (r *fakeRepository) ListPipelines(context.Context) ([]config.Pipeline, error)      { return nil, nil }
+func (r *fakeRepository) GetPipeline(context.Context, string) (*config.Pipeline, error) { return nil, sql.ErrNoRows }
+func (r *fakeRepository) InsertPipeline(context.Context, config.Pipeline) error         { return nil }
+func (r *fakeRepository) UpdatePipeline(context.Context, config.Pipeline) error         { return nil }
+func (r *fakeRepository) DeletePipeline(context.Context, string) error                   { return nil }
+func (r *fakeRepository) ListTaskDefinitionsByPipeline(context.Context, string) ([]config.TaskDefinition, error) {
+	return nil, nil
+}
+func (r *fakeRepository) UpdateTaskPipeline(context.Context, string, *string) error   { return nil }
 func (r *fakeRepository) GetMeta(context.Context, string) (string, error)             { return "", store.ErrMetaNotFound }
 func (r *fakeRepository) SetMeta(context.Context, string, string) error                { return nil }
 

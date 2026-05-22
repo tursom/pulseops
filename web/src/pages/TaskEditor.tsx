@@ -1,13 +1,14 @@
 import { useState, useEffect, useCallback } from 'react'
-import { useParams, useNavigate, Link } from 'react-router-dom'
-import { Typography, Spin, Alert, Space, message } from 'antd'
+import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom'
+import { Typography, Spin, Alert, Space, Select, Card, message } from 'antd'
 import { ArrowLeftOutlined } from '@ant-design/icons'
 import {
   fetchTaskDefinition,
   createTaskDefinition,
   updateTaskDefinition,
+  fetchPipelines,
 } from '../api/client'
-import type { TaskDefinition } from '../api/types'
+import type { TaskDefinition, Pipeline } from '../api/types'
 import TaskForm from '../components/task-form/TaskForm'
 
 const { Title } = Typography
@@ -46,6 +47,8 @@ function prepareInitialValues(
 export default function TaskEditor() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const pipelineId = searchParams.get('pipeline')
   const isEdit = Boolean(id)
 
   const [initialValues, setInitialValues] = useState<
@@ -56,6 +59,10 @@ export default function TaskEditor() {
   )
   const [loading, setLoading] = useState(isEdit)
   const [error, setError] = useState<string | null>(null)
+  const [pipelines, setPipelines] = useState<Pipeline[]>([])
+  const [selectedPipelineId, setSelectedPipelineId] = useState<string | undefined>(
+    pipelineId || undefined,
+  )
 
   const loadTaskDef = useCallback(async () => {
     if (!id) return
@@ -76,13 +83,28 @@ export default function TaskEditor() {
     if (isEdit) {
       loadTaskDef()
     } else {
-      setInitialValues({ enabled: true, trigger: 'scheduled' })
+      const initial: Record<string, unknown> = { enabled: true, trigger: 'scheduled' }
+      if (pipelineId) {
+        initial.pipeline_id = pipelineId
+      }
+      setInitialValues(initial)
       setLoading(false)
     }
-  }, [isEdit, loadTaskDef])
+  }, [isEdit, loadTaskDef, pipelineId])
+
+  useEffect(() => {
+    fetchPipelines()
+      .then(setPipelines)
+      .catch(() => {})
+  }, [])
 
   const handleSubmit = async (def: TaskDefinition) => {
     try {
+      if (selectedPipelineId) {
+        def.pipeline_id = selectedPipelineId
+      } else if (def.pipeline_id === undefined) {
+        def.pipeline_id = null
+      }
       if (isEdit && id) {
         await updateTaskDefinition(id, def)
         message.success('Task updated')
@@ -90,7 +112,7 @@ export default function TaskEditor() {
         await createTaskDefinition(def)
         message.success('Task created')
       }
-      navigate('/pipeline')
+      navigate(selectedPipelineId ? `/pipelines/${selectedPipelineId}` : '/pipelines')
     } catch (err) {
       message.error(err instanceof Error ? err.message : 'Operation failed')
     }
@@ -115,7 +137,7 @@ export default function TaskEditor() {
     return (
       <div>
         <Link
-          to="/pipeline"
+          to={pipelineId ? `/pipelines/${pipelineId}` : '/pipelines'}
           style={{ display: 'inline-block', marginBottom: 16 }}
         >
           <Space>
@@ -135,7 +157,7 @@ export default function TaskEditor() {
 
   return (
     <div>
-      <Link to="/pipeline" style={{ display: 'inline-block', marginBottom: 16 }}>
+      <Link to={pipelineId ? `/pipelines/${pipelineId}` : '/pipelines'} style={{ display: 'inline-block', marginBottom: 16 }}>
         <Space>
           <ArrowLeftOutlined />
           <span>Back to Pipeline</span>
@@ -145,6 +167,17 @@ export default function TaskEditor() {
       <Title level={2} style={{ marginBottom: 24 }}>
         {pageTitle}
       </Title>
+
+      <Card title="所属管道" style={{ marginBottom: 24 }}>
+        <Select
+          allowClear
+          placeholder="选择所属管道（可选）"
+          value={selectedPipelineId}
+          onChange={(val) => setSelectedPipelineId(val)}
+          options={pipelines.map((p) => ({ value: p.id, label: p.name }))}
+          style={{ width: '100%' }}
+        />
+      </Card>
 
       {initialValues && (
         <TaskForm

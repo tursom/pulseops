@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -302,6 +303,119 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	})
+
+	mux.HandleFunc("GET /api/pipelines", func(w http.ResponseWriter, r *http.Request) {
+		pipelines, err := repository.ListPipelines(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if pipelines == nil {
+			pipelines = []config.Pipeline{}
+		}
+		writeJSON(w, http.StatusOK, pipelines)
+	})
+
+	mux.HandleFunc("POST /api/pipelines", func(w http.ResponseWriter, r *http.Request) {
+		var p config.Pipeline
+		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+			return
+		}
+		if p.ID == "" {
+			writeError(w, http.StatusBadRequest, "id is required")
+			return
+		}
+		if p.Name == "" {
+			writeError(w, http.StatusBadRequest, "name is required")
+			return
+		}
+		p.UpdatedAt = time.Now()
+		p.CreatedAt = time.Now()
+		if err := repository.InsertPipeline(r.Context(), p); err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, p)
+	})
+
+	mux.HandleFunc("GET /api/pipelines/{id}", func(w http.ResponseWriter, r *http.Request) {
+		p, err := repository.GetPipeline(r.Context(), r.PathValue("id"))
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "pipeline not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, p)
+	})
+
+	mux.HandleFunc("PUT /api/pipelines/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		existing, err := repository.GetPipeline(r.Context(), id)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "pipeline not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		var updated config.Pipeline
+		if err := json.NewDecoder(r.Body).Decode(&updated); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+			return
+		}
+		updated.ID = existing.ID
+		updated.CreatedAt = existing.CreatedAt
+		updated.UpdatedAt = time.Now()
+		if err := repository.UpdatePipeline(r.Context(), updated); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, updated)
+	})
+
+	mux.HandleFunc("DELETE /api/pipelines/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if err := repository.DeletePipeline(r.Context(), r.PathValue("id")); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	})
+
+	mux.HandleFunc("GET /api/pipelines/{id}/tasks", func(w http.ResponseWriter, r *http.Request) {
+		defs, err := repository.ListTaskDefinitionsByPipeline(r.Context(), r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if defs == nil {
+			defs = []config.TaskDefinition{}
+		}
+		writeJSON(w, http.StatusOK, defs)
+	})
+
+	mux.HandleFunc("PUT /api/pipelines/{id}/tasks/{taskID}", func(w http.ResponseWriter, r *http.Request) {
+		pipelineID := r.PathValue("id")
+		taskID := r.PathValue("taskID")
+		if err := repository.UpdateTaskPipeline(r.Context(), taskID, &pipelineID); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "assigned", "pipeline_id": pipelineID, "task_id": taskID})
+	})
+
+	mux.HandleFunc("DELETE /api/pipelines/{id}/tasks/{taskID}", func(w http.ResponseWriter, r *http.Request) {
+		taskID := r.PathValue("taskID")
+		if err := repository.UpdateTaskPipeline(r.Context(), taskID, nil); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "unassigned", "task_id": taskID})
 	})
 
 	if staticDir != "" {

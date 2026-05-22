@@ -10,9 +10,9 @@ import {
 } from '@xyflow/react'
 import type { Connection, Edge } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { Modal, Input, message } from 'antd'
+import { Modal, Input, Card, Empty, message } from 'antd'
 
-import { fetchTaskDefinitions, fetchTasks, updateTaskDefinition } from '../../api/client'
+import { fetchPipelineTasks, fetchTasks, updateTaskDefinition } from '../../api/client'
 import type { TaskDefinition, TaskState } from '../../api/types'
 import TaskNode from './TaskNode'
 import DependencyEdge from './DependencyEdge'
@@ -142,7 +142,11 @@ function buildGraph(
   return { nodes, edges }
 }
 
-export default function PipelineCanvas() {
+interface Props {
+  pipelineId: string
+}
+
+export default function PipelineCanvas({ pipelineId }: Props) {
   const [nodes, setNodes, onNodesChange] = useNodesState<TaskNodeType>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<DependencyEdgeType>([])
   const [loading, setLoading] = useState(true)
@@ -154,7 +158,7 @@ export default function PipelineCanvas() {
   const loadData = useCallback(async () => {
     try {
       const [defs, states] = await Promise.all([
-        fetchTaskDefinitions(),
+        fetchPipelineTasks(pipelineId),
         fetchTasks(),
       ])
       taskDefsRef.current = defs
@@ -172,7 +176,7 @@ export default function PipelineCanvas() {
     } finally {
       setLoading(false)
     }
-  }, [setNodes, setEdges])
+  }, [pipelineId, setNodes, setEdges])
 
   useEffect(() => {
     loadDataRef.current = loadData
@@ -349,6 +353,24 @@ export default function PipelineCanvas() {
         }}
       >
         {error}
+      </div>
+    )
+  }
+
+  if (nodes.length === 0) {
+    return (
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          height: '100%',
+          background: '#f5f5f5',
+        }}
+      >
+        <Card>
+          <Empty description="此管道中暂无任务" />
+        </Card>
       </div>
     )
   }

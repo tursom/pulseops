@@ -97,6 +97,14 @@ type Repository interface {
 	InsertTaskDefinition(ctx context.Context, def config.TaskDefinition) error
 	UpdateTaskDefinition(ctx context.Context, def config.TaskDefinition) error
 	DeleteTaskDefinition(ctx context.Context, taskID string) error
+
+	ListPipelines(ctx context.Context) ([]config.Pipeline, error)
+	GetPipeline(ctx context.Context, id string) (*config.Pipeline, error)
+	InsertPipeline(ctx context.Context, p config.Pipeline) error
+	UpdatePipeline(ctx context.Context, p config.Pipeline) error
+	DeletePipeline(ctx context.Context, id string) error
+	ListTaskDefinitionsByPipeline(ctx context.Context, pipelineID string) ([]config.TaskDefinition, error)
+	UpdateTaskPipeline(ctx context.Context, taskID string, pipelineID *string) error
 }
 
 type PostgresStore struct {
@@ -547,7 +555,7 @@ func (s *PostgresStore) ListTaskDefinitions(ctx context.Context) ([]config.TaskD
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT task_id, name, kind, enabled, interval, cron, timeout,
 		       labels_json, params_json, trigger, watch_task_id, watch_condition,
-		       trace_json, alert_json, created_at, updated_at
+		       trace_json, alert_json, pipeline_id, created_at, updated_at
 		FROM task_definitions ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list task definitions: %w", err)
@@ -559,7 +567,7 @@ func (s *PostgresStore) ListTaskDefinitions(ctx context.Context) ([]config.TaskD
 		if err := rows.Scan(&d.TaskID, &d.Name, &d.Kind, &d.Enabled,
 			&d.Interval, &d.Cron, &d.Timeout,
 			&d.LabelsJSON, &d.ParamsJSON, &d.Trigger, &d.WatchTaskID, &d.WatchCondition,
-			&d.TraceJSON, &d.AlertJSON, &d.CreatedAt, &d.UpdatedAt); err != nil {
+			&d.TraceJSON, &d.AlertJSON, &d.PipelineID, &d.CreatedAt, &d.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan task definition: %w", err)
 		}
 		if len(d.LabelsJSON) > 0 {
@@ -584,13 +592,13 @@ func (s *PostgresStore) GetTaskDefinition(ctx context.Context, taskID string) (*
 	err := s.db.QueryRowContext(ctx, `
 		SELECT task_id, name, kind, enabled, interval, cron, timeout,
 		       labels_json, params_json, trigger, watch_task_id, watch_condition,
-		       trace_json, alert_json, created_at, updated_at
+		       trace_json, alert_json, pipeline_id, created_at, updated_at
 		FROM task_definitions
 		WHERE task_id = $1
 	`, taskID).Scan(&d.TaskID, &d.Name, &d.Kind, &d.Enabled,
 		&d.Interval, &d.Cron, &d.Timeout,
 		&d.LabelsJSON, &d.ParamsJSON, &d.Trigger, &d.WatchTaskID, &d.WatchCondition,
-		&d.TraceJSON, &d.AlertJSON, &d.CreatedAt, &d.UpdatedAt)
+		&d.TraceJSON, &d.AlertJSON, &d.PipelineID, &d.CreatedAt, &d.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("task definition %s: %w", taskID, sql.ErrNoRows)
@@ -618,12 +626,12 @@ func (s *PostgresStore) InsertTaskDefinition(ctx context.Context, def config.Tas
 		INSERT INTO task_definitions (
 			task_id, name, kind, enabled, interval, cron, timeout,
 			labels_json, params_json, trigger, watch_task_id, watch_condition,
-			trace_json, alert_json, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13::jsonb, $14::jsonb, $15, $15)
+			trace_json, alert_json, pipeline_id, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13::jsonb, $14::jsonb, $15, $16, $16)
 	`, def.TaskID, def.Name, def.Kind, def.Enabled,
 		def.Interval, def.Cron, def.Timeout,
 		string(def.LabelsJSON), string(def.ParamsJSON), def.Trigger, def.WatchTaskID, def.WatchCondition,
-		string(def.TraceJSON), string(def.AlertJSON), now)
+		string(def.TraceJSON), string(def.AlertJSON), def.PipelineID, now)
 	if err != nil {
 		return fmt.Errorf("insert task definition %s: %w", def.TaskID, err)
 	}
@@ -637,13 +645,14 @@ func (s *PostgresStore) UpdateTaskDefinition(ctx context.Context, def config.Tas
 			name = $2, kind = $3, enabled = $4, interval = $5, cron = $6, timeout = $7,
 			labels_json = $8::jsonb, params_json = $9::jsonb, trigger = $10,
 			watch_task_id = $11, watch_condition = $12,
-			trace_json = $13::jsonb, alert_json = $14::jsonb, updated_at = $15
+			trace_json = $13::jsonb, alert_json = $14::jsonb,
+			pipeline_id = $15, updated_at = $16
 		WHERE task_id = $1
 	`, def.TaskID, def.Name, def.Kind, def.Enabled,
 		def.Interval, def.Cron, def.Timeout,
 		string(def.LabelsJSON), string(def.ParamsJSON), def.Trigger,
 		def.WatchTaskID, def.WatchCondition,
-		string(def.TraceJSON), string(def.AlertJSON), now)
+		string(def.TraceJSON), string(def.AlertJSON), def.PipelineID, now)
 	if err != nil {
 		return fmt.Errorf("update task definition %s: %w", def.TaskID, err)
 	}
@@ -654,6 +663,119 @@ func (s *PostgresStore) DeleteTaskDefinition(ctx context.Context, taskID string)
 	_, err := s.db.ExecContext(ctx, `DELETE FROM task_definitions WHERE task_id = $1`, taskID)
 	if err != nil {
 		return fmt.Errorf("delete task definition %s: %w", taskID, err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) ListPipelines(ctx context.Context) ([]config.Pipeline, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, description, created_at, updated_at
+		FROM pipelines ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("list pipelines: %w", err)
+	}
+	defer rows.Close()
+	var pipelines []config.Pipeline
+	for rows.Next() {
+		var p config.Pipeline
+		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan pipeline: %w", err)
+		}
+		pipelines = append(pipelines, p)
+	}
+	return pipelines, rows.Err()
+}
+
+func (s *PostgresStore) GetPipeline(ctx context.Context, id string) (*config.Pipeline, error) {
+	var p config.Pipeline
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, name, description, created_at, updated_at
+		FROM pipelines WHERE id = $1
+	`, id).Scan(&p.ID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("pipeline %s: %w", id, sql.ErrNoRows)
+		}
+		return nil, fmt.Errorf("get pipeline %s: %w", id, err)
+	}
+	return &p, nil
+}
+
+func (s *PostgresStore) InsertPipeline(ctx context.Context, p config.Pipeline) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO pipelines (id, name, description)
+		VALUES ($1, $2, $3)
+	`, p.ID, p.Name, p.Description)
+	if err != nil {
+		return fmt.Errorf("insert pipeline %s: %w", p.ID, err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) UpdatePipeline(ctx context.Context, p config.Pipeline) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE pipelines SET name = $2, description = $3, updated_at = NOW()
+		WHERE id = $1
+	`, p.ID, p.Name, p.Description)
+	if err != nil {
+		return fmt.Errorf("update pipeline %s: %w", p.ID, err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeletePipeline(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM pipelines WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("delete pipeline %s: %w", id, err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) ListTaskDefinitionsByPipeline(ctx context.Context, pipelineID string) ([]config.TaskDefinition, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT task_id, name, kind, enabled, interval, cron, timeout,
+		       labels_json, params_json, trigger, watch_task_id, watch_condition,
+		       trace_json, alert_json, pipeline_id, created_at, updated_at
+		FROM task_definitions
+		WHERE pipeline_id = $1
+		ORDER BY name`, pipelineID)
+	if err != nil {
+		return nil, fmt.Errorf("list task definitions by pipeline: %w", err)
+	}
+	defer rows.Close()
+	var defs []config.TaskDefinition
+	for rows.Next() {
+		var d config.TaskDefinition
+		if err := rows.Scan(&d.TaskID, &d.Name, &d.Kind, &d.Enabled,
+			&d.Interval, &d.Cron, &d.Timeout,
+			&d.LabelsJSON, &d.ParamsJSON, &d.Trigger, &d.WatchTaskID, &d.WatchCondition,
+			&d.TraceJSON, &d.AlertJSON, &d.PipelineID, &d.CreatedAt, &d.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan task definition: %w", err)
+		}
+		if len(d.LabelsJSON) > 0 {
+			_ = json.Unmarshal(d.LabelsJSON, &d.Labels)
+		}
+		if len(d.ParamsJSON) > 0 {
+			_ = json.Unmarshal(d.ParamsJSON, &d.Params)
+		}
+		if len(d.TraceJSON) > 0 {
+			_ = json.Unmarshal(d.TraceJSON, &d.Trace)
+		}
+		if len(d.AlertJSON) > 0 {
+			_ = json.Unmarshal(d.AlertJSON, &d.Alert)
+		}
+		defs = append(defs, d)
+	}
+	return defs, rows.Err()
+}
+
+func (s *PostgresStore) UpdateTaskPipeline(ctx context.Context, taskID string, pipelineID *string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE task_definitions SET pipeline_id = $2, updated_at = NOW()
+		WHERE task_id = $1
+	`, taskID, pipelineID)
+	if err != nil {
+		return fmt.Errorf("update task pipeline %s: %w", taskID, err)
 	}
 	return nil
 }

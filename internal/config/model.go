@@ -141,6 +141,14 @@ type AlertPolicy struct {
 	RecoverNotify       bool     `toml:"recover_notify" json:"recover_notify"`
 }
 
+type Pipeline struct {
+	ID          string    `json:"id" db:"id"`
+	Name        string    `json:"name" db:"name"`
+	Description string    `json:"description" db:"description"`
+	CreatedAt   time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
+}
+
 type TaskDefinition struct {
 	TaskID         string            `json:"task_id" db:"task_id"`
 	Name           string            `json:"name" db:"name"`
@@ -160,6 +168,7 @@ type TaskDefinition struct {
 	TraceJSON      []byte            `json:"-" db:"trace_json"`
 	Alert          AlertPolicy       `json:"alert,omitempty" db:"-"`
 	AlertJSON      []byte            `json:"-" db:"alert_json"`
+	PipelineID     *string           `json:"pipeline_id" db:"pipeline_id"`
 	CreatedAt      time.Time         `json:"created_at" db:"created_at"`
 	UpdatedAt      time.Time         `json:"updated_at" db:"updated_at"`
 }
