@@ -5,6 +5,7 @@ export interface TaskNodeData extends Record<string, unknown> {
   name: string
   kind: string
   enabled: boolean
+  pipelineId?: string
   status?: string
   lastRunStatus?: string
   onRefresh?: () => void

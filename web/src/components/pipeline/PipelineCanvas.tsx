@@ -50,6 +50,7 @@ function buildGraph(
         name: def.name,
         kind: def.kind,
         enabled: def.enabled,
+        pipelineId: def.pipeline_id || undefined,
         status: state?.status,
         lastRunStatus: state?.last_run_status,
       },

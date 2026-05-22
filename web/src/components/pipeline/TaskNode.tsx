@@ -47,15 +47,18 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
   const name = data.name as string
   const enabled = data.enabled as boolean
   const taskId = data.taskId as string
+  const pipelineId = data.pipelineId as string | undefined
   const status = data.status as string | undefined
   const lastRunStatus = data.lastRunStatus as string | undefined
   const onRefresh = data.onRefresh as (() => void) | undefined
+
+  const editUrl = `/task-defs/${taskId}/edit` + (pipelineId ? `?from=/pipelines/${encodeURIComponent(pipelineId)}` : '')
 
   const borderColor = KIND_COLORS[kind] || '#d9d9d9'
   const dotColor = STATUS_DOT_COLORS[status || ''] || '#d9d9d9'
 
   const handleClick = () => {
-    navigate(`/task-defs/${taskId}/edit`)
+    navigate(editUrl)
   }
 
   const handleMenuClick = async ({ key }: { key: string }) => {
@@ -84,7 +87,7 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
         }
         break
       case 'edit':
-        navigate(`/task-defs/${taskId}/edit`)
+        navigate(editUrl)
         break
       case 'delete':
         Modal.confirm({
