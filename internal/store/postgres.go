@@ -58,6 +58,14 @@ type Finding struct {
 	Data      map[string]any `json:"data"`
 }
 
+type SampleResponse struct {
+	Available bool   `json:"available"`
+	TaskID    string `json:"task_id,omitempty"`
+	RunID     string `json:"run_id,omitempty"`
+	Source    string `json:"source,omitempty"`
+	Data      any    `json:"data,omitempty"`
+}
+
 type RunRecord struct {
 	RunID        string            `json:"run_id"`
 	TaskID       string            `json:"task_id"`

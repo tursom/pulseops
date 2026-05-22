@@ -82,10 +82,47 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 			"last_error":         taskState.LastError,
 			"last_duration_ms":   taskState.LastDurationMS,
 			"last_reload_error":  taskState.LastReloadError,
+			"last_sample_seed":   taskState.LastSampleSeed,
+			"last_sample_count":  taskState.LastSampleCount,
+			"last_mismatch_count": taskState.LastMismatchCount,
 			"source_path":        taskState.SourcePath,
 			"updated_at":         taskState.UpdatedAt,
 			"definition":         def,
 		})
+	})
+	mux.HandleFunc("GET /api/tasks/{id}/sample", func(w http.ResponseWriter, r *http.Request) {
+		source := r.URL.Query().Get("source")
+		if source == "" || (source != "payload" && source != "summary" && source != "record") {
+			writeError(w, http.StatusBadRequest, `query param "source" required: payload, summary, or record`)
+			return
+		}
+		taskID := r.PathValue("id")
+		def, err := repository.GetTaskDefinition(r.Context(), taskID)
+		if err != nil && err != sql.ErrNoRows {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if def == nil {
+			writeError(w, http.StatusNotFound, "task definition not found")
+			return
+		}
+		if len(def.ParamsJSON) > 0 {
+			json.Unmarshal(def.ParamsJSON, &def.Params)
+		}
+		upstreamTaskID, _ := def.Params["source_task_id"].(string)
+		if upstreamTaskID == "" {
+			upstreamTaskID = def.WatchTaskID
+		}
+		if upstreamTaskID == "" {
+			writeError(w, http.StatusBadRequest, "no upstream task configured")
+			return
+		}
+		resp, err := task.FetchSampleData(r.Context(), repository, upstreamTaskID, source)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
 	})
 	mux.HandleFunc("GET /api/tasks/{id}/runs", func(w http.ResponseWriter, r *http.Request) {
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))

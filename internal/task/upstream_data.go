@@ -391,3 +391,70 @@ func toFloat64Single(v any) (float64, bool) {
 		return 0, false
 	}
 }
+
+// FetchSampleData 从上游任务的最近成功运行中获取指定数据源的样本数据。
+// upstreamTaskID 是上游任务 ID（已由调用方解析）。返回 nil 表示没有成功运行。
+func FetchSampleData(ctx context.Context, repo store.Repository, upstreamTaskID, source string) (*store.SampleResponse, error) {
+	runs, err := repo.ListRuns(ctx, upstreamTaskID, 20)
+	if err != nil {
+		return nil, fmt.Errorf("list runs for %q: %w", upstreamTaskID, err)
+	}
+
+	var successRecord *store.RunRecord
+	for i := range runs {
+		if runs[i].RunStatus == "success" {
+			successRecord = &runs[i]
+			break
+		}
+	}
+	if successRecord == nil {
+		return &store.SampleResponse{Available: false}, nil
+	}
+
+	data, err := resolveSampleSource(ctx, source, successRecord)
+	if err != nil {
+		return nil, err
+	}
+
+	return &store.SampleResponse{
+		Available: true,
+		TaskID:    upstreamTaskID,
+		RunID:     successRecord.RunID,
+		Source:    source,
+		Data:      data,
+	}, nil
+}
+
+func resolveSampleSource(ctx context.Context, source string, record *store.RunRecord) (any, error) {
+	switch {
+	case source == "payload":
+		if len(record.Payload) == 0 {
+			return nil, nil
+		}
+		var v any
+		if err := json.Unmarshal(record.Payload, &v); err != nil {
+			return nil, fmt.Errorf("unmarshal payload: %w", err)
+		}
+		return v, nil
+
+	case source == "summary":
+		return record.Summary, nil
+
+	case source == "record":
+		return map[string]any{
+			"run_id":        record.RunID,
+			"task_id":       record.TaskID,
+			"task_kind":     record.TaskKind,
+			"trigger_type":  record.TriggerType,
+			"run_status":    record.RunStatus,
+			"check_status":  record.CheckStatus,
+			"started_at":    record.StartedAt,
+			"ended_at":      record.EndedAt,
+			"duration_ms":   record.DurationMS,
+			"error_message": record.ErrorMessage,
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported sample source %q", source)
+	}
+}

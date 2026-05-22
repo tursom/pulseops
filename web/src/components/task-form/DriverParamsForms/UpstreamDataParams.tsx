@@ -1,6 +1,8 @@
 import React from 'react';
 import { Form, Input, Select, Button, Space, Tooltip, Typography } from 'antd';
+import type { FormInstance } from 'antd';
 import { MinusCircleOutlined, PlusOutlined, QuestionCircleOutlined } from '@ant-design/icons';
+import JsonFieldPicker from '../../JsonFieldPicker';
 
 const { Text } = Typography;
 
@@ -28,7 +30,11 @@ const aggModeOptions = [
   { value: 'max', label: '最大值 (max)' },
 ];
 
-const UpstreamDataParams: React.FC = () => {
+const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
+  const sourceTaskId = form ? Form.useWatch(['params', 'source_task_id'], form) as string : undefined;
+  const trigger = form ? Form.useWatch('trigger', form) as string : undefined;
+  const watchTaskId = form ? Form.useWatch('watch_task_id', form) as string : undefined;
+  const resolvedTaskId = sourceTaskId || (trigger === 'on_run' ? watchTaskId : null) || null;
   return (
     <>
       <Form.Item
@@ -87,14 +93,30 @@ const UpstreamDataParams: React.FC = () => {
                   />
                 </Form.Item>
 
-                <Form.Item
-                  {...restField}
-                  name={[name, 'jq_expr']}
-                  label="JQ 表达式"
-                  rules={[{ required: true, message: '请输入 jq 表达式' }]}
-                  tooltip="jq 语法提取规则。示例：.duration_ms 取字段、.data.items[0].name 取嵌套、.[] 展开数组"
-                >
-                  <Input placeholder="如 .duration_ms" style={{ width: 180 }} />
+                <Form.Item shouldUpdate noStyle>
+                  {(fm) => {
+                    const src = fm.getFieldValue(['params', 'extract_exprs', name, 'source']) as string | undefined;
+                    const isVisualSource = src && !src.startsWith('artifact:');
+                    const fieldLabel = isVisualSource ? '字段选择' : 'JQ 表达式';
+                    return (
+                      <Form.Item
+                        {...restField}
+                        name={[name, 'jq_expr']}
+                        label={fieldLabel}
+                        rules={[{ required: true, message: '请选择或输入 jq 表达式' }]}
+                        tooltip={isVisualSource ? '点击树节点自动生成 jq 表达式' : '手写 jq 表达式提取数据'}
+                      >
+                        {isVisualSource ? (
+                          <JsonFieldPicker
+                            sourceTaskId={resolvedTaskId}
+                            source={src!}
+                          />
+                        ) : (
+                          <Input placeholder="如 .duration_ms" style={{ width: 180 }} />
+                        )}
+                      </Form.Item>
+                    );
+                  }}
                 </Form.Item>
 
                 <Form.Item
@@ -133,19 +155,15 @@ const UpstreamDataParams: React.FC = () => {
 
       <div style={{ background: '#f6f8fa', padding: 12, borderRadius: 6, marginTop: 8 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          💡 <strong>JQ 语法速查：</strong>
+          💡 <strong>字段选择器说明：</strong>
           <br />
-          · <code>.字段名</code> — 取顶层字段（如 <code>.duration_ms</code>）
+          · 选择 <strong>payload / summary / record</strong> 数据源后，展开树点击字段即可自动生成 jq 表达式
           <br />
-          · <code>.a.b.c</code> — 取嵌套路径
+          · 选择 <strong>artifact:*</strong> 数据源时需手写 jq（产物结构不固定）
           <br />
-          · <code>.items[0]</code> — 取数组第一个元素
+          · 点击「手写」切换到原始 jq 输入模式
           <br />
-          · <code>.items[]</code> — 展开数组为多行（配合聚合使用）
-          <br />
-          · <code>.items[] | .name</code> — 管道：展开数组后取每项的 name
-          <br />
-          · <code>[.items[].price] | add</code> — 收集数组后求和
+          · 聚合仅对 jq 提取的数值数组有效
         </Text>
       </div>
     </>

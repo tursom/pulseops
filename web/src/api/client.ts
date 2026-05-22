@@ -10,6 +10,7 @@ import type {
   ActionResponse,
   APIError,
   GlobalSettings,
+  SampleResponse,
 } from './types'
 
 // Generic fetch wrapper
@@ -205,4 +206,10 @@ export async function updateSettings(settings: GlobalSettings): Promise<GlobalSe
     method: 'PUT',
     body: JSON.stringify(settings),
   })
+}
+
+export async function fetchTaskSample(taskId: string, source: string): Promise<SampleResponse> {
+  return request<SampleResponse>(
+    `/api/tasks/${encodeURIComponent(taskId)}/sample?source=${encodeURIComponent(source)}`
+  )
 }

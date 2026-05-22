@@ -173,3 +173,11 @@ export interface Pipeline {
   created_at: string
   updated_at: string
 }
+
+export interface SampleResponse {
+  available: boolean
+  task_id?: string
+  run_id?: string
+  source?: string
+  data?: unknown
+}
