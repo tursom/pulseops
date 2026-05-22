@@ -15,12 +15,14 @@ import {
   Space,
   Breadcrumb,
   Tooltip,
+  Modal,
 } from 'antd'
 import type { TableColumnsType } from 'antd'
 import {
   ArrowLeftOutlined,
   DownloadOutlined,
   RobotOutlined,
+  EyeOutlined,
 } from '@ant-design/icons'
 import {
   fetchTaskRun,
@@ -71,6 +73,8 @@ export default function RunDetail() {
   const [activeTab, setActiveTab] = useState('overview')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [previewArtifact, setPreviewArtifact] = useState<{ title: string, content: string } | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
 
   const fetchData = useCallback(async () => {
     if (!id || !runId) return
@@ -116,6 +120,27 @@ export default function RunDetail() {
       }
     } catch {
       // ignore download errors
+    }
+  }
+
+  const handlePreview = async (artifactID: string) => {
+    setPreviewLoading(true)
+    try {
+      const detail = await fetchArtifactDetail(artifactID)
+      let formatted = detail.preview_text
+      try {
+        formatted = JSON.stringify(JSON.parse(detail.preview_text), null, 2)
+      } catch {
+        // not valid JSON, show raw text
+      }
+      setPreviewArtifact({
+        title: detail.uri.split('/').pop() || detail.uri,
+        content: formatted,
+      })
+    } catch {
+      // ignore preview errors
+    } finally {
+      setPreviewLoading(false)
     }
   }
 
@@ -239,13 +264,25 @@ export default function RunDetail() {
       title: '操作',
       key: 'actions',
       render: (_: unknown, record: ArtifactRef) => (
-        <Button
-          type="link"
-          icon={<DownloadOutlined />}
-          onClick={() => handleDownload(record.artifact_id)}
-        >
-          下载
-        </Button>
+        <Space>
+          <Button
+            type="link"
+            icon={<DownloadOutlined />}
+            onClick={() => handleDownload(record.artifact_id)}
+          >
+            下载
+          </Button>
+          {record.content_type && record.content_type.includes('json') && (
+            <Button
+              type="link"
+              icon={<EyeOutlined />}
+              loading={previewLoading}
+              onClick={() => handlePreview(record.artifact_id)}
+            >
+              预览
+            </Button>
+          )}
+        </Space>
       ),
     },
   ]
@@ -469,7 +506,8 @@ export default function RunDetail() {
   ]
 
   return (
-    <div>
+    <>
+      <div>
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
         <Breadcrumb
           items={[
@@ -498,5 +536,17 @@ export default function RunDetail() {
         style={{ marginTop: 16 }}
       />
     </div>
+    <Modal
+      title={previewArtifact?.title || '预览'}
+      open={!!previewArtifact}
+      onCancel={() => setPreviewArtifact(null)}
+      footer={null}
+      width={800}
+    >
+      <pre style={{ maxHeight: 500, overflow: 'auto', background: '#f5f5f5', padding: 16, borderRadius: 8, fontSize: 13, margin: 0 }}>
+        {previewArtifact?.content}
+      </pre>
+    </Modal>
+  </>
   )
 }
