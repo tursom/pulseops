@@ -27,6 +27,7 @@ import {
   disableTask,
 } from '../api/client'
 import type { TaskState, RunRecord, AIAnalysisRecord, TaskDefinition } from '../api/types'
+import DurationChart from '../components/DurationChart'
 
 const { Title, Text } = Typography
 
@@ -67,7 +68,7 @@ export default function TaskDetail() {
     try {
       const [t, r, a] = await Promise.all([
         fetchTask(id),
-        fetchTaskRuns(id, 20),
+        fetchTaskRuns(id, 100),
         fetchTaskAIAnalyses(id, 10),
       ])
       setTask(t)
@@ -485,6 +486,10 @@ export default function TaskDetail() {
           </Card>
         )
       })()}
+
+      <Card title={`耗时趋势 (${runs.length})`} style={{ marginBottom: 24 }}>
+        <DurationChart runs={runs} />
+      </Card>
 
       <Card title={`运行历史 (${runs.length})`} style={{ marginBottom: 24 }}>
         <Table
