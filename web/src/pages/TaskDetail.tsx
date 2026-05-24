@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { useParams, Link, useNavigate } from 'react-router-dom'
+import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Spin,
   Alert,
@@ -49,6 +49,8 @@ const CHAR_LIMIT = 500
 export default function TaskDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const returnUrl = searchParams.get('from') || '/tasks'
 
   const [task, setTask] = useState<TaskState | null>(null)
   const [runs, setRuns] = useState<RunRecord[]>([])
@@ -339,7 +341,7 @@ export default function TaskDetail() {
   return (
     <div>
       <div style={{ marginBottom: 24 }}>
-        <Link to="/tasks" style={{ display: 'inline-block', marginBottom: 12 }}>
+        <Link to={returnUrl} style={{ display: 'inline-block', marginBottom: 12 }}>
           <Space>
             <ArrowLeftOutlined />
             <span>返回任务列表</span>
