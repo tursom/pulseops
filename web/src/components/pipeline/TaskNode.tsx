@@ -15,6 +15,7 @@ import {
   EditOutlined,
   DeleteOutlined,
   PlusCircleOutlined,
+  InfoCircleOutlined,
 } from '@ant-design/icons'
 import { triggerTaskRun, enableTask, disableTask, deleteTaskDefinition } from '../../api/client'
 import type { TaskNodeType } from './types'
@@ -67,6 +68,7 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
   const onRefresh = data.onRefresh as (() => void) | undefined
 
   const editUrl = `/task-defs/${taskId}/edit` + (pipelineId ? `?from=/pipelines/${encodeURIComponent(pipelineId)}` : '')
+  const detailUrl = `/tasks/${taskId}` + (pipelineId ? `?from=/pipelines/${encodeURIComponent(pipelineId)}` : '')
 
   const borderColor = KIND_COLORS[kind] || '#d9d9d9'
   const dotColor = STATUS_DOT_COLORS[status || ''] || '#d9d9d9'
@@ -99,6 +101,9 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
         } catch (err) {
           message.error(err instanceof Error ? err.message : 'Failed to toggle task')
         }
+        break
+      case 'detail':
+        navigate(detailUrl)
         break
       case 'edit':
         navigate(editUrl)
@@ -134,6 +139,7 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
   const menuItems = [
     { key: 'run', label: '立即执行', icon: <PlayCircleOutlined /> },
     { key: 'toggle', label: enabled ? '禁用' : '启用', icon: <PoweroffOutlined /> },
+    { key: 'detail', label: '查看详情', icon: <InfoCircleOutlined /> },
     { key: 'edit', label: '编辑', icon: <EditOutlined /> },
     {
       key: 'add-downstream',
