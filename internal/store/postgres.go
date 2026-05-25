@@ -328,7 +328,17 @@ func (s *PostgresStore) ListRuns(ctx context.Context, taskID string, limit, offs
 			}
 			records = append(records, record)
 		}
-		return records, rows.Err()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		for i := range records {
+			artifacts, err := s.ListArtifactsByRun(ctx, taskID, records[i].RunID)
+			if err != nil {
+				return nil, err
+			}
+			records[i].ArtifactRefs = artifacts
+		}
+		return records, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT run_id, task_id, task_kind, trigger_type, run_status, check_status,
@@ -351,7 +361,17 @@ func (s *PostgresStore) ListRuns(ctx context.Context, taskID string, limit, offs
 		}
 		records = append(records, record)
 	}
-	return records, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range records {
+		artifacts, err := s.ListArtifactsByRun(ctx, taskID, records[i].RunID)
+		if err != nil {
+			return nil, err
+		}
+		records[i].ArtifactRefs = artifacts
+	}
+	return records, nil
 }
 
 func (s *PostgresStore) CountRuns(ctx context.Context, taskID string, since time.Duration) (int, error) {

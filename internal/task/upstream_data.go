@@ -400,7 +400,7 @@ func toFloat64Single(v any) (float64, bool) {
 // FetchSampleData 从上游任务的最近成功运行中获取指定数据源的样本数据。
 // upstreamTaskID 是上游任务 ID（已由调用方解析）。返回 nil 表示没有成功运行。
 // 如果 jqExpr 非空，会对解析出的数据执行 JQ 求值，结果放在 JQResult 字段。
-func FetchSampleData(ctx context.Context, repo store.Repository, upstreamTaskID, source string, jqExpr string) (*store.SampleResponse, error) {
+func FetchSampleData(ctx context.Context, repo store.Repository, artifactStore store.ArtifactStore, upstreamTaskID, source string, jqExpr string) (*store.SampleResponse, error) {
 	runs, err := repo.ListRuns(ctx, upstreamTaskID, 20, 0, 0)
 	if err != nil {
 		return nil, fmt.Errorf("list runs for %q: %w", upstreamTaskID, err)
@@ -417,7 +417,7 @@ func FetchSampleData(ctx context.Context, repo store.Repository, upstreamTaskID,
 		return &store.SampleResponse{Available: false}, nil
 	}
 
-	data, err := resolveSampleSource(ctx, source, successRecord)
+	data, err := resolveSampleSource(ctx, source, successRecord, artifactStore)
 	if err != nil {
 		return nil, err
 	}
@@ -439,17 +439,36 @@ func FetchSampleData(ctx context.Context, repo store.Repository, upstreamTaskID,
 	}, nil
 }
 
-func resolveSampleSource(ctx context.Context, source string, record *store.RunRecord) (any, error) {
+func resolveSampleSource(ctx context.Context, source string, record *store.RunRecord, artifactStore store.ArtifactStore) (any, error) {
 	switch {
 	case source == "payload":
-		if len(record.Payload) == 0 {
-			return nil, nil
+		if len(record.Payload) > 0 {
+			var v any
+			if err := json.Unmarshal(record.Payload, &v); err != nil {
+				return nil, fmt.Errorf("unmarshal payload: %w", err)
+			}
+			return v, nil
 		}
-		var v any
-		if err := json.Unmarshal(record.Payload, &v); err != nil {
-			return nil, fmt.Errorf("unmarshal payload: %w", err)
+		// Payload was externalized to artifact store — try to read it back
+		for _, ref := range record.ArtifactRefs {
+			if ref.Kind == "payload" && artifactStore != nil {
+				rc, err := artifactStore.Get(ctx, ref.URI)
+				if err != nil {
+					return nil, fmt.Errorf("read payload artifact: %w", err)
+				}
+				defer rc.Close()
+				raw, err := io.ReadAll(rc)
+				if err != nil {
+					return nil, fmt.Errorf("read payload artifact body: %w", err)
+				}
+				var v any
+				if err := json.Unmarshal(raw, &v); err != nil {
+					return nil, fmt.Errorf("unmarshal artifact payload: %w", err)
+				}
+				return v, nil
+			}
 		}
-		return v, nil
+		return nil, nil
 
 	case source == "summary":
 		return record.Summary, nil

@@ -97,7 +97,7 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 			return
 		}
 		jqExpr := r.URL.Query().Get("jq")
-		resp, err := task.FetchSampleData(r.Context(), repository, r.PathValue("id"), source, jqExpr)
+		resp, err := task.FetchSampleData(r.Context(), repository, artifactStore, r.PathValue("id"), source, jqExpr)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
