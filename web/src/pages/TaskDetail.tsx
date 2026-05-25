@@ -81,9 +81,10 @@ export default function TaskDetail() {
     if (!id) return
     try {
       const offset = (page - 1) * pageSize
+      const chartLimit = timeRange ? 10000 : 100
       const [t, cr, pr, a] = await Promise.all([
         fetchTask(id),
-        fetchTaskRuns(id, 100, timeRange || undefined),
+        fetchTaskRuns(id, chartLimit, timeRange || undefined),
         fetchTaskRunsPaginated(id, pageSize, offset, timeRange || undefined),
         fetchTaskAIAnalyses(id, 10),
       ])
