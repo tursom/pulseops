@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { Form, Input, Select, Button, Space, Tooltip, Typography, Spin } from 'antd';
+import { Form, Input, Select, Button, Space, Tooltip, Typography, Spin, Collapse, Tag } from 'antd';
 import type { FormInstance } from 'antd';
 import { MinusCircleOutlined, PlusOutlined, QuestionCircleOutlined } from '@ant-design/icons';
 import JsonFieldPicker from '../../JsonFieldPicker';
-import { fetchTaskDefinitions } from '../../../api/client';
-import type { TaskDefinition } from '../../../api/types';
+import { fetchTaskDefinitions, fetchTaskSample } from '../../../api/client';
+import type { TaskDefinition, SampleResponse } from '../../../api/types';
 
 const { Text } = Typography;
 
@@ -49,6 +49,34 @@ const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
       .finally(() => setTaskDefsLoading(false));
   }, []);
 
+  const [previewData, setPreviewData] = useState<Record<string, SampleResponse | null>>({})
+  const [previewLoading, setPreviewLoading] = useState(false)
+
+  useEffect(() => {
+    if (!resolvedTaskId) {
+      setPreviewData({})
+      setPreviewLoading(false)
+      return
+    }
+    setPreviewLoading(true)
+    const sources = ['summary', 'record', 'payload']
+    Promise.allSettled(
+      sources.map((src) =>
+        fetchTaskSample(resolvedTaskId, src).then((r) => [src, r] as const),
+      ),
+    ).then((results) => {
+      const map: Record<string, SampleResponse | null> = {}
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          const [src, data] = r.value
+          map[src] = data
+        }
+      }
+      setPreviewData(map)
+      setPreviewLoading(false)
+    })
+  }, [resolvedTaskId])
+
   return (
     <>
       <Form.Item
@@ -69,6 +97,68 @@ const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
           optionFilterProp="label"
         />
       </Form.Item>
+
+      {resolvedTaskId && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ marginBottom: 8 }}>
+            <Text strong>上游数据预览</Text>
+            <Text type="secondary" style={{ marginLeft: 8 }}>
+              来自上游任务最近一次成功执行的数据样例
+            </Text>
+          </div>
+          {previewLoading ? (
+            <Spin />
+          ) : (
+            <Collapse
+              size="small"
+              items={[
+                {
+                  key: 'summary',
+                  label: <Tag>Summary</Tag>,
+                  children: previewData.summary?.available ? (
+                    <pre style={{
+                      background: '#f5f5f5', padding: 8, borderRadius: 4,
+                      maxHeight: 200, overflow: 'auto', fontSize: 12, margin: 0,
+                    }}>
+                      {JSON.stringify(previewData.summary.data, null, 2)}
+                    </pre>
+                  ) : (
+                    <Text type="secondary">暂无 Summary 数据</Text>
+                  ),
+                },
+                {
+                  key: 'record',
+                  label: <Tag>Record</Tag>,
+                  children: previewData.record?.available ? (
+                    <pre style={{
+                      background: '#f5f5f5', padding: 8, borderRadius: 4,
+                      maxHeight: 200, overflow: 'auto', fontSize: 12, margin: 0,
+                    }}>
+                      {JSON.stringify(previewData.record.data, null, 2)}
+                    </pre>
+                  ) : (
+                    <Text type="secondary">暂无 Record 数据</Text>
+                  ),
+                },
+                {
+                  key: 'payload',
+                  label: <Tag>Payload</Tag>,
+                  children: previewData.payload?.available ? (
+                    <pre style={{
+                      background: '#f5f5f5', padding: 8, borderRadius: 4,
+                      maxHeight: 200, overflow: 'auto', fontSize: 12, margin: 0,
+                    }}>
+                      {JSON.stringify(previewData.payload.data, null, 2)}
+                    </pre>
+                  ) : (
+                    <Text type="secondary">暂无 Payload 数据（上游任务可能未保存 payload）</Text>
+                  ),
+                },
+              ]}
+            />
+          )}
+        </div>
+      )}
 
       <div style={{ marginBottom: 12 }}>
         <Text strong>提取表达式</Text>
