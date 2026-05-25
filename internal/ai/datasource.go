@@ -90,7 +90,7 @@ func (s *runHistorySource) Fetch(ctx context.Context, spec DataSourceSpec, deps 
 	if l, ok := spec.Config["limit"].(int); ok {
 		limit = l
 	}
-	return deps.DBRepository.ListRuns(ctx, taskID, limit)
+	return deps.DBRepository.ListRuns(ctx, taskID, limit, 0)
 }
 
 type previousAnalysisSource struct{}

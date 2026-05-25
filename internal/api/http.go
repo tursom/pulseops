@@ -105,7 +105,8 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 	})
 	mux.HandleFunc("GET /api/tasks/{id}/runs", func(w http.ResponseWriter, r *http.Request) {
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		records, err := repository.ListRuns(r.Context(), r.PathValue("id"), limit)
+		since, _ := time.ParseDuration(r.URL.Query().Get("since"))
+		records, err := repository.ListRuns(r.Context(), r.PathValue("id"), limit, since)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return

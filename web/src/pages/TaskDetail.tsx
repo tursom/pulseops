@@ -14,6 +14,7 @@ import {
   Collapse,
   Tooltip,
   Space,
+  Select,
   message,
 } from 'antd'
 import type { TableColumnsType } from 'antd'
@@ -47,6 +48,13 @@ function shortRunID(id: string): string {
 
 const CHAR_LIMIT = 500
 
+const TIME_RANGE_OPTIONS = [
+  { label: '最近24小时', value: '24h' },
+  { label: '最近7天', value: '168h' },
+  { label: '最近30天', value: '720h' },
+  { label: '全部', value: '' },
+]
+
 export default function TaskDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -60,6 +68,7 @@ export default function TaskDetail() {
   const [error, setError] = useState<string | null>(null)
   const [actionLoading, setActionLoading] = useState(false)
   const [expandedAnalyses, setExpandedAnalyses] = useState<Set<number>>(new Set())
+  const [timeRange, setTimeRange] = useState<string>('')
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -68,7 +77,7 @@ export default function TaskDetail() {
     try {
       const [t, r, a] = await Promise.all([
         fetchTask(id),
-        fetchTaskRuns(id, 100),
+        fetchTaskRuns(id, 100, timeRange || undefined),
         fetchTaskAIAnalyses(id, 10),
       ])
       setTask(t)
@@ -80,7 +89,7 @@ export default function TaskDetail() {
     } finally {
       setLoading(false)
     }
-  }, [id])
+  }, [id, timeRange])
 
   useEffect(() => {
     setLoading(true)
@@ -488,6 +497,15 @@ export default function TaskDetail() {
       })()}
 
       <Card title={`耗时趋势 (${runs.length})`} style={{ marginBottom: 24 }}>
+        <div style={{ marginBottom: 12 }}>
+          <Select
+            value={timeRange}
+            onChange={setTimeRange}
+            options={TIME_RANGE_OPTIONS}
+            style={{ width: 140 }}
+            size="small"
+          />
+        </div>
         <DurationChart runs={runs} />
       </Card>
 

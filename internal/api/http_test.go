@@ -86,7 +86,7 @@ func (r *fakeRepository) Close() error                                          
 func (r *fakeRepository) UpsertTaskState(context.Context, store.TaskState) error { return nil }
 func (r *fakeRepository) DeleteTaskState(context.Context, string) error          { return nil }
 func (r *fakeRepository) InsertRun(context.Context, store.RunRecord) error       { return nil }
-func (r *fakeRepository) ListRuns(context.Context, string, int) ([]store.RunRecord, error) {
+func (r *fakeRepository) ListRuns(context.Context, string, int, time.Duration) ([]store.RunRecord, error) {
 	return nil, nil
 }
 func (r *fakeRepository) GetRun(context.Context, string, string) (store.RunRecord, error) {

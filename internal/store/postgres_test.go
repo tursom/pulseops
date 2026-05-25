@@ -105,7 +105,7 @@ func TestPostgresStoreListsRunsAndLoadsRunDetail(t *testing.T) {
 			"", "", []byte(`{"env":"test"}`),
 		))
 
-	runs, err := st.ListRuns(context.Background(), "task-a", 5)
+	runs, err := st.ListRuns(context.Background(), "task-a", 5, 0)
 	if err != nil {
 		t.Fatalf("list runs: %v", err)
 	}
@@ -213,6 +213,35 @@ func TestPostgresStoreTaskStateAndReloadFailure(t *testing.T) {
 	}
 	if err := st.DeleteTaskState(context.Background(), "task-a"); err != nil {
 		t.Fatalf("delete task state: %v", err)
+	}
+	assertNoMockError(t, mock)
+}
+
+func TestPostgresStoreListRunsWithTimeFilter(t *testing.T) {
+	t.Parallel()
+
+	st, mock := newMockStore(t)
+
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT run_id, task_id, task_kind, trigger_type, run_status, check_status,
+		       started_at, ended_at, duration_ms, error_message, summary_json, payload,
+		       stdout, stderr, labels_json
+		FROM runs
+		WHERE task_id = $1 AND started_at >= $3
+		ORDER BY started_at DESC
+		LIMIT $2`)).
+		WithArgs("task-a", 50, sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"run_id", "task_id", "task_kind", "trigger_type", "run_status", "check_status",
+			"started_at", "ended_at", "duration_ms", "error_message", "summary_json", "payload",
+			"stdout", "stderr", "labels_json",
+		}))
+
+	runs, err := st.ListRuns(context.Background(), "task-a", 50, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("list runs with since: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("expected 0 runs, got %d", len(runs))
 	}
 	assertNoMockError(t, mock)
 }

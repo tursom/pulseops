@@ -91,7 +91,7 @@ type Repository interface {
 	UpsertTaskState(ctx context.Context, state TaskState) error
 	DeleteTaskState(ctx context.Context, taskID string) error
 	InsertRun(ctx context.Context, record RunRecord) error
-	ListRuns(ctx context.Context, taskID string, limit int) ([]RunRecord, error)
+	ListRuns(ctx context.Context, taskID string, limit int, since time.Duration) ([]RunRecord, error)
 	GetRun(ctx context.Context, taskID, runID string) (RunRecord, error)
 	ListArtifactsByRun(ctx context.Context, taskID, runID string) ([]ArtifactRef, error)
 	GetArtifact(ctx context.Context, artifactID string) (ArtifactRef, error)
@@ -283,9 +283,34 @@ func (s *PostgresStore) InsertRun(ctx context.Context, record RunRecord) error {
 	return nil
 }
 
-func (s *PostgresStore) ListRuns(ctx context.Context, taskID string, limit int) ([]RunRecord, error) {
+func (s *PostgresStore) ListRuns(ctx context.Context, taskID string, limit int, since time.Duration) ([]RunRecord, error) {
 	if limit <= 0 {
 		limit = 20
+	}
+	if since > 0 {
+		cutoff := time.Now().UTC().Add(-since)
+		rows, err := s.db.QueryContext(ctx, `
+			SELECT run_id, task_id, task_kind, trigger_type, run_status, check_status,
+			       started_at, ended_at, duration_ms, error_message, summary_json, payload,
+			       stdout, stderr, labels_json
+			FROM runs
+			WHERE task_id = $1 AND started_at >= $3
+			ORDER BY started_at DESC
+			LIMIT $2
+		`, taskID, limit, cutoff)
+		if err != nil {
+			return nil, fmt.Errorf("list runs: %w", err)
+		}
+		defer rows.Close()
+		var records []RunRecord
+		for rows.Next() {
+			record, err := scanRunRecord(rows)
+			if err != nil {
+				return nil, err
+			}
+			records = append(records, record)
+		}
+		return records, rows.Err()
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT run_id, task_id, task_kind, trigger_type, run_status, check_status,
