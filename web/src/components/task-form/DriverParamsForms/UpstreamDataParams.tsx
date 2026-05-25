@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Form, Input, Select, Button, Space, Tooltip, Typography, Spin, Collapse, Tag } from 'antd';
 import type { FormInstance } from 'antd';
 import { MinusCircleOutlined, PlusOutlined, QuestionCircleOutlined } from '@ant-design/icons';
@@ -51,20 +51,22 @@ const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
 
   const [previewData, setPreviewData] = useState<Record<string, SampleResponse | null>>({})
   const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+  const previewLoadIdRef = useRef(0)
 
-  useEffect(() => {
-    if (!resolvedTaskId) {
-      setPreviewData({})
-      setPreviewLoading(false)
-      return
-    }
+  const fetchPreview = useCallback(async (taskId: string) => {
+    const loadId = ++previewLoadIdRef.current
     setPreviewLoading(true)
+    setPreviewError(null)
+    setPreviewData({})
     const sources = ['summary', 'record', 'payload']
-    Promise.allSettled(
-      sources.map((src) =>
-        fetchTaskSample(resolvedTaskId, src).then((r) => [src, r] as const),
-      ),
-    ).then((results) => {
+    try {
+      const results = await Promise.allSettled(
+        sources.map((src) =>
+          fetchTaskSample(taskId, src).then((r) => [src, r] as const),
+        ),
+      )
+      if (loadId !== previewLoadIdRef.current) return
       const map: Record<string, SampleResponse | null> = {}
       for (const r of results) {
         if (r.status === 'fulfilled') {
@@ -73,9 +75,24 @@ const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
         }
       }
       setPreviewData(map)
+    } catch (err) {
+      if (loadId !== previewLoadIdRef.current) return
+      setPreviewError(err instanceof Error ? err.message : '加载预览失败')
+    } finally {
+      if (loadId === previewLoadIdRef.current) setPreviewLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    const taskId = sourceTaskId || (trigger === 'on_run' ? watchTaskId : null) || null
+    if (!taskId) {
+      setPreviewData({})
       setPreviewLoading(false)
-    })
-  }, [resolvedTaskId])
+      setPreviewError(null)
+      return
+    }
+    fetchPreview(taskId)
+  }, [sourceTaskId, watchTaskId, trigger, fetchPreview])
 
   return (
     <>
@@ -108,6 +125,8 @@ const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
           </div>
           {previewLoading ? (
             <Spin />
+          ) : previewError ? (
+            <Text type="danger">{previewError}</Text>
           ) : (
             <Collapse
               size="small"
