@@ -43,6 +43,13 @@ export interface RunRecord {
   labels?: Record<string, string>
 }
 
+export interface RunStat {
+  run_id: string
+  started_at: string
+  duration_ms: number
+  run_status: string
+}
+
 export interface PaginatedRuns {
   records: RunRecord[]
   total: number

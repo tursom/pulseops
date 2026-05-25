@@ -21,14 +21,14 @@ import type { TableColumnsType } from 'antd'
 import { PlayCircleOutlined, ArrowLeftOutlined, EditOutlined } from '@ant-design/icons'
 import {
   fetchTask,
-  fetchTaskRuns,
   fetchTaskRunsPaginated,
+  fetchTaskRunStats,
   fetchTaskAIAnalyses,
   triggerTaskRun,
   enableTask,
   disableTask,
 } from '../api/client'
-import type { TaskState, RunRecord, AIAnalysisRecord, TaskDefinition } from '../api/types'
+import type { TaskState, RunRecord, RunStat, AIAnalysisRecord, TaskDefinition } from '../api/types'
 import DurationChart from '../components/DurationChart'
 
 const { Title, Text } = Typography
@@ -63,7 +63,7 @@ export default function TaskDetail() {
   const returnUrl = searchParams.get('from') || '/tasks'
 
   const [task, setTask] = useState<TaskState | null>(null)
-  const [chartRuns, setChartRuns] = useState<RunRecord[]>([])
+  const [chartRuns, setChartRuns] = useState<RunStat[]>([])
   const [tableRuns, setTableRuns] = useState<RunRecord[]>([])
   const [total, setTotal] = useState(0)
   const [analyses, setAnalyses] = useState<AIAnalysisRecord[]>([])
@@ -81,10 +81,9 @@ export default function TaskDetail() {
     if (!id) return
     try {
       const offset = (page - 1) * pageSize
-      const chartLimit = timeRange ? 10000 : 100
       const [t, cr, pr, a] = await Promise.all([
         fetchTask(id),
-        fetchTaskRuns(id, chartLimit, timeRange || undefined),
+        fetchTaskRunStats(id, timeRange || undefined),
         fetchTaskRunsPaginated(id, pageSize, offset, timeRange || undefined),
         fetchTaskAIAnalyses(id, 10),
       ])

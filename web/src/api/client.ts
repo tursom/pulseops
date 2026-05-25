@@ -12,6 +12,7 @@ import type {
   GlobalSettings,
   SampleResponse,
   PaginatedRuns,
+  RunStat,
 } from './types'
 
 // Generic fetch wrapper
@@ -62,6 +63,14 @@ export async function fetchTaskRunsPaginated(
   if (since) params.set('since', since)
   const qs = params.toString()
   return request<PaginatedRuns>(`/api/tasks/${encodeURIComponent(id)}/runs${qs ? `?${qs}` : ''}`)
+}
+
+// GET /api/tasks/{id}/runs/stats
+export async function fetchTaskRunStats(id: string, since?: string): Promise<RunStat[]> {
+  const params = new URLSearchParams()
+  if (since) params.set('since', since)
+  const qs = params.toString()
+  return request<RunStat[]>(`/api/tasks/${encodeURIComponent(id)}/runs/stats${qs ? `?${qs}` : ''}`)
 }
 
 // GET /api/tasks/{id}/runs/{runID}

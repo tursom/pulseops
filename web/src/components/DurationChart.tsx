@@ -9,7 +9,7 @@ import {
   Tooltip,
   Legend,
 } from 'recharts'
-import type { RunRecord } from '../api/types'
+import type { RunStat } from '../api/types'
 
 // === Color constants ===
 const LINE_COLOR = '#1677ff'
@@ -54,7 +54,7 @@ interface ChartPoint {
 
 // === Props ===
 interface DurationChartProps {
-  runs: RunRecord[]
+  runs: RunStat[]
 }
 
 // === Custom tooltip ===

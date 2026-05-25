@@ -66,6 +66,13 @@ type SampleResponse struct {
 	Data      any    `json:"data,omitempty"`
 }
 
+type RunStat struct {
+	RunID      string    `json:"run_id"`
+	StartedAt  time.Time `json:"started_at"`
+	DurationMS int64     `json:"duration_ms"`
+	RunStatus  string    `json:"run_status"`
+}
+
 type RunRecord struct {
 	RunID        string            `json:"run_id"`
 	TaskID       string            `json:"task_id"`
@@ -98,6 +105,7 @@ type Repository interface {
 	InsertRun(ctx context.Context, record RunRecord) error
 	ListRuns(ctx context.Context, taskID string, limit, offset int, since time.Duration) ([]RunRecord, error)
 	CountRuns(ctx context.Context, taskID string, since time.Duration) (int, error)
+	ListRunStats(ctx context.Context, taskID string, since time.Duration) ([]RunStat, error)
 	GetRun(ctx context.Context, taskID, runID string) (RunRecord, error)
 	ListArtifactsByRun(ctx context.Context, taskID, runID string) ([]ArtifactRef, error)
 	GetArtifact(ctx context.Context, artifactID string) (ArtifactRef, error)
@@ -359,6 +367,48 @@ func (s *PostgresStore) CountRuns(ctx context.Context, taskID string, since time
 		`SELECT COUNT(*) FROM runs WHERE task_id = $1`,
 		taskID).Scan(&n)
 	return n, err
+}
+
+func (s *PostgresStore) ListRunStats(ctx context.Context, taskID string, since time.Duration) ([]RunStat, error) {
+	if since > 0 {
+		cutoff := time.Now().UTC().Add(-since)
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT run_id, started_at, duration_ms, run_status FROM runs
+			 WHERE task_id = $1 AND started_at >= $2
+			 ORDER BY started_at DESC`,
+			taskID, cutoff)
+		if err != nil {
+			return nil, fmt.Errorf("list run stats: %w", err)
+		}
+		defer rows.Close()
+		var stats []RunStat
+		for rows.Next() {
+			var s RunStat
+			if err := rows.Scan(&s.RunID, &s.StartedAt, &s.DurationMS, &s.RunStatus); err != nil {
+				return nil, err
+			}
+			stats = append(stats, s)
+		}
+		return stats, rows.Err()
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT run_id, started_at, duration_ms, run_status FROM runs
+		 WHERE task_id = $1
+		 ORDER BY started_at DESC`,
+			taskID)
+	if err != nil {
+		return nil, fmt.Errorf("list run stats: %w", err)
+	}
+	defer rows.Close()
+	var stats []RunStat
+	for rows.Next() {
+		var s RunStat
+		if err := rows.Scan(&s.RunID, &s.StartedAt, &s.DurationMS, &s.RunStatus); err != nil {
+			return nil, err
+		}
+		stats = append(stats, s)
+	}
+	return stats, rows.Err()
 }
 
 func (s *PostgresStore) GetRun(ctx context.Context, taskID, runID string) (RunRecord, error) {

@@ -122,6 +122,18 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		}
 		writeJSON(w, http.StatusOK, store.PaginatedRuns{Records: records, Total: total})
 	})
+	mux.HandleFunc("GET /api/tasks/{id}/runs/stats", func(w http.ResponseWriter, r *http.Request) {
+		since, _ := time.ParseDuration(r.URL.Query().Get("since"))
+		stats, err := repository.ListRunStats(r.Context(), r.PathValue("id"), since)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if stats == nil {
+			stats = []store.RunStat{}
+		}
+		writeJSON(w, http.StatusOK, stats)
+	})
 	mux.HandleFunc("GET /api/tasks/{id}/runs/{runID}", func(w http.ResponseWriter, r *http.Request) {
 		record, err := repository.GetRun(r.Context(), r.PathValue("id"), r.PathValue("runID"))
 		if err != nil {

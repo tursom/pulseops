@@ -92,6 +92,9 @@ func (r *fakeRepository) ListRuns(context.Context, string, int, int, time.Durati
 func (r *fakeRepository) CountRuns(context.Context, string, time.Duration) (int, error) {
 	return 0, nil
 }
+func (r *fakeRepository) ListRunStats(context.Context, string, time.Duration) ([]store.RunStat, error) {
+	return nil, nil
+}
 func (r *fakeRepository) GetRun(context.Context, string, string) (store.RunRecord, error) {
 	return store.RunRecord{}, sql.ErrNoRows
 }
