@@ -96,7 +96,8 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 			writeError(w, http.StatusBadRequest, `query param "source" required: payload, summary, or record`)
 			return
 		}
-		resp, err := task.FetchSampleData(r.Context(), repository, r.PathValue("id"), source)
+		jqExpr := r.URL.Query().Get("jq")
+		resp, err := task.FetchSampleData(r.Context(), repository, r.PathValue("id"), source, jqExpr)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return

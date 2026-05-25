@@ -64,6 +64,7 @@ type SampleResponse struct {
 	RunID     string `json:"run_id,omitempty"`
 	Source    string `json:"source,omitempty"`
 	Data      any    `json:"data,omitempty"`
+	JQResult  any    `json:"jq_result,omitempty"`
 }
 
 type RunStat struct {

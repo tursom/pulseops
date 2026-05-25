@@ -263,6 +263,11 @@ func (r *upstreamDataRunner) readArtifactContent(ctx context.Context, ref store.
 }
 
 func (r *upstreamDataRunner) applyJQ(expr string, input any) (any, error) {
+	return ApplyJQ(expr, input)
+}
+
+// ApplyJQ evaluates a jq expression against input data and returns the result.
+func ApplyJQ(expr string, input any) (any, error) {
 	query, err := gojq.Parse(expr)
 	if err != nil {
 		return nil, fmt.Errorf("parse jq: %w", err)
@@ -394,7 +399,8 @@ func toFloat64Single(v any) (float64, bool) {
 
 // FetchSampleData 从上游任务的最近成功运行中获取指定数据源的样本数据。
 // upstreamTaskID 是上游任务 ID（已由调用方解析）。返回 nil 表示没有成功运行。
-func FetchSampleData(ctx context.Context, repo store.Repository, upstreamTaskID, source string) (*store.SampleResponse, error) {
+// 如果 jqExpr 非空，会对解析出的数据执行 JQ 求值，结果放在 JQResult 字段。
+func FetchSampleData(ctx context.Context, repo store.Repository, upstreamTaskID, source string, jqExpr string) (*store.SampleResponse, error) {
 	runs, err := repo.ListRuns(ctx, upstreamTaskID, 20, 0, 0)
 	if err != nil {
 		return nil, fmt.Errorf("list runs for %q: %w", upstreamTaskID, err)
@@ -416,12 +422,20 @@ func FetchSampleData(ctx context.Context, repo store.Repository, upstreamTaskID,
 		return nil, err
 	}
 
+	var jqResult any
+	if jqExpr != "" && data != nil {
+		if result, err := ApplyJQ(jqExpr, data); err == nil {
+			jqResult = result
+		}
+	}
+
 	return &store.SampleResponse{
 		Available: true,
 		TaskID:    upstreamTaskID,
 		RunID:     successRecord.RunID,
 		Source:    source,
 		Data:      data,
+		JQResult:  jqResult,
 	}, nil
 }
 

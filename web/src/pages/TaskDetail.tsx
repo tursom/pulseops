@@ -84,6 +84,8 @@ export default function TaskDetail() {
   const [samples, setSamples] = useState<Record<string, SampleResponse | null>>({})
   const [samplesLoading, setSamplesLoading] = useState(false)
   const [samplesError, setSamplesError] = useState<string | null>(null)
+  const [jqResults, setJqResults] = useState<Record<string, unknown>>({})
+  const [jqLoading, setJqLoading] = useState(false)
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -180,6 +182,40 @@ export default function TaskDetail() {
       }
       setSamples(map)
       setSamplesLoading(false)
+    })
+  }, [task])
+
+  useEffect(() => {
+    if (!task) return
+    const def = (task as unknown as { definition?: TaskDefinition }).definition
+    const upstreamId = ((def?.params as Record<string, unknown> | undefined)?.source_task_id as string) || def?.watch_task_id || ''
+    const exprs = (def?.params as Record<string, unknown> | undefined)?.extract_exprs as
+      | Array<{ source: string; jq_expr: string }>
+      | undefined
+    if (!upstreamId || !exprs || exprs.length === 0) {
+      setJqResults({})
+      setJqLoading(false)
+      return
+    }
+    setJqLoading(true)
+    const promises = exprs
+      .filter((e) => e.source && !e.source.startsWith('artifact:'))
+      .map((expr) => {
+        const key = `${expr.source}::${expr.jq_expr}`
+        return fetchTaskSample(upstreamId, expr.source, expr.jq_expr).then(
+          (r) => [key, r.jq_result] as const,
+        )
+      })
+    Promise.allSettled(promises).then((results) => {
+      const map: Record<string, unknown> = {}
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          const [key, val] = r.value
+          map[key] = val
+        }
+      }
+      setJqResults(map)
+      setJqLoading(false)
     })
   }, [task])
 
@@ -616,6 +652,15 @@ export default function TaskDetail() {
                     { title: '输出字段', dataIndex: 'field', key: 'field', render: (v: string) => <Text code>{v}</Text> },
                     { title: '数据源', dataIndex: 'source', key: 'source', render: (v: string) => <Tag>{sourceLabels[v] || v}</Tag> },
                     { title: 'JQ 表达式', dataIndex: 'jq_expr', key: 'jq_expr', render: (v: string) => <Text code>{v}</Text> },
+                    { title: '样本值', key: 'jq_sample',
+                      render: (_: unknown, record: { source: string; jq_expr: string }) => {
+                        const key = `${record.source}::${record.jq_expr}`
+                        const val = jqResults[key]
+                        if (jqLoading && !(key in jqResults)) return <Text type="secondary">加载中…</Text>
+                        if (val === undefined || val === null) return <Text type="secondary">—</Text>
+                        return <Text code>{String(val)}</Text>
+                      },
+                    },
                     { title: '聚合', dataIndex: 'agg_mode', key: 'agg_mode', render: (v: string) => <Tag>{aggLabels[v] || v}</Tag> },
                   ]}
                 />

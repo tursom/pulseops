@@ -192,4 +192,5 @@ export interface SampleResponse {
   run_id?: string
   source?: string
   data?: unknown
+  jq_result?: unknown
 }

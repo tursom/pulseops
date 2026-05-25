@@ -229,8 +229,10 @@ export async function updateSettings(settings: GlobalSettings): Promise<GlobalSe
   })
 }
 
-export async function fetchTaskSample(taskId: string, source: string): Promise<SampleResponse> {
+export async function fetchTaskSample(taskId: string, source: string, jq?: string): Promise<SampleResponse> {
+  const params = new URLSearchParams({ source })
+  if (jq) params.set('jq', jq)
   return request<SampleResponse>(
-    `/api/tasks/${encodeURIComponent(taskId)}/sample?source=${encodeURIComponent(source)}`
+    `/api/tasks/${encodeURIComponent(taskId)}/sample?${params.toString()}`
   )
 }
