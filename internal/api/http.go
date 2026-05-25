@@ -105,8 +105,14 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 	})
 	mux.HandleFunc("GET /api/tasks/{id}/runs", func(w http.ResponseWriter, r *http.Request) {
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 		since, _ := time.ParseDuration(r.URL.Query().Get("since"))
-		records, err := repository.ListRuns(r.Context(), r.PathValue("id"), limit, since)
+		records, err := repository.ListRuns(r.Context(), r.PathValue("id"), limit, offset, since)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		total, err := repository.CountRuns(r.Context(), r.PathValue("id"), since)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -114,7 +120,7 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		if records == nil {
 			records = []store.RunRecord{}
 		}
-		writeJSON(w, http.StatusOK, records)
+		writeJSON(w, http.StatusOK, store.PaginatedRuns{Records: records, Total: total})
 	})
 	mux.HandleFunc("GET /api/tasks/{id}/runs/{runID}", func(w http.ResponseWriter, r *http.Request) {
 		record, err := repository.GetRun(r.Context(), r.PathValue("id"), r.PathValue("runID"))

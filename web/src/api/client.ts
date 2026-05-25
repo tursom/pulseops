@@ -11,6 +11,7 @@ import type {
   APIError,
   GlobalSettings,
   SampleResponse,
+  PaginatedRuns,
 } from './types'
 
 // Generic fetch wrapper
@@ -53,6 +54,21 @@ export async function fetchTaskRuns(id: string, limit?: number, since?: string):
   }
   const qs = params.toString()
   return request<RunRecord[]>(`/api/tasks/${encodeURIComponent(id)}/runs${qs ? `?${qs}` : ''}`)
+}
+
+// GET /api/tasks/{id}/runs (paginated)
+export async function fetchTaskRunsPaginated(
+  id: string,
+  limit?: number,
+  offset?: number,
+  since?: string,
+): Promise<PaginatedRuns> {
+  const params = new URLSearchParams()
+  if (limit !== undefined) params.set('limit', String(limit))
+  if (offset !== undefined && offset > 0) params.set('offset', String(offset))
+  if (since) params.set('since', since)
+  const qs = params.toString()
+  return request<PaginatedRuns>(`/api/tasks/${encodeURIComponent(id)}/runs${qs ? `?${qs}` : ''}`)
 }
 
 // GET /api/tasks/{id}/runs/{runID}

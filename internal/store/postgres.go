@@ -86,12 +86,18 @@ type RunRecord struct {
 	Labels       map[string]string `json:"labels,omitempty"`
 }
 
+type PaginatedRuns struct {
+	Records []RunRecord `json:"records"`
+	Total   int         `json:"total"`
+}
+
 type Repository interface {
 	Close() error
 	UpsertTaskState(ctx context.Context, state TaskState) error
 	DeleteTaskState(ctx context.Context, taskID string) error
 	InsertRun(ctx context.Context, record RunRecord) error
-	ListRuns(ctx context.Context, taskID string, limit int, since time.Duration) ([]RunRecord, error)
+	ListRuns(ctx context.Context, taskID string, limit, offset int, since time.Duration) ([]RunRecord, error)
+	CountRuns(ctx context.Context, taskID string, since time.Duration) (int, error)
 	GetRun(ctx context.Context, taskID, runID string) (RunRecord, error)
 	ListArtifactsByRun(ctx context.Context, taskID, runID string) ([]ArtifactRef, error)
 	GetArtifact(ctx context.Context, artifactID string) (ArtifactRef, error)
@@ -283,9 +289,12 @@ func (s *PostgresStore) InsertRun(ctx context.Context, record RunRecord) error {
 	return nil
 }
 
-func (s *PostgresStore) ListRuns(ctx context.Context, taskID string, limit int, since time.Duration) ([]RunRecord, error) {
+func (s *PostgresStore) ListRuns(ctx context.Context, taskID string, limit, offset int, since time.Duration) ([]RunRecord, error) {
 	if limit <= 0 {
 		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	if since > 0 {
 		cutoff := time.Now().UTC().Add(-since)
@@ -296,8 +305,8 @@ func (s *PostgresStore) ListRuns(ctx context.Context, taskID string, limit int, 
 			FROM runs
 			WHERE task_id = $1 AND started_at >= $3
 			ORDER BY started_at DESC
-			LIMIT $2
-		`, taskID, limit, cutoff)
+			LIMIT $2 OFFSET $4
+		`, taskID, limit, cutoff, offset)
 		if err != nil {
 			return nil, fmt.Errorf("list runs: %w", err)
 		}
@@ -319,8 +328,8 @@ func (s *PostgresStore) ListRuns(ctx context.Context, taskID string, limit int, 
 		FROM runs
 		WHERE task_id = $1
 		ORDER BY started_at DESC
-		LIMIT $2
-	`, taskID, limit)
+		LIMIT $2 OFFSET $3
+	`, taskID, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list runs: %w", err)
 	}
@@ -334,6 +343,22 @@ func (s *PostgresStore) ListRuns(ctx context.Context, taskID string, limit int, 
 		records = append(records, record)
 	}
 	return records, rows.Err()
+}
+
+func (s *PostgresStore) CountRuns(ctx context.Context, taskID string, since time.Duration) (int, error) {
+	if since > 0 {
+		cutoff := time.Now().UTC().Add(-since)
+		var n int
+		err := s.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM runs WHERE task_id = $1 AND started_at >= $2`,
+			taskID, cutoff).Scan(&n)
+		return n, err
+	}
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM runs WHERE task_id = $1`,
+		taskID).Scan(&n)
+	return n, err
 }
 
 func (s *PostgresStore) GetRun(ctx context.Context, taskID, runID string) (RunRecord, error) {

@@ -22,6 +22,7 @@ import { PlayCircleOutlined, ArrowLeftOutlined, EditOutlined } from '@ant-design
 import {
   fetchTask,
   fetchTaskRuns,
+  fetchTaskRunsPaginated,
   fetchTaskAIAnalyses,
   triggerTaskRun,
   enableTask,
@@ -62,26 +63,34 @@ export default function TaskDetail() {
   const returnUrl = searchParams.get('from') || '/tasks'
 
   const [task, setTask] = useState<TaskState | null>(null)
-  const [runs, setRuns] = useState<RunRecord[]>([])
+  const [chartRuns, setChartRuns] = useState<RunRecord[]>([])
+  const [tableRuns, setTableRuns] = useState<RunRecord[]>([])
+  const [total, setTotal] = useState(0)
   const [analyses, setAnalyses] = useState<AIAnalysisRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [actionLoading, setActionLoading] = useState(false)
   const [expandedAnalyses, setExpandedAnalyses] = useState<Set<number>>(new Set())
   const [timeRange, setTimeRange] = useState<string>('')
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(10)
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const fetchData = useCallback(async () => {
     if (!id) return
     try {
-      const [t, r, a] = await Promise.all([
+      const offset = (page - 1) * pageSize
+      const [t, cr, pr, a] = await Promise.all([
         fetchTask(id),
         fetchTaskRuns(id, 100, timeRange || undefined),
+        fetchTaskRunsPaginated(id, pageSize, offset, timeRange || undefined),
         fetchTaskAIAnalyses(id, 10),
       ])
       setTask(t)
-      setRuns(r)
+      setChartRuns(cr)
+      setTableRuns(pr.records)
+      setTotal(pr.total)
       setAnalyses(a)
       setError(null)
     } catch (err) {
@@ -89,7 +98,7 @@ export default function TaskDetail() {
     } finally {
       setLoading(false)
     }
-  }, [id, timeRange])
+  }, [id, timeRange, page, pageSize])
 
   useEffect(() => {
     setLoading(true)
@@ -496,7 +505,7 @@ export default function TaskDetail() {
         )
       })()}
 
-      <Card title={`耗时趋势 (${runs.length})`} style={{ marginBottom: 24 }}>
+      <Card title={`耗时趋势 (${chartRuns.length})`} style={{ marginBottom: 24 }}>
         <div style={{ marginBottom: 12 }}>
           <Select
             value={timeRange}
@@ -506,15 +515,25 @@ export default function TaskDetail() {
             size="small"
           />
         </div>
-        <DurationChart runs={runs} />
+        <DurationChart runs={chartRuns} />
       </Card>
 
-      <Card title={`运行历史 (${runs.length})`} style={{ marginBottom: 24 }}>
+      <Card title={`运行历史 (${total})`} style={{ marginBottom: 24 }}>
         <Table
           columns={runColumns}
-          dataSource={runs}
+          dataSource={tableRuns}
           rowKey="run_id"
-          pagination={{ pageSize: 10 }}
+          pagination={{
+            current: page,
+            pageSize: pageSize,
+            total: total,
+            showSizeChanger: true,
+            showTotal: (t) => `共 ${t} 条`,
+            onChange: (p, ps) => {
+              setPage(p)
+              setPageSize(ps)
+            },
+          }}
           expandable={{
             expandedRowRender,
             rowExpandable: (record: RunRecord) =>

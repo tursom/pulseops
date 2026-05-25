@@ -395,7 +395,7 @@ func toFloat64Single(v any) (float64, bool) {
 // FetchSampleData 从上游任务的最近成功运行中获取指定数据源的样本数据。
 // upstreamTaskID 是上游任务 ID（已由调用方解析）。返回 nil 表示没有成功运行。
 func FetchSampleData(ctx context.Context, repo store.Repository, upstreamTaskID, source string) (*store.SampleResponse, error) {
-	runs, err := repo.ListRuns(ctx, upstreamTaskID, 20, 0)
+	runs, err := repo.ListRuns(ctx, upstreamTaskID, 20, 0, 0)
 	if err != nil {
 		return nil, fmt.Errorf("list runs for %q: %w", upstreamTaskID, err)
 	}

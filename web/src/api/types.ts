@@ -43,6 +43,11 @@ export interface RunRecord {
   labels?: Record<string, string>
 }
 
+export interface PaginatedRuns {
+  records: RunRecord[]
+  total: number
+}
+
 // === Artifact reference (pointer to MinIO/S3 object) ===
 // Go: store.ArtifactRef struct
 export interface ArtifactRef {
