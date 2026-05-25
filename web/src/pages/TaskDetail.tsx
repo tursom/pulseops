@@ -35,7 +35,9 @@ const { Title, Text } = Typography
 
 function formatTime(t: string | null): string {
   if (!t) return '—'
-  return new Date(t).toLocaleString()
+  const d = new Date(t)
+  if (d.getFullYear() < 2000) return '—'
+  return d.toLocaleString()
 }
 
 function formatDuration(ms: number): string {
@@ -155,6 +157,7 @@ export default function TaskDetail() {
   }
 
   const runStatusBadge = (status: string) => {
+    if (!status) return <Text type="secondary">—</Text>
     const map: Record<string, 'success' | 'error' | 'warning' | 'processing'> = {
       success: 'success',
       failed: 'error',
@@ -444,10 +447,14 @@ export default function TaskDetail() {
             )}
           </Descriptions.Item>
           <Descriptions.Item label="上次耗时">
-            {formatDuration(task.last_duration_ms)}
+            {task.last_run_at
+              ? formatDuration(task.last_duration_ms)
+              : <Text type="secondary">—</Text>}
           </Descriptions.Item>
           <Descriptions.Item label="来源路径">
-            <Text code>{task.source_path}</Text>
+            {task.source_path
+              ? <Text code>{task.source_path}</Text>
+              : <Text type="secondary">—</Text>}
           </Descriptions.Item>
           <Descriptions.Item label="更新时间">
             {formatTime(task.updated_at)}
