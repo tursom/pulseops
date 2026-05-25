@@ -24,11 +24,12 @@ import {
   fetchTaskRunsPaginated,
   fetchTaskRunStats,
   fetchTaskAIAnalyses,
+  fetchTaskSample,
   triggerTaskRun,
   enableTask,
   disableTask,
 } from '../api/client'
-import type { TaskState, RunRecord, RunStat, AIAnalysisRecord, TaskDefinition } from '../api/types'
+import type { TaskState, RunRecord, RunStat, AIAnalysisRecord, TaskDefinition, SampleResponse } from '../api/types'
 import DurationChart from '../components/DurationChart'
 
 const { Title, Text } = Typography
@@ -77,6 +78,13 @@ export default function TaskDetail() {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
 
+  const [upstreamTask, setUpstreamTask] = useState<TaskState | null>(null)
+  const [upstreamLoading, setUpstreamLoading] = useState(false)
+  const [upstreamError, setUpstreamError] = useState<string | null>(null)
+  const [samples, setSamples] = useState<Record<string, SampleResponse | null>>({})
+  const [samplesLoading, setSamplesLoading] = useState(false)
+  const [samplesError, setSamplesError] = useState<string | null>(null)
+
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const fetchData = useCallback(async () => {
@@ -110,6 +118,70 @@ export default function TaskDetail() {
       if (intervalRef.current !== null) clearInterval(intervalRef.current)
     }
   }, [fetchData])
+
+  // Fetch upstream task info for data_process tasks
+  useEffect(() => {
+    if (!task) return
+    const def = (task as unknown as { definition?: TaskDefinition }).definition
+    const upstreamId = ((def?.params as Record<string, unknown> | undefined)?.source_task_id as string) || def?.watch_task_id || ''
+    if (!upstreamId) {
+      setUpstreamTask(null)
+      setUpstreamError(null)
+      setUpstreamLoading(false)
+      return
+    }
+    setUpstreamLoading(true)
+    fetchTask(upstreamId)
+      .then((t) => {
+        setUpstreamTask(t)
+        setUpstreamError(null)
+      })
+      .catch((err) => {
+        setUpstreamError(err instanceof Error ? err.message : '加载上游任务失败')
+      })
+      .finally(() => setUpstreamLoading(false))
+  }, [task])
+
+  // Fetch sample data from upstream for data_process tasks
+  useEffect(() => {
+    if (!task) return
+    const def = (task as unknown as { definition?: TaskDefinition }).definition
+    const upstreamId = ((def?.params as Record<string, unknown> | undefined)?.source_task_id as string) || def?.watch_task_id || ''
+    const exprs = (def?.params as Record<string, unknown> | undefined)?.extract_exprs as
+      | Array<{ source: string }>
+      | undefined
+    if (!upstreamId || !exprs || exprs.length === 0) {
+      setSamples({})
+      setSamplesError(null)
+      setSamplesLoading(false)
+      return
+    }
+    const uniqueSources = [...new Set(exprs.map((e) => e.source).filter((s) => !s.startsWith('artifact:')))]
+    if (uniqueSources.length === 0) {
+      setSamples({})
+      setSamplesError(null)
+      setSamplesLoading(false)
+      return
+    }
+    setSamplesLoading(true)
+    setSamplesError(null)
+    const promises = uniqueSources.map((src) =>
+      fetchTaskSample(upstreamId, src).then(
+        (r) => [src, r] as const,
+      ),
+    )
+    Promise.allSettled(promises).then((results) => {
+      const map: Record<string, SampleResponse | null> = {}
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          const [src, data] = r.value
+          map[src] = data
+        }
+      }
+      setSamples(map)
+      setSamplesLoading(false)
+    })
+  }, [task])
 
   const handleRun = async () => {
     if (!id) return
@@ -478,7 +550,7 @@ export default function TaskDetail() {
       {task.kind === 'data_process' && (() => {
         const def = (task as unknown as { definition?: TaskDefinition }).definition
         const exprs = def?.params?.extract_exprs as Array<{ field: string; source: string; jq_expr: string; agg_mode?: string }> | undefined
-        if (!exprs || exprs.length === 0) return null
+        const upstreamTaskId = ((def?.params as Record<string, unknown> | undefined)?.source_task_id as string) || def?.watch_task_id || ''
         const sourceLabels: Record<string, string> = {
           payload: 'Payload',
           summary: 'Summary',
@@ -495,20 +567,108 @@ export default function TaskDetail() {
           min: '最小值',
           max: '最大值',
         }
+        const uniqueSources = exprs
+          ? [...new Set(exprs.map((e) => e.source).filter((s) => !s.startsWith('artifact:')))]
+          : []
+        const hasArtifactSources = exprs?.some((e) => e.source?.startsWith('artifact:')) ?? false
+
+        if (!upstreamTaskId && (!exprs || exprs.length === 0)) return null
+
         return (
-          <Card title="数据处理规则" style={{ marginBottom: 24 }}>
-            <Table
-              dataSource={exprs.map((e, i) => ({ ...e, key: i }))}
-              pagination={false}
-              size="small"
-              columns={[
-                { title: '输出字段', dataIndex: 'field', key: 'field', render: (v: string) => <Text code>{v}</Text> },
-                { title: '数据源', dataIndex: 'source', key: 'source', render: (v: string) => <Tag>{sourceLabels[v] || v}</Tag> },
-                { title: 'JQ 表达式', dataIndex: 'jq_expr', key: 'jq_expr', render: (v: string) => <Text code>{v}</Text> },
-                { title: '聚合', dataIndex: 'agg_mode', key: 'agg_mode', render: (v: string) => <Tag>{aggLabels[v] || v}</Tag> },
-              ]}
-            />
-          </Card>
+          <>
+            {upstreamTaskId && (
+              <Card title="上游任务" style={{ marginBottom: 24 }}>
+                {upstreamLoading ? (
+                  <Spin />
+                ) : upstreamError && !upstreamTask ? (
+                  <Alert type="warning" message={upstreamError} showIcon />
+                ) : upstreamTask ? (
+                  <Descriptions bordered column={{ xs: 1, sm: 2, lg: 3 }}>
+                    <Descriptions.Item label="任务名称">
+                      <Link to={`/tasks/${encodeURIComponent(upstreamTaskId)}`}>{upstreamTask.name}</Link>
+                    </Descriptions.Item>
+                    <Descriptions.Item label="类型">
+                      <Tag>{upstreamTask.kind}</Tag>
+                    </Descriptions.Item>
+                    <Descriptions.Item label="状态">
+                      {taskStatusBadge(upstreamTask.status)}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="上次运行">
+                      {formatTime(upstreamTask.last_run_at)}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="运行状态">
+                      {runStatusBadge(upstreamTask.last_run_status)}
+                    </Descriptions.Item>
+                  </Descriptions>
+                ) : (
+                  <Text type="secondary">上游任务未找到或已删除</Text>
+                )}
+              </Card>
+            )}
+
+            {exprs && exprs.length > 0 && (
+              <Card title="数据处理规则" style={{ marginBottom: 24 }}>
+                <Table
+                  dataSource={exprs.map((e, i) => ({ ...e, key: i }))}
+                  pagination={false}
+                  size="small"
+                  columns={[
+                    { title: '输出字段', dataIndex: 'field', key: 'field', render: (v: string) => <Text code>{v}</Text> },
+                    { title: '数据源', dataIndex: 'source', key: 'source', render: (v: string) => <Tag>{sourceLabels[v] || v}</Tag> },
+                    { title: 'JQ 表达式', dataIndex: 'jq_expr', key: 'jq_expr', render: (v: string) => <Text code>{v}</Text> },
+                    { title: '聚合', dataIndex: 'agg_mode', key: 'agg_mode', render: (v: string) => <Tag>{aggLabels[v] || v}</Tag> },
+                  ]}
+                />
+              </Card>
+            )}
+
+            {uniqueSources.length > 0 && (
+              <Card title="样本数据预览" style={{ marginBottom: 24 }}>
+                {samplesLoading ? (
+                  <Spin />
+                ) : samplesError ? (
+                  <Alert type="warning" message={samplesError} showIcon />
+                ) : (
+                  <Collapse
+                    items={uniqueSources.map((src) => {
+                      const sample = samples[src]
+                      const label = sourceLabels[src] || src
+                      return {
+                        key: src,
+                        label: <Tag>{label}</Tag>,
+                        children: sample?.available ? (
+                          <pre
+                            style={{
+                              background: '#f5f5f5',
+                              padding: 12,
+                              borderRadius: 6,
+                              maxHeight: 300,
+                              overflow: 'auto',
+                              fontSize: 12,
+                              margin: 0,
+                            }}
+                          >
+                            {JSON.stringify(sample.data, null, 2)}
+                          </pre>
+                        ) : (
+                          <Text type="secondary">暂无样本数据（上游任务尚无成功运行记录）</Text>
+                        ),
+                      }
+                    })}
+                  />
+                )}
+              </Card>
+            )}
+
+            {hasArtifactSources && (
+              <Alert
+                type="info"
+                message="产物类型 (artifact:*) 的数据源暂不支持在线预览"
+                style={{ marginBottom: 24 }}
+                showIcon
+              />
+            )}
+          </>
         )
       })()}
 
