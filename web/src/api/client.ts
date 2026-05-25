@@ -45,15 +45,8 @@ export async function fetchTask(id: string): Promise<TaskState> {
 
 // GET /api/tasks/{id}/runs
 export async function fetchTaskRuns(id: string, limit?: number, since?: string): Promise<RunRecord[]> {
-  const params = new URLSearchParams()
-  if (limit !== undefined) {
-    params.set('limit', String(limit))
-  }
-  if (since) {
-    params.set('since', since)
-  }
-  const qs = params.toString()
-  return request<RunRecord[]>(`/api/tasks/${encodeURIComponent(id)}/runs${qs ? `?${qs}` : ''}`)
+  const data = await fetchTaskRunsPaginated(id, limit, 0, since)
+  return data.records
 }
 
 // GET /api/tasks/{id}/runs (paginated)
