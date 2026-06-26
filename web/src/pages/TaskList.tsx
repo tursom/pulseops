@@ -1,86 +1,114 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
-import { Typography, Button, Space, Input, Select, Table, Tag, Switch, Spin, Alert, Empty, message } from 'antd'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import {
+  Alert,
+  Button,
+  Empty,
+  Input,
+  message,
+  Popconfirm,
+  Select,
+  Space,
+  Switch,
+  Table,
+  Tag,
+  Tooltip,
+  Typography,
+} from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { ReloadOutlined, PlayCircleOutlined, PauseCircleOutlined, ThunderboltOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons'
-import { Link, useNavigate } from 'react-router-dom'
-import { fetchTasks, fetchTaskDefinitions, triggerTaskRun, enableTask, disableTask } from '../api/client'
-import type { TaskState } from '../api/types'
+import {
+  EditOutlined,
+  PauseCircleOutlined,
+  PlayCircleOutlined,
+  PlusOutlined,
+  ReloadOutlined,
+  ThunderboltOutlined,
+} from '@ant-design/icons'
+import {
+  disableTask,
+  enableTask,
+  fetchTaskDefinitions,
+  fetchTasks,
+  triggerTaskRun,
+} from '../api/client'
+import {
+  AUTO_REFRESH_MS,
+  checkStatusColor,
+  CHECK_STATUS_LABELS,
+  formatDuration,
+  formatRelativeTime,
+  formatTime,
+  KIND_COLORS,
+  KIND_LABELS,
+  mergeTaskViews,
+  runStatusColor,
+  RUN_STATUS_LABELS,
+  statusColorForTask,
+  summarizeTasks,
+  TASK_STATUS_LABELS,
+  type TaskView,
+} from '../utils/pulseops'
 
-const KIND_COLORS: Record<string, string> = {
-  http_check: 'blue',
-  script_exec: 'green',
-  data_compare: 'orange',
-  schema_check: 'purple',
-  custom: 'cyan',
-  ai_analyze: 'red',
-  data_process: 'gold',
+const { Title, Text } = Typography
+
+type BatchAction = 'enable' | 'disable' | 'run'
+type SortKey = 'abnormal' | 'lastRun' | 'nextRun' | 'duration' | 'updatedAt'
+
+function getParam(params: URLSearchParams, key: string): string | undefined {
+  const value = params.get(key)
+  return value || undefined
 }
 
-const KIND_LABELS: Record<string, string> = {
-  http_check: 'HTTP 检查',
-  script_exec: '脚本执行',
-  data_compare: '数据对比',
-  schema_check: '格式检查',
-  custom: '自定义',
-  ai_analyze: 'AI 分析',
-  data_process: '数据处理',
+function setParam(params: URLSearchParams, key: string, value: string | undefined): URLSearchParams {
+  const next = new URLSearchParams(params)
+  if (value) next.set(key, value)
+  else next.delete(key)
+  next.delete('page')
+  return next
 }
 
-const STATUS_COLORS: Record<string, string> = {
-  running: 'green',
-  loaded: 'blue',
-  disabled: 'default',
-  unloaded: 'orange',
+function matchesLabel(task: TaskView, key: string, value: string | undefined): boolean {
+  if (!value) return true
+  return task.labels?.[key] === value
 }
 
-const RUN_STATUS_COLORS: Record<string, string> = {
-  success: 'green',
-  failed: 'red',
+function timeValue(value: string | null | undefined): number {
+  if (!value) return 0
+  const time = new Date(value).getTime()
+  return Number.isFinite(time) ? time : 0
 }
 
 export default function TaskList() {
   const navigate = useNavigate()
-  const [tasks, setTasks] = useState<TaskState[]>([])
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [tasks, setTasks] = useState<TaskView[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({})
-  const [searchText, setSearchText] = useState('')
-  const [kindFilter, setKindFilter] = useState<string | undefined>(undefined)
-  const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined)
-  const [runStatusFilter, setRunStatusFilter] = useState<string | undefined>(undefined)
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([])
   const [batchLoading, setBatchLoading] = useState(false)
+  const [lastRefreshAt, setLastRefreshAt] = useState<Date | null>(null)
+
+  const filters = {
+    search: getParam(searchParams, 'search') || '',
+    kind: getParam(searchParams, 'kind'),
+    enabled: getParam(searchParams, 'enabled'),
+    status: getParam(searchParams, 'status'),
+    runStatus: getParam(searchParams, 'runStatus'),
+    checkStatus: getParam(searchParams, 'checkStatus'),
+    loadError: getParam(searchParams, 'loadError'),
+    env: getParam(searchParams, 'env'),
+    service: getParam(searchParams, 'service'),
+    domain: getParam(searchParams, 'domain'),
+    sort: (getParam(searchParams, 'sort') || 'abnormal') as SortKey,
+  }
 
   const loadTasks = useCallback(async () => {
     try {
       const [defs, states] = await Promise.all([fetchTaskDefinitions(), fetchTasks()])
-      const stateMap = new Map(states.map((s) => [s.task_id, s]))
-      const merged: TaskState[] = defs.map((def) => {
-        const state = stateMap.get(def.task_id)
-        if (state) return state
-        return {
-          task_id: def.task_id,
-          name: def.name || def.task_id,
-          kind: def.kind,
-          enabled: def.enabled,
-          status: 'unloaded',
-          labels: def.labels || {},
-          last_run_at: null,
-          next_run_at: null,
-          last_run_status: '',
-          last_check_status: '',
-          last_error: '',
-          last_duration_ms: 0,
-          last_reload_error: '',
-          last_sample_seed: 0,
-          last_sample_count: 0,
-          last_mismatch_count: 0,
-          source_path: '',
-          updated_at: '',
-        } as TaskState
-      })
-      setTasks(merged)
+      setTasks(mergeTaskViews(defs, states))
       setError(null)
+      setLastRefreshAt(new Date())
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载任务失败')
     } finally {
@@ -90,9 +118,76 @@ export default function TaskList() {
 
   useEffect(() => {
     loadTasks()
-    const interval = setInterval(loadTasks, 15000)
+    const interval = setInterval(loadTasks, AUTO_REFRESH_MS)
     return () => clearInterval(interval)
   }, [loadTasks])
+
+  const optionSets = useMemo(() => {
+    const kinds = new Set<string>()
+    const envs = new Set<string>()
+    const services = new Set<string>()
+    const domains = new Set<string>()
+    for (const task of tasks) {
+      if (task.kind) kinds.add(task.kind)
+      if (task.labels?.env) envs.add(task.labels.env)
+      if (task.labels?.service) services.add(task.labels.service)
+      if (task.labels?.domain) domains.add(task.labels.domain)
+    }
+    return {
+      kinds: Array.from(kinds).sort(),
+      envs: Array.from(envs).sort(),
+      services: Array.from(services).sort(),
+      domains: Array.from(domains).sort(),
+    }
+  }, [tasks])
+
+  const filteredTasks = useMemo(() => {
+    const search = filters.search.trim().toLowerCase()
+    const severityOrder: Record<TaskView['severity'], number> = { critical: 0, warning: 1, normal: 2, disabled: 3 }
+
+    return tasks
+      .filter((task) => {
+        if (search) {
+          const haystack = [
+            task.name,
+            task.task_id,
+            task.kind,
+            task.last_error,
+            task.last_reload_error,
+            task.anomaly_reason,
+          ].join('\n').toLowerCase()
+          if (!haystack.includes(search)) return false
+        }
+        if (filters.kind && task.kind !== filters.kind) return false
+        if (filters.enabled === 'true' && !task.enabled) return false
+        if (filters.enabled === 'false' && task.enabled) return false
+        if (filters.status && task.status !== filters.status) return false
+        if (filters.runStatus && task.last_run_status !== filters.runStatus) return false
+        if (filters.checkStatus && task.last_check_status !== filters.checkStatus) return false
+        if (filters.loadError === '1' && !task.last_reload_error) return false
+        if (!matchesLabel(task, 'env', filters.env)) return false
+        if (!matchesLabel(task, 'service', filters.service)) return false
+        if (!matchesLabel(task, 'domain', filters.domain)) return false
+        return true
+      })
+      .sort((a, b) => {
+        if (filters.sort === 'lastRun') return timeValue(b.last_run_at) - timeValue(a.last_run_at)
+        if (filters.sort === 'nextRun') return timeValue(a.next_run_at) - timeValue(b.next_run_at)
+        if (filters.sort === 'duration') return (b.last_duration_ms || 0) - (a.last_duration_ms || 0)
+        if (filters.sort === 'updatedAt') return timeValue(b.updated_at) - timeValue(a.updated_at)
+        return severityOrder[a.severity] - severityOrder[b.severity] || timeValue(b.last_run_at) - timeValue(a.last_run_at)
+      })
+  }, [tasks, filters])
+
+  const summary = useMemo(() => summarizeTasks(tasks), [tasks])
+
+  const updateFilter = (key: string, value: string | undefined) => {
+    setSearchParams(setParam(searchParams, key, value), { replace: true })
+  }
+
+  const resetFilters = () => {
+    setSearchParams(new URLSearchParams(), { replace: true })
+  }
 
   const handleToggleEnabled = useCallback(
     async (taskId: string, enabled: boolean) => {
@@ -119,306 +214,396 @@ export default function TaskList() {
     async (taskId: string) => {
       setActionLoading((prev) => ({ ...prev, [taskId]: true }))
       try {
-        await triggerTaskRun(taskId)
+        const run = await triggerTaskRun(taskId)
         message.success('任务已触发')
-        await loadTasks()
+        navigate(`/tasks/${encodeURIComponent(taskId)}/runs/${encodeURIComponent(run.run_id)}`)
       } catch (err) {
         message.error(err instanceof Error ? err.message : '触发失败')
       } finally {
         setActionLoading((prev) => ({ ...prev, [taskId]: false }))
+        loadTasks()
       }
     },
-    [loadTasks],
+    [loadTasks, navigate],
   )
 
   const handleBatchAction = useCallback(
-    async (action: 'enable' | 'disable' | 'run') => {
+    async (action: BatchAction) => {
       setBatchLoading(true)
+      const details: string[] = []
       let successCount = 0
       let failCount = 0
+
       for (const taskId of selectedRowKeys) {
         try {
-          if (action === 'enable') {
-            await enableTask(taskId)
-          } else if (action === 'disable') {
-            await disableTask(taskId)
-          } else {
-            await triggerTaskRun(taskId)
-          }
-          successCount++
-        } catch {
-          failCount++
+          if (action === 'enable') await enableTask(taskId)
+          if (action === 'disable') await disableTask(taskId)
+          if (action === 'run') await triggerTaskRun(taskId)
+          successCount += 1
+        } catch (err) {
+          failCount += 1
+          details.push(`${taskId}: ${err instanceof Error ? err.message : '失败'}`)
         }
       }
+
       setBatchLoading(false)
-      if (failCount === 0) {
-        const label = action === 'enable' ? '启用' : action === 'disable' ? '禁用' : '执行'
-        message.success(`已成功${label} ${successCount} 个任务`)
-      } else {
-        message.warning(`成功 ${successCount} 个，失败 ${failCount} 个`)
-      }
       setSelectedRowKeys([])
       await loadTasks()
+
+      const label = action === 'enable' ? '启用' : action === 'disable' ? '禁用' : '执行'
+      if (failCount === 0) {
+        message.success(`已${label} ${successCount} 个任务`)
+      } else {
+        message.warning({
+          content: `已${label} ${successCount} 个，失败 ${failCount} 个。${details.slice(0, 2).join('；')}`,
+          duration: 6,
+        })
+      }
     },
     [selectedRowKeys, loadTasks],
   )
 
-  const handleResetFilters = useCallback(() => {
-    setSearchText('')
-    setKindFilter(undefined)
-    setStatusFilter(undefined)
-    setRunStatusFilter(undefined)
-  }, [])
-
-  const filteredTasks = useMemo(() => {
-    return tasks.filter((t) => {
-      if (searchText && !t.name.toLowerCase().includes(searchText.toLowerCase())) {
-        return false
-      }
-      if (kindFilter && t.kind !== kindFilter) {
-        return false
-      }
-      if (statusFilter && t.status !== statusFilter) {
-        return false
-      }
-      if (runStatusFilter && t.last_run_status !== runStatusFilter) {
-        return false
-      }
-      return true
-    })
-  }, [tasks, searchText, kindFilter, statusFilter, runStatusFilter])
-
-  const columns: ColumnsType<TaskState> = [
+  const columns: ColumnsType<TaskView> = [
     {
-      title: '任务名称',
-      dataIndex: 'name',
+      title: '任务名 / ID',
       key: 'name',
-      render: (name: string, record: TaskState) => (
-        <Link to={`/tasks/${record.task_id}`}>{name}</Link>
+      fixed: 'left',
+      width: 250,
+      render: (_, task) => (
+        <Space direction="vertical" size={0}>
+          <Link to={`/tasks/${encodeURIComponent(task.task_id)}`}>{task.name}</Link>
+          <Text type="secondary" style={{ fontSize: 12 }}>{task.task_id}</Text>
+        </Space>
       ),
-      sorter: (a, b) => a.name.localeCompare(b.name),
     },
     {
       title: '类型',
       dataIndex: 'kind',
-      key: 'kind',
-      render: (kind: string) => (
-        <Tag color={KIND_COLORS[kind] || 'default'}>{KIND_LABELS[kind] || kind}</Tag>
-      ),
-      filters: Object.keys(KIND_COLORS).map((k) => ({ text: KIND_LABELS[k] || k, value: k })),
-      onFilter: (value, record) => record.kind === value,
-    },
-    {
-      title: '状态',
-      dataIndex: 'status',
-      key: 'status',
-      render: (status: string) => (
-        <Tag color={STATUS_COLORS[status] || 'default'}>{status}</Tag>
-      ),
-      filters: [
-        { text: '运行中', value: 'running' },
-        { text: '已加载', value: 'loaded' },
-        { text: '已禁用', value: 'disabled' },
-        { text: '未加载', value: 'unloaded' },
-      ],
-      onFilter: (value, record) => record.status === value,
-    },
-    {
-      title: '上次运行',
-      dataIndex: 'last_run_at',
-      key: 'last_run_at',
-      render: (val: string | null) =>
-        val ? new Date(val).toLocaleString() : '-',
-      sorter: (a, b) => {
-        const da = a.last_run_at ? new Date(a.last_run_at).getTime() : 0
-        const db = b.last_run_at ? new Date(b.last_run_at).getTime() : 0
-        return da - db
-      },
-    },
-    {
-      title: '运行结果',
-      dataIndex: 'last_run_status',
-      key: 'last_run_status',
-      render: (status: string) => {
-        if (!status) return <Tag>-</Tag>
-        return (
-          <Tag color={RUN_STATUS_COLORS[status] || 'default'}>{status}</Tag>
-        )
-      },
-      filters: [
-        { text: '成功', value: 'success' },
-        { text: '失败', value: 'failed' },
-      ],
-      onFilter: (value, record) => record.last_run_status === value,
+      width: 120,
+      render: (kind: string) => <Tag color={KIND_COLORS[kind] || 'default'}>{KIND_LABELS[kind] || kind}</Tag>,
     },
     {
       title: '标签',
       dataIndex: 'labels',
-      key: 'labels',
+      width: 220,
       render: (labels: Record<string, string>) => {
-        const entries = Object.entries(labels ?? {})
-        if (entries.length === 0) return '—'
+        const entries = Object.entries(labels || {})
+        if (entries.length === 0) return <Text type="secondary">—</Text>
         return (
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-            {entries.map(([k, v]) => (
-              <Tag key={k}>{`${k}: ${v}`}</Tag>
-            ))}
-          </div>
+          <Space wrap size={[4, 4]}>
+            {entries.slice(0, 4).map(([key, value]) => <Tag key={key}>{key}: {value}</Tag>)}
+            {entries.length > 4 && <Tag>+{entries.length - 4}</Tag>}
+          </Space>
+        )
+      },
+    },
+    {
+      title: '启用',
+      dataIndex: 'enabled',
+      width: 86,
+      render: (_: boolean, task) => (
+        <Switch
+          checked={task.enabled}
+          disabled={task.status === 'unloaded' && !task.definition}
+          loading={actionLoading[task.task_id]}
+          size="small"
+          onChange={(checked) => handleToggleEnabled(task.task_id, checked)}
+        />
+      ),
+    },
+    {
+      title: '运行态',
+      dataIndex: 'status',
+      width: 110,
+      render: (_: string, task) => <Tag color={statusColorForTask(task)}>{TASK_STATUS_LABELS[task.status] || task.status || '—'}</Tag>,
+    },
+    {
+      title: '上次运行',
+      dataIndex: 'last_run_at',
+      width: 136,
+      render: (value: string | null) => <Tooltip title={formatTime(value)}>{formatRelativeTime(value)}</Tooltip>,
+    },
+    {
+      title: '上次结果',
+      dataIndex: 'last_run_status',
+      width: 104,
+      render: (status: string) => status
+        ? <Tag color={runStatusColor(status)}>{RUN_STATUS_LABELS[status] || status}</Tag>
+        : <Text type="secondary">—</Text>,
+    },
+    {
+      title: '检查',
+      dataIndex: 'last_check_status',
+      width: 96,
+      render: (status: string) => status
+        ? <Tag color={checkStatusColor(status)}>{CHECK_STATUS_LABELS[status] || status}</Tag>
+        : <Text type="secondary">—</Text>,
+    },
+    {
+      title: '耗时',
+      dataIndex: 'last_duration_ms',
+      width: 86,
+      render: (value: number) => formatDuration(value),
+    },
+    {
+      title: '下次运行',
+      dataIndex: 'next_run_at',
+      width: 136,
+      render: (value: string | null) => <Tooltip title={formatTime(value)}>{formatRelativeTime(value)}</Tooltip>,
+    },
+    {
+      title: '错误摘要',
+      key: 'error',
+      width: 260,
+      render: (_, task) => {
+        const text = task.last_reload_error || task.last_error || task.anomaly_reason
+        if (!text) return <Text type="secondary">—</Text>
+        return (
+          <Tooltip title={text}>
+            <Text type="danger" ellipsis style={{ maxWidth: 240 }}>{text}</Text>
+          </Tooltip>
         )
       },
     },
     {
       title: '操作',
       key: 'actions',
-      render: (_val, record: TaskState) => (
-        <div
-          style={{ display: 'flex', gap: 8, alignItems: 'center' }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <Switch
-            checked={record.enabled}
-            disabled={record.status === 'unloaded'}
-            loading={actionLoading[record.task_id]}
-            onChange={(checked) => handleToggleEnabled(record.task_id, checked)}
-          />
+      fixed: 'right',
+      width: 238,
+      render: (_, task) => (
+        <Space onClick={(event) => event.stopPropagation()}>
           <Button
             type="primary"
             size="small"
             icon={<PlayCircleOutlined />}
-            disabled={record.status === 'unloaded'}
-            loading={actionLoading[record.task_id]}
-            onClick={() => handleRunNow(record.task_id)}
+            disabled={task.status === 'unloaded'}
+            loading={actionLoading[task.task_id]}
+            onClick={() => handleRunNow(task.task_id)}
           >
-            立即执行
+            执行
           </Button>
           <Button
             size="small"
             icon={<EditOutlined />}
-            onClick={() => navigate(`/task-defs/${encodeURIComponent(record.task_id)}/edit?from=/tasks`)}
+            onClick={() => navigate(`/task-defs/${encodeURIComponent(task.task_id)}/edit?from=/tasks`)}
           >
             编辑
           </Button>
-        </div>
+          <Button size="small" onClick={() => navigate(`/tasks/${encodeURIComponent(task.task_id)}`)}>
+            详情
+          </Button>
+        </Space>
       ),
     },
   ]
 
-  if (error) {
-    return (
-      <div style={{ padding: 24 }}>
-        <Alert type="error" message="加载失败" description={error} style={{ margin: 24 }} />
-      </div>
-    )
-  }
-
   return (
-    <div style={{ padding: 24 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <Typography.Title level={3} style={{ margin: 0 }}>任务列表</Typography.Title>
-        <Space>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/task-defs/new?from=/tasks')}>创建任务</Button>
-          <Button icon={<ReloadOutlined />} onClick={loadTasks}>刷新</Button>
+    <div className="page-shell">
+      <div className="page-header">
+        <div>
+          <Title level={2} className="page-title">任务监控</Title>
+          <Text className="page-subtitle">
+            URL 同步筛选，异常优先排序；最近刷新：{lastRefreshAt ? lastRefreshAt.toLocaleTimeString() : '—'}
+          </Text>
+        </div>
+        <Space wrap>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/task-defs/new?from=/tasks')}>
+            创建任务
+          </Button>
+          <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { setLoading(true); loadTasks() }}>
+            刷新
+          </Button>
         </Space>
       </div>
 
-      <div style={{ marginBottom: 16 }}>
+      {error && (
+        <Alert
+          type="error"
+          message="任务列表加载失败"
+          description={error}
+          action={<Button size="small" onClick={() => { setLoading(true); loadTasks() }}>重试</Button>}
+          showIcon
+          style={{ marginBottom: 14 }}
+        />
+      )}
+
+      <div className="metric-strip" style={{ marginBottom: 14 }}>
+        <div className="metric-tile" onClick={() => resetFilters()}>
+          <div className="metric-label">任务总数</div>
+          <div className="metric-value">{summary.total}</div>
+        </div>
+        <div className="metric-tile" onClick={() => updateFilter('enabled', 'true')}>
+          <div className="metric-label">启用</div>
+          <div className="metric-value" style={{ color: '#0f9f7a' }}>{summary.enabled}</div>
+        </div>
+        <div className="metric-tile" onClick={() => updateFilter('runStatus', 'failed')}>
+          <div className="metric-label">失败</div>
+          <div className="metric-value" style={{ color: '#cf1322' }}>{summary.failed}</div>
+        </div>
+        <div className="metric-tile" onClick={() => updateFilter('checkStatus', 'fail')}>
+          <div className="metric-label">检查未通过</div>
+          <div className="metric-value" style={{ color: '#cf1322' }}>{summary.checkFailed}</div>
+        </div>
+        <div className="metric-tile" onClick={() => updateFilter('loadError', '1')}>
+          <div className="metric-label">加载失败</div>
+          <div className="metric-value" style={{ color: '#fa8c16' }}>{summary.loadFailed}</div>
+        </div>
+      </div>
+
+      <div className="toolbar-band">
         <Space wrap>
           <Input
-            placeholder="搜索任务名称..."
-            value={searchText}
-            onChange={(e) => setSearchText(e.target.value)}
-            style={{ width: 200 }}
             allowClear
+            placeholder="搜索任务名称、ID、错误信息"
+            value={filters.search}
+            onChange={(event) => updateFilter('search', event.target.value || undefined)}
+            style={{ width: 260 }}
           />
           <Select
-            placeholder="类型"
-            value={kindFilter}
-            onChange={(v) => setKindFilter(v as string | undefined)}
             allowClear
-            style={{ width: 140 }}
-            options={Object.keys(KIND_COLORS).map((k) => ({ label: KIND_LABELS[k] || k, value: k }))}
+            placeholder="任务类型"
+            value={filters.kind}
+            onChange={(value) => updateFilter('kind', value)}
+            style={{ width: 150 }}
+            options={optionSets.kinds.map((kind) => ({ value: kind, label: KIND_LABELS[kind] || kind }))}
           />
           <Select
-            placeholder="状态"
-            value={statusFilter}
-            onChange={(v) => setStatusFilter(v as string | undefined)}
             allowClear
-            style={{ width: 120 }}
+            placeholder="启用状态"
+            value={filters.enabled}
+            onChange={(value) => updateFilter('enabled', value)}
+            style={{ width: 130 }}
             options={[
-            { label: '运行中', value: 'running' },
-            { label: '已加载', value: 'loaded' },
-            { label: '已禁用', value: 'disabled' },
-            { label: '未加载', value: 'unloaded' },
+              { value: 'true', label: '已启用' },
+              { value: 'false', label: '已禁用' },
             ]}
           />
           <Select
+            allowClear
+            placeholder="运行态"
+            value={filters.status}
+            onChange={(value) => updateFilter('status', value)}
+            style={{ width: 130 }}
+            options={Object.entries(TASK_STATUS_LABELS).map(([value, label]) => ({ value, label }))}
+          />
+          <Select
+            allowClear
             placeholder="运行结果"
-            value={runStatusFilter}
-            onChange={(v) => setRunStatusFilter(v as string | undefined)}
+            value={filters.runStatus}
+            onChange={(value) => updateFilter('runStatus', value)}
+            style={{ width: 130 }}
+            options={Object.entries(RUN_STATUS_LABELS).map(([value, label]) => ({ value, label }))}
+          />
+          <Select
             allowClear
+            placeholder="检查状态"
+            value={filters.checkStatus}
+            onChange={(value) => updateFilter('checkStatus', value)}
+            style={{ width: 130 }}
+            options={Object.entries(CHECK_STATUS_LABELS).map(([value, label]) => ({ value, label }))}
+          />
+          <Select
+            allowClear
+            placeholder="env"
+            value={filters.env}
+            onChange={(value) => updateFilter('env', value)}
             style={{ width: 120 }}
+            options={optionSets.envs.map((value) => ({ value, label: value }))}
+          />
+          <Select
+            allowClear
+            placeholder="service"
+            value={filters.service}
+            onChange={(value) => updateFilter('service', value)}
+            style={{ width: 140 }}
+            options={optionSets.services.map((value) => ({ value, label: value }))}
+          />
+          <Select
+            allowClear
+            placeholder="domain"
+            value={filters.domain}
+            onChange={(value) => updateFilter('domain', value)}
+            style={{ width: 140 }}
+            options={optionSets.domains.map((value) => ({ value, label: value }))}
+          />
+          <Select
+            value={filters.sort}
+            onChange={(value) => updateFilter('sort', value)}
+            style={{ width: 150 }}
             options={[
-              { label: '成功', value: 'success' },
-              { label: '失败', value: 'failed' },
+              { value: 'abnormal', label: '异常优先' },
+              { value: 'lastRun', label: '上次运行时间' },
+              { value: 'nextRun', label: '下次运行时间' },
+              { value: 'duration', label: '耗时' },
+              { value: 'updatedAt', label: '更新时间' },
             ]}
           />
-          <Button onClick={handleResetFilters}>重置</Button>
-          <Typography.Text type="secondary">
-            共 {filteredTasks.length} 个任务
-          </Typography.Text>
+          <Button onClick={resetFilters}>重置</Button>
+          <Text type="secondary">当前 {filteredTasks.length} / {tasks.length}</Text>
         </Space>
       </div>
 
       {selectedRowKeys.length > 0 && (
-        <div style={{ marginBottom: 16, padding: '8px 16px', background: '#e6f7ff', borderRadius: 6 }}>
-          <Space>
-            <span>已选 {selectedRowKeys.length} 项</span>
-            <Button
-              icon={<PlayCircleOutlined />}
-              loading={batchLoading}
-              onClick={() => handleBatchAction('enable')}
-            >
-              批量启用
-            </Button>
-            <Button
-              icon={<PauseCircleOutlined />}
-              loading={batchLoading}
-              onClick={() => handleBatchAction('disable')}
-            >
-              批量禁用
-            </Button>
-            <Button
-              icon={<ThunderboltOutlined />}
-              loading={batchLoading}
-              onClick={() => handleBatchAction('run')}
-            >
-              批量执行
-            </Button>
-          </Space>
-        </div>
-      )}
-
-      {loading ? (
-        <Spin size="large" style={{ display: 'block', margin: '48px auto' }} />
-      ) : filteredTasks.length === 0 ? (
-        <Empty description="暂无任务" style={{ marginTop: 48 }} />
-      ) : (
-        <Table<TaskState>
-          rowSelection={{
-            type: 'checkbox',
-            selectedRowKeys,
-            onChange: (keys) => setSelectedRowKeys(keys as string[]),
-          }}
-          columns={columns}
-          dataSource={filteredTasks}
-          rowKey="task_id"
-          pagination={{
-            pageSize: 20,
-            showSizeChanger: true,
-            showTotal: (total, range) => `${range[0]}-${range[1]} / 共 ${total} 个`,
-          }}
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 14 }}
+          message={
+            <Space wrap>
+              <Text>已选 {selectedRowKeys.length} 个任务</Text>
+              <Button size="small" icon={<ThunderboltOutlined />} loading={batchLoading} onClick={() => handleBatchAction('run')}>
+                批量执行
+              </Button>
+              <Button size="small" icon={<PlayCircleOutlined />} loading={batchLoading} onClick={() => handleBatchAction('enable')}>
+                批量启用
+              </Button>
+              <Popconfirm
+                title="确定批量禁用所选任务？"
+                okText="禁用"
+                cancelText="取消"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => handleBatchAction('disable')}
+              >
+                <Button size="small" danger icon={<PauseCircleOutlined />} loading={batchLoading}>
+                  批量禁用
+                </Button>
+              </Popconfirm>
+            </Space>
+          }
         />
       )}
+
+      <Table<TaskView>
+        className="dense-table"
+        rowSelection={{
+          type: 'checkbox',
+          selectedRowKeys,
+          onChange: (keys) => setSelectedRowKeys(keys as string[]),
+        }}
+        columns={columns}
+        dataSource={filteredTasks}
+        rowKey="task_id"
+        loading={loading}
+        scroll={{ x: 1580 }}
+        size="small"
+        pagination={{
+          pageSize: 20,
+          showSizeChanger: true,
+          showTotal: (total, range) => `${range[0]}-${range[1]} / 共 ${total} 个`,
+        }}
+        locale={{
+          emptyText: (
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description="没有匹配任务"
+            >
+              <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/task-defs/new?from=/tasks')}>
+                创建任务
+              </Button>
+            </Empty>
+          ),
+        }}
+      />
     </div>
   )
 }

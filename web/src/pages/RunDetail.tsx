@@ -1,153 +1,139 @@
-import { useState, useEffect, useCallback } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
-  Spin,
   Alert,
-  Typography,
+  Breadcrumb,
+  Button,
   Card,
   Descriptions,
-  Tag,
-  Badge,
-  Table,
-  Button,
-  Tabs,
   Empty,
-  Space,
-  Breadcrumb,
-  Tooltip,
-  Modal,
+  Input,
   message,
+  Modal,
+  Space,
+  Spin,
+  Table,
+  Tabs,
+  Tag,
+  Tooltip,
+  Typography,
 } from 'antd'
 import type { TableColumnsType } from 'antd'
 import {
   ArrowLeftOutlined,
+  CopyOutlined,
   DownloadOutlined,
-  RobotOutlined,
   EyeOutlined,
+  PlayCircleOutlined,
+  RobotOutlined,
+  SettingOutlined,
 } from '@ant-design/icons'
 import {
-  fetchTaskRun,
+  fetchArtifactContent,
+  fetchArtifactDetail,
   fetchRunAIAnalysis,
   fetchRunArtifacts,
-  fetchArtifactDetail,
-  fetchArtifactContent,
+  fetchTaskRun,
+  retriggerTaskRun,
 } from '../api/client'
 import type {
-  RunRecord,
   AIAnalysisRecord,
   ArtifactRef,
   Finding,
+  RunRecord,
 } from '../api/types'
+import {
+  checkStatusColor,
+  CHECK_STATUS_LABELS,
+  firstLine,
+  formatBytes,
+  formatDuration,
+  formatTime,
+  runDiagnosis,
+  runStatusColor,
+  RUN_STATUS_LABELS,
+  safeJson,
+  shortID,
+} from '../utils/pulseops'
 
 const { Title, Text, Paragraph } = Typography
+const { Search } = Input
 
-function formatTime(t: string | null): string {
-  if (!t) return '—'
-  return new Date(t).toLocaleString()
-}
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`
-  const s = ms / 1000
-  return s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`
-}
-
-function shortRunID(id: string): string {
-  return id.length > 8 ? id.slice(0, 12) + '\u2026' : id
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  const kb = bytes / 1024
-  if (kb < 1024) return `${kb.toFixed(1)} KB`
-  const mb = kb / 1024
-  return `${mb.toFixed(1)} MB`
-}
-
-const jsonKeyColor = '#881280'
-const jsonStringColor = '#1a8000'
-const jsonNumberColor = '#1750ac'
-const jsonBooleanColor = '#b22452'
-const jsonNullColor = '#808080'
-
-function deepParseJSON(value: unknown): unknown {
-  if (typeof value === 'string') {
-    const trimmed = value.trim()
-    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
-      try {
-        return deepParseJSON(JSON.parse(trimmed))
-      } catch {
-        return value
-      }
-    }
-    return value
+function copyText(value: string, label = '内容') {
+  if (!navigator.clipboard) {
+    message.error('当前浏览器不支持直接复制')
+    return
   }
-  if (Array.isArray(value)) {
-    return value.map(deepParseJSON)
-  }
-  if (value && typeof value === 'object') {
-    const result: Record<string, unknown> = {}
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      result[k] = deepParseJSON(v)
-    }
-    return result
-  }
-  return value
+  navigator.clipboard
+    .writeText(value)
+    .then(() => message.success(`${label}已复制`))
+    .catch(() => message.error('复制失败'))
 }
 
-function renderHighlightedJson(text: string): React.ReactNode {
-  const lines = text.split('\n')
+function downloadText(filename: string, value: string) {
+  const blob = new Blob([value], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+function DataBlock({ title, value }: { title: string; value: unknown }) {
+  const [query, setQuery] = useState('')
+  const text = safeJson(value)
+  const visible = query ? text.split('\n').filter((line) => line.toLowerCase().includes(query.toLowerCase())).join('\n') : text
+
   return (
-    <code style={{ fontFamily: 'ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace', fontSize: 13, lineHeight: '1.5', whiteSpace: 'pre' }}>
-      {lines.map((line, i) => {
-        const indent = line.match(/^(\s*)/)?.[0] || ''
-        const content = line.slice(indent.length)
-        const highlighted = content
-          .replace(/(:\s*)("(?:[^"\\]|\\.)*")/g, (_m, prefix, str) => `${prefix}<span style="color:${jsonStringColor}">${str}</span>`)
-          .replace(/("(?:[^"\\]|\\.)*")(\s*:)/g, (_m, key, suffix) => `<span style="color:${jsonKeyColor}">${key}</span>${suffix}`)
-          .replace(/(?<!")(\b-?\d+\.?\d*(?:[eE][+-]?\d+)?\b)(?!\s*")/g, (_m, num) => {
-            if (_m.includes('span')) return _m
-            return `<span style="color:${jsonNumberColor}">${num}</span>`
-          })
-          .replace(/\b(true|false)\b/g, `<span style="color:${jsonBooleanColor}">$1</span>`)
-          .replace(/\bnull\b/g, `<span style="color:${jsonNullColor}">null</span>`)
-        return (
-          <div key={i} style={{ display: 'flex' }}>
-            <span style={{ color: '#aaa', userSelect: 'none', minWidth: '3em', textAlign: 'right', marginRight: '1em' }}>{i + 1}</span>
-            <span>
-              <span style={{ whiteSpace: 'pre' }}>{indent}</span>
-              <span dangerouslySetInnerHTML={{ __html: highlighted }} />
-            </span>
-          </div>
-        )
-      })}
-    </code>
+    <Card
+      className="ops-card"
+      title={title}
+      extra={
+        <Space>
+          <Search
+            allowClear
+            size="small"
+            placeholder="搜索"
+            onSearch={setQuery}
+            onChange={(event) => setQuery(event.target.value)}
+            style={{ width: 180 }}
+          />
+          <Button size="small" icon={<CopyOutlined />} onClick={() => copyText(text, title)}>
+            复制
+          </Button>
+          <Button size="small" icon={<DownloadOutlined />} onClick={() => downloadText(`${title}.txt`, text)}>
+            下载
+          </Button>
+        </Space>
+      }
+    >
+      {text ? <pre className="code-block">{visible || '没有匹配内容'}</pre> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`无${title}`} />}
+    </Card>
   )
 }
 
 export default function RunDetail() {
   const { id, runId } = useParams<{ id: string; runId: string }>()
-
+  const navigate = useNavigate()
   const [run, setRun] = useState<RunRecord | null>(null)
   const [artifacts, setArtifacts] = useState<ArtifactRef[]>([])
   const [aiAnalysis, setAiAnalysis] = useState<AIAnalysisRecord | null>(null)
-  const [aiLoading, setAiLoading] = useState(false)
   const [aiFetched, setAiFetched] = useState(false)
-  const [activeTab, setActiveTab] = useState('overview')
+  const [aiLoading, setAiLoading] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [actionLoading, setActionLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [previewArtifact, setPreviewArtifact] = useState<{ title: string, content: string } | null>(null)
+  const [activeTab, setActiveTab] = useState('diagnosis')
+  const [previewArtifact, setPreviewArtifact] = useState<{ title: string; content: string } | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
 
   const fetchData = useCallback(async () => {
     if (!id || !runId) return
     try {
-      const [r, arts] = await Promise.all([
-        fetchTaskRun(id, runId),
-        fetchRunArtifacts(id, runId),
-      ])
-      setRun(r)
-      setArtifacts(arts)
+      const [record, refs] = await Promise.all([fetchTaskRun(id, runId), fetchRunArtifacts(id, runId)])
+      setRun(record)
+      setArtifacts(refs)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载运行详情失败')
@@ -161,159 +147,94 @@ export default function RunDetail() {
     fetchData()
   }, [fetchData])
 
-  const handleTabChange = (key: string) => {
-    setActiveTab(key)
-    if (key === 'ai' && !aiFetched && id && runId) {
-      setAiLoading(true)
-      fetchRunAIAnalysis(id, runId)
-        .then((a) => setAiAnalysis(a))
-        .catch(() => setAiAnalysis(null))
-        .finally(() => {
-          setAiLoading(false)
-          setAiFetched(true)
-        })
+  const loadAI = useCallback(() => {
+    if (!id || !runId || aiFetched) return
+    setAiLoading(true)
+    fetchRunAIAnalysis(id, runId)
+      .then(setAiAnalysis)
+      .catch(() => setAiAnalysis(null))
+      .finally(() => {
+        setAiFetched(true)
+        setAiLoading(false)
+      })
+  }, [aiFetched, id, runId])
+
+  useEffect(() => {
+    if (activeTab === 'ai') loadAI()
+  }, [activeTab, loadAI])
+
+  useEffect(() => {
+    if (run?.run_status === 'failed' || run?.check_status === 'fail') loadAI()
+  }, [loadAI, run])
+
+  const handleRerun = async () => {
+    if (!id || !runId) return
+    setActionLoading(true)
+    try {
+      const next = await retriggerTaskRun(id, runId)
+      message.success('已触发重跑')
+      navigate(`/tasks/${encodeURIComponent(id)}/runs/${encodeURIComponent(next.run_id)}`)
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '重跑失败')
+    } finally {
+      setActionLoading(false)
     }
   }
 
   const handleDownload = async (artifactID: string) => {
     try {
       const detail = await fetchArtifactDetail(artifactID)
-      if (detail.download_url) {
-        window.open(detail.download_url, '_blank')
-      }
-    } catch {
-      // ignore download errors
+      if (detail.download_url) window.open(detail.download_url, '_blank')
+      else message.info('后端未返回下载链接')
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '获取下载链接失败')
     }
   }
 
-  const handlePreview = async (artifactID: string) => {
+  const handlePreview = async (artifact: ArtifactRef) => {
     setPreviewLoading(true)
     try {
-      const detail = await fetchArtifactDetail(artifactID)
-      const artifactData = (detail as unknown as Record<string, unknown>).artifact as Record<string, unknown> | undefined
-      let raw = (artifactData?.preview_text as string) || (detail as unknown as Record<string, unknown>).preview_text as string | undefined
-      const uri = (artifactData?.uri as string) || (detail as unknown as Record<string, unknown>).uri as string || artifactID
-      if (!raw) {
-        message.info('该产物无可预览的文本内容')
-        setPreviewLoading(false)
-        return
-      }
-      const sizeBytes = (artifactData?.size_bytes as number) || (detail as unknown as Record<string, unknown>).size_bytes as number || 0
-      const truncated = raw.length < sizeBytes && !(raw.trim().endsWith('}') || raw.trim().endsWith(']') || raw.trim().endsWith('"'))
-      if (truncated) {
-        try {
-          raw = await fetchArtifactContent(artifactID)
-        } catch {
-          // fall back to truncated preview_text
-        }
-      }
-      let formatted = raw
-      try {
-        const parsed = JSON.parse(raw)
-        const deep = deepParseJSON(parsed)
-        formatted = JSON.stringify(deep, null, 2)
-      } catch {
-        // not valid JSON, show raw text
-      }
+      let raw = artifact.preview_text
+      if (!raw) raw = await fetchArtifactContent(artifact.artifact_id)
       setPreviewArtifact({
-        title: uri.split('/').pop() || uri,
-        content: formatted,
+        title: artifact.uri.split('/').pop() || artifact.artifact_id,
+        content: raw,
       })
     } catch (err) {
-      message.error(err instanceof Error ? err.message : '加载产物内容失败')
+      message.error(err instanceof Error ? err.message : '加载产物预览失败')
     } finally {
       setPreviewLoading(false)
     }
-  }
-
-  const runStatusBadge = (status: string) => {
-    const map: Record<string, 'success' | 'error' | 'warning' | 'processing'> = {
-      success: 'success',
-      failed: 'error',
-      timeout: 'warning',
-      running: 'processing',
-    }
-    const labels: Record<string, string> = {
-      success: '成功',
-      failed: '失败',
-      timeout: '超时',
-      running: '运行中',
-    }
-    return <Badge status={map[status] || 'default'} text={labels[status] || status} />
-  }
-
-  const checkStatusBadge = (status: string) => {
-    const map: Record<string, 'success' | 'error'> = {
-      pass: 'success',
-      fail: 'error',
-    }
-    const labels: Record<string, string> = {
-      pass: '通过',
-      fail: '失败',
-    }
-    return <Badge status={map[status] || 'default'} text={labels[status] || status} />
-  }
-
-  const triggerTypeTag = (tt: string) => {
-    const colors: Record<string, string> = {
-      scheduled: 'blue',
-      manual: 'green',
-      rerun: 'orange',
-      dependent: 'purple',
-    }
-    const labels: Record<string, string> = {
-      scheduled: '定时',
-      manual: '手动',
-      rerun: '重跑',
-      dependent: '依赖触发',
-    }
-    return <Tag color={colors[tt] || 'default'}>{labels[tt] || tt}</Tag>
-  }
-
-  if (loading) {
-    return <Spin size="large" style={{ display: 'block', margin: '48px auto' }} />
-  }
-
-  if (error) {
-    return <Alert type="error" message="加载运行详情失败" description={error} style={{ margin: 24 }} />
-  }
-
-  if (!run) {
-    return <Alert type="warning" message="运行记录未找到" style={{ margin: 24 }} />
-  }
-
-  const findingLevelTag = (finding: Finding) => {
-    const level = (finding.data?.level as string) || finding.reason
-    const colors: Record<string, string> = { error: 'red', warn: 'orange', info: 'blue' }
-    return <Tag color={colors[level] || 'default'}>{level}</Tag>
   }
 
   const findingColumns: TableColumnsType<Finding> = [
     {
       title: '级别',
       key: 'level',
-      render: (_: unknown, record: Finding) => findingLevelTag(record),
+      width: 90,
+      render: (_, finding) => {
+        const level = (finding.data?.level as string) || finding.reason || 'info'
+        const color = level === 'error' ? 'red' : level === 'warn' ? 'orange' : 'blue'
+        return <Tag color={color}>{level}</Tag>
+      },
     },
     {
-      title: '规则ID',
+      title: '规则 ID',
       dataIndex: 'sample_id',
-      key: 'sample_id',
-      render: (v: string) => <Text code>{v}</Text>,
+      width: 160,
+      render: (value: string) => <Text code>{value || '—'}</Text>,
     },
     {
       title: '消息',
       dataIndex: 'reason',
-      key: 'reason',
-      ellipsis: true,
+      render: (value: string) => value || '—',
     },
     {
       title: '详情',
       key: 'detail',
-      render: (_: unknown, record: Finding) => (
-        <Tooltip title={JSON.stringify(record.data, null, 2)}>
-          <Text style={{ maxWidth: 200 }} ellipsis>
-            {JSON.stringify(record.data)}
-          </Text>
+      render: (_, finding) => (
+        <Tooltip title={safeJson(finding.data)}>
+          <Text ellipsis style={{ maxWidth: 280 }}>{safeJson(finding.data)}</Text>
         </Tooltip>
       ),
     },
@@ -321,214 +242,141 @@ export default function RunDetail() {
 
   const artifactColumns: TableColumnsType<ArtifactRef> = [
     {
-      title: '文件名',
+      title: '产物',
       dataIndex: 'uri',
-      key: 'uri',
-      render: (v: string) => (
-        <Text code ellipsis style={{ maxWidth: 280 }}>
-          {v.split('/').pop() || v}
-        </Text>
-      ),
+      render: (value: string) => <Text code ellipsis>{value.split('/').pop() || value}</Text>,
     },
     {
       title: '类型',
-      dataIndex: 'content_type',
-      key: 'content_type',
-      render: (v: string) => <Tag>{v}</Tag>,
+      dataIndex: 'kind',
+      width: 110,
+      render: (value: string) => <Tag>{value || 'artifact'}</Tag>,
     },
     {
       title: '大小',
       dataIndex: 'size_bytes',
-      key: 'size_bytes',
-      render: (v: number) => formatBytes(v),
+      width: 100,
+      render: (value: number) => formatBytes(value),
+    },
+    {
+      title: '内容类型',
+      dataIndex: 'content_type',
+      width: 170,
+      render: (value: string) => value ? <Tag>{value}</Tag> : <Text type="secondary">—</Text>,
     },
     {
       title: '操作',
       key: 'actions',
-      render: (_: unknown, record: ArtifactRef) => (
+      width: 170,
+      render: (_, artifact) => (
         <Space>
-          <Button
-            type="link"
-            icon={<DownloadOutlined />}
-            onClick={() => handleDownload(record.artifact_id)}
-          >
+          <Button size="small" icon={<EyeOutlined />} loading={previewLoading} onClick={() => handlePreview(artifact)}>
+            预览
+          </Button>
+          <Button size="small" icon={<DownloadOutlined />} onClick={() => handleDownload(artifact.artifact_id)}>
             下载
           </Button>
-          {record.content_type && record.content_type.includes('json') && (
-            <Button
-              type="link"
-              icon={<EyeOutlined />}
-              loading={previewLoading}
-              onClick={() => handlePreview(record.artifact_id)}
-            >
-              预览
-            </Button>
-          )}
         </Space>
       ),
     },
   ]
 
-  const overviewTab = (
-    <Card title="运行概述" style={{ marginBottom: 24 }}>
-      <Descriptions bordered column={{ xs: 1, sm: 2 }}>
-        <Descriptions.Item label="运行ID">
-          <Text code>{run.run_id}</Text>
-        </Descriptions.Item>
-        <Descriptions.Item label="任务ID">
-          <Text code>{run.task_id}</Text>
-        </Descriptions.Item>
-        <Descriptions.Item label="任务类型">
-          <Tag>{run.task_kind}</Tag>
-        </Descriptions.Item>
-        <Descriptions.Item label="触发类型">
-          {triggerTypeTag(run.trigger_type)}
-        </Descriptions.Item>
-        <Descriptions.Item label="运行状态">
-          {runStatusBadge(run.run_status)}
-        </Descriptions.Item>
-        <Descriptions.Item label="检查状态">
-          {checkStatusBadge(run.check_status)}
-        </Descriptions.Item>
-        <Descriptions.Item label="开始时间">
-          {formatTime(run.started_at)}
-        </Descriptions.Item>
-        <Descriptions.Item label="结束时间">
-          {run.ended_at ? formatTime(run.ended_at) : <Text type="secondary">—</Text>}
-        </Descriptions.Item>
-        <Descriptions.Item label="耗时">
-          {formatDuration(run.duration_ms)}
-        </Descriptions.Item>
-        <Descriptions.Item label="错误信息">
-          {run.error_message ? (
-            <Text type="danger">{run.error_message}</Text>
-          ) : (
-            <Text type="secondary">—</Text>
-          )}
-        </Descriptions.Item>
-      </Descriptions>
-    </Card>
-  )
+  const diagnosisCards = useMemo(() => {
+    if (!run) return []
+    return [
+      {
+        key: 'error',
+        title: '错误',
+        content: run.error_message || (run.run_status === 'success' ? '无运行错误' : '未返回错误信息'),
+        type: run.error_message ? 'error' : 'success',
+      },
+      {
+        key: 'findings',
+        title: '检查发现',
+        content: run.findings?.length ? `${run.findings.length} 条 finding，优先查看下方明细。` : '无检查发现',
+        type: run.findings?.length ? 'warning' : 'success',
+      },
+      {
+        key: 'ai',
+        title: 'AI 结论',
+        content: aiLoading ? 'AI 分析加载中' : aiAnalysis?.response ? firstLine(aiAnalysis.response, 220) : '暂无 AI 分析',
+        type: aiAnalysis?.status === 'failed' ? 'error' : aiAnalysis?.response ? 'info' : 'warning',
+      },
+    ] as const
+  }, [aiAnalysis, aiLoading, run])
+
+  if (loading) {
+    return (
+      <div className="page-shell" style={{ display: 'grid', placeItems: 'center', minHeight: '60vh' }}>
+        <Spin size="large" />
+      </div>
+    )
+  }
+
+  if (error || !run) {
+    return (
+      <div className="page-shell">
+        <Alert
+          type="error"
+          message="加载运行详情失败"
+          description={error || '运行记录未找到'}
+          action={<Button onClick={() => { setLoading(true); fetchData() }}>重试</Button>}
+          showIcon
+        />
+      </div>
+    )
+  }
 
   const tabItems = [
     {
-      key: 'overview',
-      label: '运行概述',
-      children: overviewTab,
-    },
-    {
-      key: 'stdout',
-      label: '标准输出',
+      key: 'diagnosis',
+      label: '诊断',
       children: (
-        <Card>
-          {run.stdout ? (
-            <pre style={{ maxHeight: 400, overflow: 'auto', fontSize: 12 }}>{run.stdout}</pre>
-          ) : (
-            <Empty description="（无输出）" />
-          )}
-        </Card>
+        <Space direction="vertical" size={14} style={{ width: '100%' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
+            {diagnosisCards.map((item) => (
+              <Alert
+                key={item.key}
+                type={item.type}
+                message={item.title}
+                description={item.content}
+                showIcon
+              />
+            ))}
+          </div>
+          <Card className="ops-card" title="结构化摘要">
+            {run.summary ? <pre className="code-block">{safeJson(run.summary)}</pre> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无 summary" />}
+          </Card>
+          <Card className="ops-card" title={`Findings (${run.findings?.length || 0})`}>
+            {run.findings?.length ? (
+              <Table<Finding> className="dense-table" columns={findingColumns} dataSource={run.findings} rowKey="finding_id" size="small" pagination={false} />
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无检查发现" />
+            )}
+          </Card>
+        </Space>
       ),
     },
     {
-      key: 'stderr',
-      label: '标准错误',
+      key: 'raw',
+      label: '原始数据',
       children: (
-        <Card>
-          {run.stderr ? (
-            <pre style={{ maxHeight: 400, overflow: 'auto', fontSize: 12, color: '#cf1322' }}>{run.stderr}</pre>
-          ) : (
-            <Empty description="（无错误输出）" />
-          )}
-        </Card>
-      ),
-    },
-    {
-      key: 'summary',
-      label: '摘要',
-      children: (
-        <Card>
-          {run.summary ? (
-            <pre style={{ maxHeight: 400, overflow: 'auto', fontSize: 12 }}>
-              {JSON.stringify(run.summary, null, 2)}
-            </pre>
-          ) : (
-            <Empty description={<Text type="secondary">（无摘要）</Text>} />
-          )}
-        </Card>
-      ),
-    },
-    ...(run.task_kind === 'data_process' && run.summary ? [{
-      key: 'extracted',
-      label: '提取数据',
-      children: (
-        <Card>
-          <Table
-            dataSource={Object.entries(run.summary).map(([field, value]) => ({
-              key: field,
-              field,
-              value: value === null || value === undefined ? '—' : typeof value === 'object' ? JSON.stringify(value) : String(value),
-              type: typeof value === 'number' ? 'number' : typeof value === 'boolean' ? 'boolean' : Array.isArray(value) ? 'array' : typeof value === 'object' ? 'object' : 'string',
-            }))}
-            pagination={false}
-            size="small"
-            columns={[
-              { title: '字段', dataIndex: 'field', key: 'field', render: (v: string) => <Text code>{v}</Text>, width: 160 },
-              { title: '值', dataIndex: 'value', key: 'value', render: (v: string) => <Text style={{ fontFamily: 'monospace' }}>{v}</Text> },
-              { title: '类型', dataIndex: 'type', key: 'type', render: (v: string) => <Tag>{v}</Tag>, width: 80 },
-            ]}
-          />
-        </Card>
-      ),
-    }] : []),
-    {
-      key: 'payload',
-      label: '数据载荷',
-      children: (
-        <Card>
-          {run.payload ? (
-            <pre style={{ maxHeight: 400, overflow: 'auto', fontSize: 12 }}>
-              {JSON.stringify(run.payload, null, 2)}
-            </pre>
-          ) : (
-            <Empty description="（无数据载荷）" />
-          )}
-        </Card>
-      ),
-    },
-    {
-      key: 'findings',
-      label: `检查发现${run.findings ? ` (${run.findings.length})` : ''}`,
-      children: (
-        <Card>
-          {run.findings && run.findings.length > 0 ? (
-            <Table
-              columns={findingColumns}
-              dataSource={run.findings}
-              rowKey="finding_id"
-              pagination={false}
-              size="small"
-            />
-          ) : (
-            <Empty description="暂无检查发现" />
-          )}
-        </Card>
+        <Space direction="vertical" size={14} style={{ width: '100%' }}>
+          <DataBlock title="payload" value={run.payload} />
+          <DataBlock title="stdout" value={run.stdout} />
+          <DataBlock title="stderr" value={run.stderr} />
+        </Space>
       ),
     },
     {
       key: 'artifacts',
       label: `产物 (${artifacts.length})`,
       children: (
-        <Card>
-          {artifacts.length > 0 ? (
-            <Table
-              columns={artifactColumns}
-              dataSource={artifacts}
-              rowKey="artifact_id"
-              pagination={false}
-              size="small"
-            />
+        <Card className="ops-card">
+          {artifacts.length ? (
+            <Table<ArtifactRef> className="dense-table" columns={artifactColumns} dataSource={artifacts} rowKey="artifact_id" size="small" pagination={false} />
           ) : (
-            <Empty description="暂无产物" />
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无产物" />
           )}
         </Card>
       ),
@@ -536,7 +384,7 @@ export default function RunDetail() {
     {
       key: 'ai',
       label: (
-        <Space size={4}>
+        <Space size={5}>
           <RobotOutlined />
           <span>AI 分析</span>
         </Space>
@@ -544,115 +392,92 @@ export default function RunDetail() {
       children: aiLoading ? (
         <Spin size="large" style={{ display: 'block', margin: '48px auto' }} />
       ) : aiAnalysis ? (
-        <Card
-          title={
+        <Card className="ops-card">
+          <Space direction="vertical" size={14} style={{ width: '100%' }}>
             <Space wrap>
               <Tag color="purple">{aiAnalysis.analysis_type}</Tag>
-              <Text type="secondary">模型: {aiAnalysis.model}</Text>
-              <Badge
-                status={aiAnalysis.status === 'success' ? 'success' : 'error'}
-                text={aiAnalysis.status === 'success' ? '成功' : '失败'}
-              />
+              <Tag color={aiAnalysis.status === 'success' ? 'green' : 'red'}>{aiAnalysis.status === 'success' ? '成功' : '失败'}</Tag>
+              <Text type="secondary">模型：{aiAnalysis.model}</Text>
+              <Text type="secondary">Token：{aiAnalysis.tokens_in + aiAnalysis.tokens_out}</Text>
+              <Text type="secondary">耗时：{formatDuration(aiAnalysis.duration_ms)}</Text>
             </Space>
-          }
-          extra={
-            <Text type="secondary">{formatTime(aiAnalysis.created_at)}</Text>
-          }
-          style={{ marginBottom: 12 }}
-        >
-          <Descriptions bordered size="small" column={{ xs: 1, sm: 3 }} style={{ marginBottom: 16 }}>
-            <Descriptions.Item label="提示词 Token">{aiAnalysis.tokens_in}</Descriptions.Item>
-            <Descriptions.Item label="回复 Token">{aiAnalysis.tokens_out}</Descriptions.Item>
-            <Descriptions.Item label="总计 Token">{aiAnalysis.tokens_in + aiAnalysis.tokens_out}</Descriptions.Item>
-            <Descriptions.Item label="耗时">{formatDuration(aiAnalysis.duration_ms)}</Descriptions.Item>
-          </Descriptions>
-          {aiAnalysis.error_message && (
-            <Alert type="error" message={aiAnalysis.error_message} style={{ marginBottom: 12 }} />
-          )}
-          <Card type="inner" title="提示词" size="small" style={{ marginBottom: 12 }}>
-            <Paragraph
-              ellipsis={{ rows: 4, expandable: true, symbol: '展开' }}
-              style={{
-                fontSize: 12,
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
-                fontFamily: 'monospace',
-                background: '#fafafa',
-                padding: 8,
-                borderRadius: 4,
-                margin: 0,
-              }}
-            >
-              {aiAnalysis.prompt}
-            </Paragraph>
-          </Card>
-          <Card type="inner" title="回复" size="small">
-            <Paragraph
-              ellipsis={{ rows: 6, expandable: true, symbol: '展开' }}
-              style={{
-                fontSize: 12,
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
-                fontFamily: 'monospace',
-                background: '#f6ffed',
-                padding: 8,
-                borderRadius: 4,
-                margin: 0,
-              }}
-            >
-              {aiAnalysis.response}
-            </Paragraph>
-          </Card>
+            {aiAnalysis.error_message && <Alert type="error" message={aiAnalysis.error_message} showIcon />}
+            <Card size="small" title="结论">
+              <Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>
+                {aiAnalysis.response || '无回复'}
+              </Paragraph>
+            </Card>
+            <Card size="small" title="提示词">
+              <pre className="code-block">{aiAnalysis.prompt}</pre>
+            </Card>
+          </Space>
         </Card>
       ) : (
-        <Empty description="暂无 AI 分析" />
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 AI 分析" />
       ),
     },
   ]
 
   return (
-    <>
-      <div>
-      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-        <Breadcrumb
-          items={[
-            { title: <Link to="/tasks">任务列表</Link> },
-            { title: <Link to={`/tasks/${id}`}>{'任务详情'}</Link> },
-            { title: shortRunID(runId! || run.run_id) },
-          ]}
-        />
-
-        <Link to={`/tasks/${id}`}>
-          <Space>
-            <ArrowLeftOutlined />
-            <span>返回</span>
+    <div className="page-shell">
+      <div className="page-header">
+        <div>
+          <Breadcrumb
+            items={[
+              { title: <Link to="/tasks">任务监控</Link> },
+              { title: <Link to={`/tasks/${id}`}>任务详情</Link> },
+              { title: shortID(run.run_id) },
+            ]}
+            style={{ marginBottom: 8 }}
+          />
+          <Space align="center" size={10} wrap>
+            <Title level={2} className="page-title">运行详情 {shortID(run.run_id)}</Title>
+            <Tag color={runStatusColor(run.run_status)}>{RUN_STATUS_LABELS[run.run_status] || run.run_status}</Tag>
+            <Tag color={checkStatusColor(run.check_status)}>{CHECK_STATUS_LABELS[run.check_status] || run.check_status}</Tag>
           </Space>
-        </Link>
-
-        <Title level={3} style={{ margin: 0 }}>
-          运行详情: {shortRunID(run.run_id)}
-        </Title>
-      </Space>
-
-      <Tabs
-        activeKey={activeTab}
-        onChange={handleTabChange}
-        items={tabItems}
-        style={{ marginTop: 16 }}
-      />
-    </div>
-    <Modal
-      title={previewArtifact?.title || '预览'}
-      open={!!previewArtifact}
-      onCancel={() => setPreviewArtifact(null)}
-      footer={null}
-      width={800}
-      styles={{ body: { padding: 0 } }}
-    >
-      <div style={{ maxHeight: 500, overflow: 'auto', background: '#f8f8f8', padding: 16, borderRadius: '0 0 8px 8px', fontSize: 13 }}>
-        {previewArtifact?.content ? renderHighlightedJson(previewArtifact.content) : null}
+          <Text className="page-subtitle">{runDiagnosis(run, aiAnalysis)}</Text>
+        </div>
+        <Space wrap>
+          <Button icon={<ArrowLeftOutlined />} onClick={() => navigate(`/tasks/${id}`)}>
+            返回任务
+          </Button>
+          <Button type="primary" icon={<PlayCircleOutlined />} loading={actionLoading} onClick={handleRerun}>
+            重跑
+          </Button>
+          <Button icon={<SettingOutlined />} onClick={() => navigate(`/task-defs/${encodeURIComponent(id || '')}/edit?from=/tasks/${encodeURIComponent(id || '')}/runs/${encodeURIComponent(run.run_id)}`)}>
+            打开配置
+          </Button>
+        </Space>
       </div>
-    </Modal>
-  </>
+
+      <Card className="ops-card" title="概述" style={{ marginBottom: 14 }}>
+        <Descriptions column={{ xs: 1, md: 2, xl: 4 }} size="small">
+          <Descriptions.Item label="运行 ID"><Text code>{run.run_id}</Text></Descriptions.Item>
+          <Descriptions.Item label="任务 ID"><Text code>{run.task_id}</Text></Descriptions.Item>
+          <Descriptions.Item label="任务类型"><Tag>{run.task_kind}</Tag></Descriptions.Item>
+          <Descriptions.Item label="触发方式"><Tag>{run.trigger_type || '—'}</Tag></Descriptions.Item>
+          <Descriptions.Item label="运行状态"><Tag color={runStatusColor(run.run_status)}>{RUN_STATUS_LABELS[run.run_status] || run.run_status}</Tag></Descriptions.Item>
+          <Descriptions.Item label="检查状态"><Tag color={checkStatusColor(run.check_status)}>{CHECK_STATUS_LABELS[run.check_status] || run.check_status}</Tag></Descriptions.Item>
+          <Descriptions.Item label="开始时间">{formatTime(run.started_at)}</Descriptions.Item>
+          <Descriptions.Item label="结束时间">{formatTime(run.ended_at)}</Descriptions.Item>
+          <Descriptions.Item label="耗时">{formatDuration(run.duration_ms)}</Descriptions.Item>
+          <Descriptions.Item label="错误信息">
+            {run.error_message ? <Text type="danger">{run.error_message}</Text> : <Text type="secondary">—</Text>}
+          </Descriptions.Item>
+        </Descriptions>
+      </Card>
+
+      <Tabs activeKey={activeTab} onChange={setActiveTab} items={tabItems} />
+
+      <Modal
+        title={previewArtifact?.title || '产物预览'}
+        open={Boolean(previewArtifact)}
+        onCancel={() => setPreviewArtifact(null)}
+        footer={null}
+        width={920}
+      >
+        <DataBlock title={previewArtifact?.title || 'artifact'} value={previewArtifact?.content || ''} />
+      </Modal>
+    </div>
   )
 }

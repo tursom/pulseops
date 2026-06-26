@@ -1,6 +1,11 @@
 import { Routes, Route, useNavigate, useLocation } from 'react-router-dom'
 import { Layout, Menu } from 'antd'
-import { DashboardOutlined, UnorderedListOutlined, ApartmentOutlined, SettingOutlined } from '@ant-design/icons'
+import {
+  ApartmentOutlined,
+  DashboardOutlined,
+  SettingOutlined,
+  UnorderedListOutlined,
+} from '@ant-design/icons'
 import Dashboard from './pages/Dashboard'
 import TaskList from './pages/TaskList'
 import TaskDetail from './pages/TaskDetail'
@@ -14,10 +19,10 @@ import './App.css'
 const { Sider, Content } = Layout
 
 const menuItems = [
-  { key: '/', icon: <DashboardOutlined />, label: '仪表盘' },
-  { key: '/tasks', icon: <UnorderedListOutlined />, label: '任务列表' },
-  { key: '/pipelines', icon: <ApartmentOutlined />, label: '流水线' },
-  { key: '/settings', icon: <SettingOutlined />, label: '设置' },
+  { key: '/', icon: <DashboardOutlined />, label: '工作台' },
+  { key: '/tasks', icon: <UnorderedListOutlined />, label: '任务监控' },
+  { key: '/pipelines', icon: <ApartmentOutlined />, label: '依赖拓扑' },
+  { key: '/settings', icon: <SettingOutlined />, label: '平台设置' },
 ]
 
 export default function App() {
@@ -27,21 +32,14 @@ export default function App() {
   const selectedKey = '/' + location.pathname.split('/')[1]
 
   return (
-    <Layout style={{ minHeight: '100vh' }}>
-      <Sider width={220}>
-        <div
-          style={{
-            height: 64,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: '#fff',
-            fontSize: 18,
-            fontWeight: 700,
-            letterSpacing: 1,
-          }}
-        >
-          PulseOps
+    <Layout className="app-shell">
+      <Sider width={224} breakpoint="lg" collapsedWidth={0} className="app-sider">
+        <div className="app-brand">
+          <div className="app-brand-mark">P</div>
+          <div>
+            <div className="app-brand-title">PulseOps</div>
+            <div className="app-brand-subtitle">运维工作台</div>
+          </div>
         </div>
         <Menu
           theme="dark"
@@ -52,7 +50,7 @@ export default function App() {
         />
       </Sider>
       <Layout>
-        <Content style={{ padding: 24 }}>
+        <Content className="app-content">
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/tasks" element={<TaskList />} />

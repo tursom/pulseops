@@ -1,53 +1,82 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
-import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
-  Spin,
   Alert,
-  Typography,
+  Button,
   Card,
   Descriptions,
-  Tag,
-  Badge,
-  Table,
-  Button,
-  Switch,
-  Collapse,
-  Tooltip,
-  Space,
+  Empty,
+  Popconfirm,
   Select,
+  Space,
+  Spin,
+  Switch,
+  Table,
+  Tag,
+  Tooltip,
+  Typography,
   message,
 } from 'antd'
-import type { TableColumnsType } from 'antd'
-import { PlayCircleOutlined, ArrowLeftOutlined, EditOutlined } from '@ant-design/icons'
+import type { ColumnsType } from 'antd/es/table'
 import {
+  ApartmentOutlined,
+  ArrowLeftOutlined,
+  EditOutlined,
+  PlayCircleOutlined,
+  ReloadOutlined,
+} from '@ant-design/icons'
+import {
+  disableTask,
+  enableTask,
   fetchTask,
+  fetchTaskAIAnalyses,
+  fetchTaskDefinitions,
   fetchTaskRunsPaginated,
   fetchTaskRunStats,
-  fetchTaskAIAnalyses,
   fetchTaskSample,
   triggerTaskRun,
-  enableTask,
-  disableTask,
 } from '../api/client'
-import type { TaskState, RunRecord, RunStat, AIAnalysisRecord, TaskDefinition, SampleResponse } from '../api/types'
+import type {
+  AIAnalysisRecord,
+  RunRecord,
+  RunStat,
+  SampleResponse,
+  TaskDefinition,
+  TaskState,
+} from '../api/types'
 import DurationChart from '../components/DurationChart'
+import {
+  AUTO_REFRESH_MS,
+  checkStatusColor,
+  CHECK_STATUS_LABELS,
+  collectDownstream,
+  collectUpstream,
+  firstLine,
+  formatDuration,
+  formatRelativeTime,
+  formatTime,
+  KIND_COLORS,
+  KIND_LABELS,
+  runStatusColor,
+  RUN_STATUS_LABELS,
+  safeJson,
+  shortID,
+  statusColorForTask,
+  toTaskView,
+  type TaskView,
+} from '../utils/pulseops'
 
-const { Title, Text } = Typography
+const { Title, Text, Paragraph } = Typography
 
-function formatTime(t: string | null): string {
-  if (!t) return '—'
-  const d = new Date(t)
-  if (d.getFullYear() < 2000) return '—'
-  return d.toLocaleString()
-}
+const TIME_RANGE_OPTIONS = [
+  { label: '最近 24 小时', value: '24h' },
+  { label: '最近 7 天', value: '168h' },
+  { label: '最近 30 天', value: '720h' },
+  { label: '全部', value: '' },
+]
 
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`
-  return `${(ms / 1000).toFixed(1)}s`
-}
-
-function shortRunID(id: string): string {
-  return id.substring(0, 12)
+function definitionFromTask(task: TaskState | null): TaskDefinition | undefined {
+  return (task as unknown as { definition?: TaskDefinition } | null)?.definition
 }
 
 function sampleDisplayData(sample: SampleResponse | null | undefined): unknown {
@@ -58,14 +87,13 @@ function isSamplePreviewSource(source: string): boolean {
   return !source.startsWith('artifact:') || source === 'artifact:payload'
 }
 
-const CHAR_LIMIT = 500
-
-const TIME_RANGE_OPTIONS = [
-  { label: '最近24小时', value: '24h' },
-  { label: '最近7天', value: '168h' },
-  { label: '最近30天', value: '720h' },
-  { label: '全部', value: '' },
-]
+function taskAdvice(task: TaskView): string {
+  if (task.last_reload_error) return '先编辑配置并修复加载错误，再刷新任务运行态。'
+  if (task.last_run_status === 'failed' || task.last_run_status === 'timeout') return '优先打开最近失败运行，确认错误和 payload，再决定重跑或修改配置。'
+  if (task.last_check_status === 'fail') return '检查未通过，建议查看 summary/findings 并确认阈值或上游数据。'
+  if (task.status === 'unloaded') return '任务定义存在但运行态未加载，建议刷新或检查后端加载日志。'
+  return '当前任务未发现阻断问题，可查看趋势或进入依赖拓扑确认影响面。'
+}
 
 export default function TaskDetail() {
   const { id } = useParams<{ id: string }>()
@@ -74,6 +102,7 @@ export default function TaskDetail() {
   const returnUrl = searchParams.get('from') || '/tasks'
 
   const [task, setTask] = useState<TaskState | null>(null)
+  const [defs, setDefs] = useState<TaskDefinition[]>([])
   const [chartRuns, setChartRuns] = useState<RunStat[]>([])
   const [tableRuns, setTableRuns] = useState<RunRecord[]>([])
   const [total, setTotal] = useState(0)
@@ -81,163 +110,118 @@ export default function TaskDetail() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [actionLoading, setActionLoading] = useState(false)
-  const [expandedAnalyses, setExpandedAnalyses] = useState<Set<number>>(new Set())
-  const [timeRange, setTimeRange] = useState<string>('')
+  const [timeRange, setTimeRange] = useState('')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
+  const [lastRefreshAt, setLastRefreshAt] = useState<Date | null>(null)
 
-  const [upstreamTask, setUpstreamTask] = useState<TaskState | null>(null)
-  const [upstreamLoading, setUpstreamLoading] = useState(false)
-  const [upstreamError, setUpstreamError] = useState<string | null>(null)
   const [samples, setSamples] = useState<Record<string, SampleResponse | null>>({})
   const [samplesLoading, setSamplesLoading] = useState(false)
-  const [samplesError, setSamplesError] = useState<string | null>(null)
   const [jqResults, setJqResults] = useState<Record<string, unknown>>({})
   const [jqLoading, setJqLoading] = useState(false)
-
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const fetchData = useCallback(async () => {
     if (!id) return
     try {
       const offset = (page - 1) * pageSize
-      const [t, cr, pr, a] = await Promise.all([
+      const [taskData, allDefs, stats, runs, ai] = await Promise.all([
         fetchTask(id),
+        fetchTaskDefinitions(),
         fetchTaskRunStats(id, timeRange || undefined),
         fetchTaskRunsPaginated(id, pageSize, offset, timeRange || undefined),
         fetchTaskAIAnalyses(id, 10),
       ])
-      setTask(t)
-      setChartRuns(cr)
-      setTableRuns(pr.records)
-      setTotal(pr.total)
-      setAnalyses(a)
+      setTask(taskData)
+      setDefs(allDefs)
+      setChartRuns(stats)
+      setTableRuns(runs.records)
+      setTotal(runs.total)
+      setAnalyses(ai)
+      setLastRefreshAt(new Date())
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载任务失败')
     } finally {
       setLoading(false)
     }
-  }, [id, timeRange, page, pageSize])
+  }, [id, page, pageSize, timeRange])
 
   useEffect(() => {
     setLoading(true)
     fetchData()
-    intervalRef.current = setInterval(fetchData, 15_000)
-    return () => {
-      if (intervalRef.current !== null) clearInterval(intervalRef.current)
-    }
+    const interval = setInterval(fetchData, AUTO_REFRESH_MS)
+    return () => clearInterval(interval)
   }, [fetchData])
 
-  // Fetch upstream task info for data_process tasks
-  useEffect(() => {
-    if (!task) return
-    const def = (task as unknown as { definition?: TaskDefinition }).definition
-    const upstreamId = ((def?.params as Record<string, unknown> | undefined)?.source_task_id as string) || def?.watch_task_id || ''
-    if (!upstreamId) {
-      setUpstreamTask(null)
-      setUpstreamError(null)
-      setUpstreamLoading(false)
-      return
-    }
-    setUpstreamLoading(true)
-    fetchTask(upstreamId)
-      .then((t) => {
-        setUpstreamTask(t)
-        setUpstreamError(null)
-      })
-      .catch((err) => {
-        setUpstreamError(err instanceof Error ? err.message : '加载上游任务失败')
-      })
-      .finally(() => setUpstreamLoading(false))
-  }, [task])
-
-  // Fetch sample data from upstream for data_process tasks
-  useEffect(() => {
-    if (!task) return
-    const def = (task as unknown as { definition?: TaskDefinition }).definition
-    const upstreamId = ((def?.params as Record<string, unknown> | undefined)?.source_task_id as string) || def?.watch_task_id || ''
-    const exprs = (def?.params as Record<string, unknown> | undefined)?.extract_exprs as
-      | Array<{ source: string }>
-      | undefined
-    if (!upstreamId || !exprs || exprs.length === 0) {
-      setSamples({})
-      setSamplesError(null)
-      setSamplesLoading(false)
-      return
-    }
-    const uniqueSources = [...new Set(exprs.map((e) => e.source).filter(isSamplePreviewSource))]
-    if (uniqueSources.length === 0) {
-      setSamples({})
-      setSamplesError(null)
-      setSamplesLoading(false)
-      return
-    }
-    setSamplesLoading(true)
-    setSamplesError(null)
-    const promises = uniqueSources.map((src) =>
-      fetchTaskSample(upstreamId, src).then(
-        (r) => [src, r] as const,
-      ),
-    )
-    Promise.allSettled(promises).then((results) => {
-      const map: Record<string, SampleResponse | null> = {}
-      for (const r of results) {
-        if (r.status === 'fulfilled') {
-          const [src, data] = r.value
-          map[src] = data
-        }
-      }
-      setSamples(map)
-      setSamplesLoading(false)
-    })
-  }, [task])
+  const def = useMemo(() => definitionFromTask(task) || defs.find((item) => item.task_id === id), [defs, id, task])
+  const view = useMemo(() => (task ? toTaskView(task, def) : null), [def, task])
+  const upstream = useMemo(() => collectUpstream(defs, def), [defs, def])
+  const downstream = useMemo(() => (id ? collectDownstream(defs, id) : []), [defs, id])
+  const latestFailedRun = useMemo(
+    () => tableRuns.find((run) => run.run_status === 'failed' || run.run_status === 'timeout' || run.check_status === 'fail'),
+    [tableRuns],
+  )
+  const latestAI = analyses[0]
 
   useEffect(() => {
-    if (!task) return
-    const def = (task as unknown as { definition?: TaskDefinition }).definition
-    const upstreamId = ((def?.params as Record<string, unknown> | undefined)?.source_task_id as string) || def?.watch_task_id || ''
-    const exprs = (def?.params as Record<string, unknown> | undefined)?.extract_exprs as
-      | Array<{ source: string; jq_expr: string }>
-      | undefined
-    if (!upstreamId || !exprs || exprs.length === 0) {
+    if (!def) return
+    const params = def.params || {}
+    const upstreamId = (params.source_task_id as string) || def.watch_task_id || ''
+    const exprs = params.extract_exprs as Array<{ source: string; jq_expr?: string }> | undefined
+    if (def.kind !== 'data_process' || !upstreamId || !exprs?.length) {
+      setSamples({})
       setJqResults({})
+      setSamplesLoading(false)
       setJqLoading(false)
       return
     }
-    setJqLoading(true)
-    const promises = exprs
-      .filter((e) => e.source && isSamplePreviewSource(e.source))
-      .map((expr) => {
-        const key = `${expr.source}::${expr.jq_expr}`
-        return fetchTaskSample(upstreamId, expr.source, expr.jq_expr).then(
-          (r) => [key, r.jq_result] as const,
-        )
-      })
-    Promise.allSettled(promises).then((results) => {
-      const map: Record<string, unknown> = {}
-      for (const r of results) {
-        if (r.status === 'fulfilled') {
-          const [key, val] = r.value
-          map[key] = val
+
+    const uniqueSources = [...new Set(exprs.map((expr) => expr.source).filter(isSamplePreviewSource))]
+    setSamplesLoading(uniqueSources.length > 0)
+    Promise.allSettled(uniqueSources.map((source) => fetchTaskSample(upstreamId, source).then((result) => [source, result] as const)))
+      .then((results) => {
+        const next: Record<string, SampleResponse | null> = {}
+        for (const result of results) {
+          if (result.status === 'fulfilled') {
+            const [source, sample] = result.value
+            next[source] = sample
+          }
         }
-      }
-      setJqResults(map)
-      setJqLoading(false)
-    })
-  }, [task])
+        setSamples(next)
+      })
+      .finally(() => setSamplesLoading(false))
+
+    const jqExprs = exprs.filter((expr) => expr.source && expr.jq_expr && isSamplePreviewSource(expr.source))
+    setJqLoading(jqExprs.length > 0)
+    Promise.allSettled(jqExprs.map((expr) => {
+      const key = `${expr.source}::${expr.jq_expr}`
+      return fetchTaskSample(upstreamId, expr.source, expr.jq_expr).then((result) => [key, result.jq_result] as const)
+    }))
+      .then((results) => {
+        const next: Record<string, unknown> = {}
+        for (const result of results) {
+          if (result.status === 'fulfilled') {
+            const [key, value] = result.value
+            next[key] = value
+          }
+        }
+        setJqResults(next)
+      })
+      .finally(() => setJqLoading(false))
+  }, [def])
 
   const handleRun = async () => {
     if (!id) return
     setActionLoading(true)
     try {
-      await triggerTaskRun(id)
+      const run = await triggerTaskRun(id)
       message.success('任务已触发')
-      await fetchData()
+      navigate(`/tasks/${encodeURIComponent(id)}/runs/${encodeURIComponent(run.run_id)}`)
     } catch (err) {
       message.error(err instanceof Error ? err.message : '触发失败')
     } finally {
       setActionLoading(false)
+      fetchData()
     }
   }
 
@@ -260,617 +244,350 @@ export default function TaskDetail() {
     }
   }
 
-  const toggleAnalysisExpand = (analysisId: number) => {
-    setExpandedAnalyses((prev) => {
-      const next = new Set(prev)
-      if (next.has(analysisId)) {
-        next.delete(analysisId)
-      } else {
-        next.add(analysisId)
-      }
-      return next
-    })
-  }
+  const runColumns: ColumnsType<RunRecord> = [
+    {
+      title: '运行 ID',
+      dataIndex: 'run_id',
+      width: 140,
+      render: (value: string) => <Link to={`/tasks/${id}/runs/${value}`}><Text code>{shortID(value)}</Text></Link>,
+    },
+    {
+      title: '触发方式',
+      dataIndex: 'trigger_type',
+      width: 100,
+      render: (value: string) => <Tag>{value || '—'}</Tag>,
+    },
+    {
+      title: '状态',
+      dataIndex: 'run_status',
+      width: 100,
+      render: (value: string) => <Tag color={runStatusColor(value)}>{RUN_STATUS_LABELS[value] || value || '—'}</Tag>,
+    },
+    {
+      title: '检查',
+      dataIndex: 'check_status',
+      width: 100,
+      render: (value: string) => <Tag color={checkStatusColor(value)}>{CHECK_STATUS_LABELS[value] || value || '—'}</Tag>,
+    },
+    {
+      title: '开始时间',
+      dataIndex: 'started_at',
+      width: 160,
+      render: (value: string) => <Tooltip title={formatTime(value)}>{formatRelativeTime(value)}</Tooltip>,
+    },
+    {
+      title: '耗时',
+      dataIndex: 'duration_ms',
+      width: 90,
+      render: (value: number) => formatDuration(value),
+    },
+    {
+      title: '错误',
+      dataIndex: 'error_message',
+      render: (value: string) => value
+        ? <Tooltip title={value}><Text type="danger" ellipsis>{value}</Text></Tooltip>
+        : <Text type="secondary">—</Text>,
+    },
+  ]
 
-  const runStatusBadge = (status: string) => {
-    if (!status) return <Text type="secondary">—</Text>
-    const map: Record<string, 'success' | 'error' | 'warning' | 'processing'> = {
-      success: 'success',
-      failed: 'error',
-      timeout: 'warning',
-      running: 'processing',
-    }
-    const labels: Record<string, string> = {
-      success: '成功',
-      failed: '失败',
-      timeout: '超时',
-      running: '运行中',
-    }
-    return <Badge status={map[status] || 'default'} text={labels[status] || status} />
-  }
-
-  const checkStatusBadge = (status: string) => {
-    const map: Record<string, 'success' | 'error'> = {
-      pass: 'success',
-      fail: 'error',
-    }
-    const labels: Record<string, string> = {
-      pass: '通过',
-      fail: '失败',
-    }
-    return <Badge status={map[status] || 'default'} text={labels[status] || status} />
-  }
-
-  const triggerTypeTag = (tt: string) => {
-    const colors: Record<string, string> = {
-      scheduled: 'blue',
-      manual: 'green',
-      rerun: 'orange',
-      dependent: 'purple',
-    }
-    const labels: Record<string, string> = {
-      scheduled: '定时',
-      manual: '手动',
-      rerun: '重跑',
-      dependent: '依赖触发',
-    }
-    return <Tag color={colors[tt] || 'default'}>{labels[tt] || tt}</Tag>
-  }
-
-  const taskStatusBadge = (status: string) => {
-    const s = status.toLowerCase()
-    if (s === 'ok' || s === 'healthy') return <Badge status="success" text={status} />
-    if (s === 'error' || s === 'unhealthy') return <Badge status="error" text={status} />
-    if (s === 'degraded') return <Badge status="warning" text={status} />
-    return <Badge status="default" text={status} />
-  }
-
-  if (loading) {
+  if (loading && !task) {
     return (
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'center',
-          alignItems: 'center',
-          height: '60vh',
-        }}
-      >
+      <div className="page-shell" style={{ display: 'grid', placeItems: 'center', minHeight: '60vh' }}>
         <Spin size="large" />
       </div>
     )
   }
 
-  if (error) {
+  if (error && !task) {
     return (
-      <Alert
-        type="error"
-        message="加载任务失败"
-        description={error}
-        showIcon
-      />
+      <div className="page-shell">
+        <Alert
+          type="error"
+          message="加载任务失败"
+          description={error}
+          action={<Button onClick={() => { setLoading(true); fetchData() }}>重试</Button>}
+          showIcon
+        />
+      </div>
     )
   }
 
-  if (!task) {
-    return <Alert type="warning" message="任务未找到" showIcon />
+  if (!task || !view) {
+    return (
+      <div className="page-shell">
+        <Alert type="warning" message="任务未找到" showIcon />
+      </div>
+    )
   }
 
-  const runColumns: TableColumnsType<RunRecord> = [
-    {
-      title: '运行ID',
-      dataIndex: 'run_id',
-      key: 'run_id',
-      render: (v: string) => <Link to={`/tasks/${id}/runs/${v}`}><Text code>{shortRunID(v)}</Text></Link>,
-    },
-    {
-      title: '触发方式',
-      dataIndex: 'trigger_type',
-      key: 'trigger_type',
-      render: (v: string) => triggerTypeTag(v),
-    },
-    {
-      title: '状态',
-      dataIndex: 'run_status',
-      key: 'run_status',
-      render: (v: string) => runStatusBadge(v),
-    },
-    {
-      title: '检查',
-      dataIndex: 'check_status',
-      key: 'check_status',
-      render: (v: string) => checkStatusBadge(v),
-    },
-    {
-      title: '开始时间',
-      dataIndex: 'started_at',
-      key: 'started_at',
-      render: (v: string) => formatTime(v),
-      sorter: (a, b) =>
-        new Date(a.started_at).getTime() - new Date(b.started_at).getTime(),
-      defaultSortOrder: 'descend',
-    },
-    {
-      title: '耗时',
-      dataIndex: 'duration_ms',
-      key: 'duration_ms',
-      render: (v: number) => formatDuration(v),
-    },
-    {
-      title: '错误',
-      dataIndex: 'error_message',
-      key: 'error_message',
-      render: (v: string) => {
-        if (!v) return <Text type="secondary">—</Text>
-        return (
-          <Tooltip title={v}>
-            <Text type="danger" ellipsis style={{ maxWidth: 200 }}>
-              {v}
-            </Text>
-          </Tooltip>
-        )
-      },
-    },
-  ]
-
-  const expandedRowRender = (record: RunRecord) => (
-    <div style={{ padding: '8px 0' }}>
-      {record.summary && (
-        <div style={{ marginBottom: 12 }}>
-          <Text strong>摘要</Text>
-          <pre
-            style={{
-              background: '#f5f5f5',
-              padding: 12,
-              borderRadius: 6,
-              maxHeight: 200,
-              overflow: 'auto',
-              fontSize: 12,
-              marginTop: 4,
-            }}
-          >
-            {JSON.stringify(record.summary, null, 2)}
-          </pre>
-        </div>
-      )}
-      {record.stdout && (
-        <div style={{ marginBottom: 12 }}>
-          <Text strong>标准输出</Text>
-          <pre
-            style={{
-              background: '#f5f5f5',
-              padding: 12,
-              borderRadius: 6,
-              maxHeight: 200,
-              overflow: 'auto',
-              fontSize: 12,
-              marginTop: 4,
-            }}
-          >
-            {record.stdout}
-          </pre>
-        </div>
-      )}
-      {record.stderr && (
-        <div style={{ marginBottom: 12 }}>
-          <Text strong>标准错误</Text>
-          <pre
-            style={{
-              background: '#fff2f0',
-              padding: 12,
-              borderRadius: 6,
-              maxHeight: 200,
-              overflow: 'auto',
-              fontSize: 12,
-              color: '#cf1322',
-              marginTop: 4,
-              border: '1px solid #ffccc7',
-            }}
-          >
-            {record.stderr}
-          </pre>
-        </div>
-      )}
-      {!record.summary && !record.stdout && !record.stderr && (
-        <Text type="secondary">无详细信息</Text>
-      )}
-    </div>
-  )
+  const sourceLabels: Record<string, string> = {
+    payload: 'Payload',
+    summary: 'Summary',
+    record: 'Record',
+    'artifact:payload': 'Artifact Payload',
+    'artifact:stdout': 'Artifact Stdout',
+    'artifact:stderr': 'Artifact Stderr',
+  }
+  const extractExprs = def?.params?.extract_exprs as Array<{ field: string; source: string; jq_expr: string; agg_mode?: string }> | undefined
+  const dataSourceTaskId = ((def?.params || {}).source_task_id as string) || def?.watch_task_id || ''
 
   return (
-    <div>
-      <div style={{ marginBottom: 24 }}>
-        <Link to={returnUrl} style={{ display: 'inline-block', marginBottom: 12 }}>
-          <Space>
-            <ArrowLeftOutlined />
-            <span>返回任务列表</span>
+    <div className="page-shell">
+      <div className="page-header">
+        <div>
+          <Link to={returnUrl}>
+            <Space size={6}>
+              <ArrowLeftOutlined />
+              <span>返回</span>
+            </Space>
+          </Link>
+          <Space align="center" size={10} wrap style={{ marginTop: 10 }}>
+            <Title level={2} className="page-title">{task.name}</Title>
+            <Tag color={KIND_COLORS[task.kind] || 'default'}>{KIND_LABELS[task.kind] || task.kind}</Tag>
+            <Tag color={statusColorForTask(view)}>{view.anomaly_type || (task.enabled ? '运行态正常' : '已禁用')}</Tag>
           </Space>
-        </Link>
-
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            flexWrap: 'wrap',
-            gap: 12,
-          }}
-        >
-          <Space align="center" size={12} wrap>
-            <Title level={2} style={{ margin: 0 }}>
-              {task.name}
-            </Title>
-            <Tag>{task.kind}</Tag>
-            {taskStatusBadge(task.status)}
-          </Space>
-
-          <Space>
-            <span>已启用</span>
-            <Switch
-              checked={task.enabled}
-              onChange={handleToggleEnabled}
-              loading={actionLoading}
-            />
-            <Button
-              type="primary"
-              icon={<PlayCircleOutlined />}
-              onClick={handleRun}
-              loading={actionLoading}
-            >
-              立即执行
-            </Button>
-            <Button
-              icon={<EditOutlined />}
-              onClick={() => navigate(`/task-defs/${encodeURIComponent(id!)}/edit?from=/tasks/${encodeURIComponent(id!)}`)}
-            >
-              编辑
-            </Button>
-          </Space>
+          <Text className="page-subtitle">
+            {task.task_id}，最近刷新：{lastRefreshAt ? lastRefreshAt.toLocaleTimeString() : '—'}
+          </Text>
         </div>
+        <Space wrap>
+          <Text>启用</Text>
+          <Switch checked={task.enabled} loading={actionLoading} onChange={handleToggleEnabled} />
+          <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { setLoading(true); fetchData() }}>
+            刷新
+          </Button>
+          <Button type="primary" icon={<PlayCircleOutlined />} loading={actionLoading} disabled={task.status === 'unloaded'} onClick={handleRun}>
+            立即执行
+          </Button>
+          <Button icon={<EditOutlined />} onClick={() => navigate(`/task-defs/${encodeURIComponent(task.task_id)}/edit?from=/tasks/${encodeURIComponent(task.task_id)}`)}>
+            编辑配置
+          </Button>
+          <Button icon={<ApartmentOutlined />} onClick={() => navigate(def?.pipeline_id ? `/pipelines/${def.pipeline_id}` : '/pipelines')}>
+            进入拓扑
+          </Button>
+        </Space>
       </div>
 
-      <Card title="任务信息" style={{ marginBottom: 24 }}>
-        <Descriptions bordered column={{ xs: 1, sm: 2, lg: 3 }}>
-          <Descriptions.Item label="任务ID">
-            <Text code>{task.task_id}</Text>
-          </Descriptions.Item>
-          <Descriptions.Item label="类型">
-            <Tag>{task.kind}</Tag>
-          </Descriptions.Item>
-          <Descriptions.Item label="状态">
-            {taskStatusBadge(task.status)}
-          </Descriptions.Item>
-          <Descriptions.Item label="已启用">
-            <Tag color={task.enabled ? 'green' : 'red'}>
-              {task.enabled ? '是' : '否'}
-            </Tag>
-          </Descriptions.Item>
-          <Descriptions.Item label="上次运行">
-            {formatTime(task.last_run_at)}
-          </Descriptions.Item>
-          <Descriptions.Item label="下次运行">
-            {formatTime(task.next_run_at)}
-          </Descriptions.Item>
-          <Descriptions.Item label="上次状态">
-            {runStatusBadge(task.last_run_status)}
-          </Descriptions.Item>
-          <Descriptions.Item label="上次错误">
-            {task.last_error ? (
-              <Text type="danger" ellipsis style={{ maxWidth: 300 }}>
-                {task.last_error}
-              </Text>
-            ) : (
-              <Text type="secondary">—</Text>
+      {error && (
+        <Alert type="warning" message="刷新失败，当前展示最近一次成功数据" description={error} showIcon style={{ marginBottom: 14 }} />
+      )}
+
+      <div className="two-column-main">
+        <Space direction="vertical" size={14} style={{ width: '100%' }}>
+          <Card className="ops-card" title="健康摘要">
+            <Descriptions column={{ xs: 1, md: 2, xl: 4 }} size="small">
+              <Descriptions.Item label="运行态">
+                <Tag color={statusColorForTask(view)}>{task.status || '—'}</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="上次运行">
+                <Tag color={runStatusColor(task.last_run_status)}>{RUN_STATUS_LABELS[task.last_run_status] || task.last_run_status || '—'}</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="检查结果">
+                <Tag color={checkStatusColor(task.last_check_status)}>{CHECK_STATUS_LABELS[task.last_check_status] || task.last_check_status || '—'}</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="最近耗时">{formatDuration(task.last_duration_ms)}</Descriptions.Item>
+              <Descriptions.Item label="最近成功">{formatTime(tableRuns.find((run) => run.run_status === 'success')?.started_at)}</Descriptions.Item>
+              <Descriptions.Item label="上次运行时间">{formatTime(task.last_run_at)}</Descriptions.Item>
+              <Descriptions.Item label="下次运行时间">{formatTime(task.next_run_at)}</Descriptions.Item>
+              <Descriptions.Item label="连续失败">{tableRuns.filter((run) => run.run_status === 'failed' || run.run_status === 'timeout').length}</Descriptions.Item>
+            </Descriptions>
+
+            {(task.last_error || task.last_reload_error || latestFailedRun) && (
+              <Alert
+                type={view.severity === 'critical' ? 'error' : 'warning'}
+                message={view.anomaly_type || '最近异常'}
+                description={task.last_reload_error || task.last_error || latestFailedRun?.error_message || '检查最近运行详情'}
+                action={latestFailedRun ? (
+                  <Button size="small" onClick={() => navigate(`/tasks/${task.task_id}/runs/${latestFailedRun.run_id}`)}>
+                    打开运行
+                  </Button>
+                ) : undefined}
+                showIcon
+                style={{ marginTop: 14 }}
+              />
             )}
-          </Descriptions.Item>
-          <Descriptions.Item label="上次耗时">
-            {task.last_run_at
-              ? formatDuration(task.last_duration_ms)
-              : <Text type="secondary">—</Text>}
-          </Descriptions.Item>
-          <Descriptions.Item label="来源路径">
-            {task.source_path
-              ? <Text code>{task.source_path}</Text>
-              : <Text type="secondary">—</Text>}
-          </Descriptions.Item>
-          <Descriptions.Item label="更新时间">
-            {formatTime(task.updated_at)}
-          </Descriptions.Item>
-          <Descriptions.Item label="标签">
-            {Object.keys(task.labels).length > 0 ? (
-              <Space wrap size={[4, 4]}>
-                {Object.entries(task.labels).map(([k, v]) => (
-                  <Tag key={k}>
-                    {k}: {v}
-                  </Tag>
+          </Card>
+
+          <Card className="ops-card" title="依赖信息">
+            <Descriptions column={{ xs: 1, md: 3 }} size="small">
+              <Descriptions.Item label="所属任务组">
+                {def?.pipeline_id ? <Link to={`/pipelines/${def.pipeline_id}`}>{def.pipeline_id}</Link> : <Text type="secondary">未分配</Text>}
+              </Descriptions.Item>
+              <Descriptions.Item label="上游任务">
+                {upstream.length > 0 ? upstream.map((item) => <Tag key={item.task_id}>{item.name}</Tag>) : <Text type="secondary">无</Text>}
+              </Descriptions.Item>
+              <Descriptions.Item label="下游任务">
+                {downstream.length > 0 ? downstream.map((item) => <Tag key={item.task_id}>{item.name}</Tag>) : <Text type="secondary">无</Text>}
+              </Descriptions.Item>
+              <Descriptions.Item label="触发条件">
+                {def?.watch_condition ? <Text code>{def.watch_condition}</Text> : <Text type="secondary">不限制或非依赖触发</Text>}
+              </Descriptions.Item>
+            </Descriptions>
+          </Card>
+
+          <Card
+            className="ops-card"
+            title={`耗时趋势 (${chartRuns.length})`}
+            extra={<Select size="small" value={timeRange} onChange={setTimeRange} options={TIME_RANGE_OPTIONS} style={{ width: 136 }} />}
+          >
+            <DurationChart runs={chartRuns} />
+          </Card>
+
+          <Card className="ops-card" title={`运行历史 (${total})`}>
+            <Table<RunRecord>
+              className="dense-table"
+              columns={runColumns}
+              dataSource={tableRuns}
+              rowKey="run_id"
+              size="small"
+              pagination={{
+                current: page,
+                pageSize,
+                total,
+                showSizeChanger: true,
+                showTotal: (value) => `共 ${value} 条`,
+                onChange: (nextPage, nextPageSize) => {
+                  setPage(nextPage)
+                  setPageSize(nextPageSize)
+                },
+              }}
+              expandable={{
+                rowExpandable: (run) => Boolean(run.summary || run.stdout || run.stderr),
+                expandedRowRender: (run) => (
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    {run.summary && (
+                      <pre className="code-block">{safeJson(run.summary)}</pre>
+                    )}
+                    {run.stdout && <pre className="code-block">{run.stdout}</pre>}
+                    {run.stderr && <pre className="code-block danger-text">{run.stderr}</pre>}
+                  </Space>
+                ),
+              }}
+            />
+          </Card>
+        </Space>
+
+        <Space direction="vertical" size={14} style={{ width: '100%' }}>
+          <Card className="ops-card" title="推荐动作">
+            <Space direction="vertical" style={{ width: '100%' }}>
+              <Paragraph style={{ marginBottom: 4 }}>{taskAdvice(view)}</Paragraph>
+              {latestFailedRun && (
+                <Button block type="primary" onClick={() => navigate(`/tasks/${task.task_id}/runs/${latestFailedRun.run_id}`)}>
+                  打开最近异常运行
+                </Button>
+              )}
+              <Button block onClick={handleRun} disabled={task.status === 'unloaded'} loading={actionLoading}>
+                重跑任务
+              </Button>
+              <Popconfirm
+                title={task.enabled ? '确认禁用该任务？' : '确认启用该任务？'}
+                okText={task.enabled ? '禁用' : '启用'}
+                cancelText="取消"
+                okButtonProps={{ danger: task.enabled }}
+                onConfirm={() => handleToggleEnabled(!task.enabled)}
+              >
+                <Button block danger={task.enabled}>
+                  {task.enabled ? '禁用任务' : '启用任务'}
+                </Button>
+              </Popconfirm>
+            </Space>
+          </Card>
+
+          <Card className="ops-card" title="配置摘要">
+            {def ? (
+              <Descriptions column={1} size="small">
+                <Descriptions.Item label="调度">
+                  {def.trigger === 'manual' ? '手动' : def.cron || def.interval || '未设置'}
+                </Descriptions.Item>
+                <Descriptions.Item label="超时">{def.timeout || '默认'}</Descriptions.Item>
+                <Descriptions.Item label="留痕">
+                  {def.trace?.level || '默认'} / 保留 {def.trace?.retain_days || '默认'} 天
+                </Descriptions.Item>
+                <Descriptions.Item label="标签">
+                  {Object.entries(def.labels || {}).length > 0
+                    ? Object.entries(def.labels || {}).map(([key, value]) => <Tag key={key}>{key}: {value}</Tag>)
+                    : <Text type="secondary">—</Text>}
+                </Descriptions.Item>
+              </Descriptions>
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未找到任务定义" />
+            )}
+          </Card>
+
+          <Card className="ops-card" title="AI 分析">
+            {latestAI ? (
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Space wrap>
+                  <Tag color="purple">{latestAI.analysis_type}</Tag>
+                  <Tag color={latestAI.status === 'success' ? 'green' : 'red'}>{latestAI.status === 'success' ? '成功' : '失败'}</Tag>
+                  <Text type="secondary">{latestAI.model}</Text>
+                </Space>
+                {latestAI.error_message && <Alert type="error" message={latestAI.error_message} showIcon />}
+                <Paragraph ellipsis={{ rows: 5, expandable: true, symbol: '展开' }} style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}>
+                  {firstLine(latestAI.response, 600) || '暂无结论'}
+                </Paragraph>
+                <Text type="secondary">
+                  Token {latestAI.tokens_in + latestAI.tokens_out}，耗时 {formatDuration(latestAI.duration_ms)}
+                </Text>
+              </Space>
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 AI 分析" />
+            )}
+          </Card>
+        </Space>
+      </div>
+
+      {def?.kind === 'data_process' && extractExprs && extractExprs.length > 0 && (
+        <Card className="ops-card" title="数据处理规则和样本" style={{ marginTop: 14 }}>
+          <Descriptions column={{ xs: 1, md: 2 }} size="small" style={{ marginBottom: 12 }}>
+            <Descriptions.Item label="源任务">
+              {dataSourceTaskId ? <Link to={`/tasks/${dataSourceTaskId}`}>{dataSourceTaskId}</Link> : <Text type="secondary">未设置</Text>}
+            </Descriptions.Item>
+            <Descriptions.Item label="表达式数量">{extractExprs.length}</Descriptions.Item>
+          </Descriptions>
+          <Table
+            className="dense-table"
+            dataSource={extractExprs.map((expr, index) => ({ ...expr, key: index }))}
+            pagination={false}
+            size="small"
+            columns={[
+              { title: '输出字段', dataIndex: 'field', render: (value: string) => <Text code>{value}</Text> },
+              { title: '数据源', dataIndex: 'source', render: (value: string) => <Tag>{sourceLabels[value] || value}</Tag> },
+              { title: 'JQ / 字段选择', dataIndex: 'jq_expr', render: (value: string) => <Text code>{value}</Text> },
+              {
+                title: '样本值',
+                render: (_, record: { source: string; jq_expr: string }) => {
+                  const key = `${record.source}::${record.jq_expr}`
+                  const value = jqResults[key]
+                  if (jqLoading && !(key in jqResults)) return <Text type="secondary">加载中</Text>
+                  if (value === undefined || value === null) return <Text type="secondary">—</Text>
+                  return <Text code>{typeof value === 'object' ? safeJson(value) : String(value)}</Text>
+                },
+              },
+              { title: '聚合', dataIndex: 'agg_mode', render: (value: string) => value ? <Tag>{value}</Tag> : <Text type="secondary">无</Text> },
+            ]}
+          />
+          <div style={{ marginTop: 12 }}>
+            {samplesLoading ? (
+              <Spin />
+            ) : Object.keys(samples).length > 0 ? (
+              <Space direction="vertical" style={{ width: '100%' }}>
+                {Object.entries(samples).map(([source, sample]) => (
+                  <Card key={source} size="small" title={<Tag>{sourceLabels[source] || source}</Tag>}>
+                    {sample?.available ? (
+                      <pre className="code-block">{safeJson(sampleDisplayData(sample))}</pre>
+                    ) : (
+                      <Text type="secondary">{sample?.message || '暂无样本数据'}</Text>
+                    )}
+                  </Card>
                 ))}
               </Space>
             ) : (
-              <Text type="secondary">—</Text>
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可预览样本" />
             )}
-          </Descriptions.Item>
-        </Descriptions>
-      </Card>
-
-      {task.kind === 'data_process' && (() => {
-        const def = (task as unknown as { definition?: TaskDefinition }).definition
-        const exprs = def?.params?.extract_exprs as Array<{ field: string; source: string; jq_expr: string; agg_mode?: string }> | undefined
-        const upstreamTaskId = ((def?.params as Record<string, unknown> | undefined)?.source_task_id as string) || def?.watch_task_id || ''
-        const sourceLabels: Record<string, string> = {
-          payload: 'Payload',
-          summary: 'Summary',
-          record: 'Record',
-          'artifact:payload': 'Artifact:Payload',
-          'artifact:stdout': 'Artifact:Stdout',
-          'artifact:stderr': 'Artifact:Stderr',
-        }
-        const aggLabels: Record<string, string> = {
-          '': '无',
-          sum: '求和',
-          avg: '平均值',
-          count: '计数',
-          min: '最小值',
-          max: '最大值',
-        }
-        const uniqueSources = exprs
-          ? [...new Set(exprs.map((e) => e.source).filter(isSamplePreviewSource))]
-          : []
-        const hasUnsupportedArtifactSources = exprs?.some((e) => e.source?.startsWith('artifact:') && e.source !== 'artifact:payload') ?? false
-
-        if (!upstreamTaskId && (!exprs || exprs.length === 0)) return null
-
-        return (
-          <>
-            {upstreamTaskId && (
-              <Card title="上游任务" style={{ marginBottom: 24 }}>
-                {upstreamLoading ? (
-                  <Spin />
-                ) : upstreamError && !upstreamTask ? (
-                  <Alert type="warning" message={upstreamError} showIcon />
-                ) : upstreamTask ? (
-                  <Descriptions bordered column={{ xs: 1, sm: 2, lg: 3 }}>
-                    <Descriptions.Item label="任务名称">
-                      <Link to={`/tasks/${encodeURIComponent(upstreamTaskId)}`}>{upstreamTask.name}</Link>
-                    </Descriptions.Item>
-                    <Descriptions.Item label="类型">
-                      <Tag>{upstreamTask.kind}</Tag>
-                    </Descriptions.Item>
-                    <Descriptions.Item label="状态">
-                      {taskStatusBadge(upstreamTask.status)}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="上次运行">
-                      {formatTime(upstreamTask.last_run_at)}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="运行状态">
-                      {runStatusBadge(upstreamTask.last_run_status)}
-                    </Descriptions.Item>
-                  </Descriptions>
-                ) : (
-                  <Text type="secondary">上游任务未找到或已删除</Text>
-                )}
-              </Card>
-            )}
-
-            {exprs && exprs.length > 0 && (
-              <Card title="数据处理规则" style={{ marginBottom: 24 }}>
-                <Table
-                  dataSource={exprs.map((e, i) => ({ ...e, key: i }))}
-                  pagination={false}
-                  size="small"
-                  columns={[
-                    { title: '输出字段', dataIndex: 'field', key: 'field', render: (v: string) => <Text code>{v}</Text> },
-                    { title: '数据源', dataIndex: 'source', key: 'source', render: (v: string) => <Tag>{sourceLabels[v] || v}</Tag> },
-                    { title: 'JQ 表达式', dataIndex: 'jq_expr', key: 'jq_expr', render: (v: string) => <Text code>{v}</Text> },
-                    { title: '样本值', key: 'jq_sample',
-                      render: (_: unknown, record: { source: string; jq_expr: string }) => {
-                        const key = `${record.source}::${record.jq_expr}`
-                        const val = jqResults[key]
-                        if (jqLoading && !(key in jqResults)) return <Text type="secondary">加载中…</Text>
-                        if (val === undefined || val === null) return <Text type="secondary">—</Text>
-                        return <Text code>{String(val)}</Text>
-                      },
-                    },
-                    { title: '聚合', dataIndex: 'agg_mode', key: 'agg_mode', render: (v: string) => <Tag>{aggLabels[v] || v}</Tag> },
-                  ]}
-                />
-              </Card>
-            )}
-
-            {uniqueSources.length > 0 && (
-              <Card title="样本数据预览" style={{ marginBottom: 24 }}>
-                {samplesLoading ? (
-                  <Spin />
-                ) : samplesError ? (
-                  <Alert type="warning" message={samplesError} showIcon />
-                ) : (
-                  <Collapse
-                    items={uniqueSources.map((src) => {
-                      const sample = samples[src]
-                      const label = sourceLabels[src] || src
-                      return {
-                        key: src,
-                        label: <Tag>{label}</Tag>,
-                        children: sample?.available ? (
-                          <pre
-                            style={{
-                              background: '#f5f5f5',
-                              padding: 12,
-                              borderRadius: 6,
-                              maxHeight: 300,
-                              overflow: 'auto',
-                              fontSize: 12,
-                              margin: 0,
-                            }}
-                          >
-                            {JSON.stringify(sampleDisplayData(sample), null, 2)}
-                          </pre>
-                        ) : (
-                          <Text type="secondary">{sample?.message || '暂无样本数据（上游任务尚无成功运行记录）'}</Text>
-                        ),
-                      }
-                    })}
-                  />
-                )}
-              </Card>
-            )}
-
-            {hasUnsupportedArtifactSources && (
-              <Alert
-                type="info"
-                message="产物类型 (artifact:*) 的数据源暂不支持在线预览"
-                style={{ marginBottom: 24 }}
-                showIcon
-              />
-            )}
-          </>
-        )
-      })()}
-
-      <Card title={`耗时趋势 (${chartRuns.length})`} style={{ marginBottom: 24 }}>
-        <div style={{ marginBottom: 12 }}>
-          <Select
-            value={timeRange}
-            onChange={setTimeRange}
-            options={TIME_RANGE_OPTIONS}
-            style={{ width: 140 }}
-            size="small"
-          />
-        </div>
-        <DurationChart runs={chartRuns} />
-      </Card>
-
-      <Card title={`运行历史 (${total})`} style={{ marginBottom: 24 }}>
-        <Table
-          columns={runColumns}
-          dataSource={tableRuns}
-          rowKey="run_id"
-          pagination={{
-            current: page,
-            pageSize: pageSize,
-            total: total,
-            showSizeChanger: true,
-            showTotal: (t) => `共 ${t} 条`,
-            onChange: (p, ps) => {
-              setPage(p)
-              setPageSize(ps)
-            },
-          }}
-          expandable={{
-            expandedRowRender,
-            rowExpandable: (record: RunRecord) =>
-              !!(record.summary || record.stdout || record.stderr),
-          }}
-          size="small"
-        />
-      </Card>
-
-      <Collapse
-        items={[
-          {
-            key: 'ai',
-            label: `AI 分析 (${analyses.length})`,
-            children:
-              analyses.length === 0 ? (
-                <Text type="secondary">暂无AI分析</Text>
-              ) : (
-                <div>
-                  {analyses.map((a) => {
-                    const isExpanded = expandedAnalyses.has(a.id)
-                    return (
-                      <Card
-                        key={a.id}
-                        size="small"
-                        style={{ marginBottom: 12 }}
-                        title={
-                          <Space wrap>
-                            <Tag color="purple">{a.analysis_type}</Tag>
-                            <Text type="secondary">模型: {a.model}</Text>
-                            <Badge
-                              status={
-                                a.status === 'success' ? 'success' : 'error'
-                              }
-                              text={a.status === 'success' ? '成功' : '失败'}
-                            />
-                          </Space>
-                        }
-                        extra={
-                          <Space>
-                            <Text type="secondary">
-                              Token: {a.tokens_in} 输入 / {a.tokens_out} 输出
-                            </Text>
-                            <Text type="secondary">
-                              {formatTime(a.created_at)}
-                            </Text>
-                          </Space>
-                        }
-                      >
-                        <div style={{ marginBottom: 8 }}>
-                          <Text type="secondary">
-                            耗时: {formatDuration(a.duration_ms)}
-                          </Text>
-                        </div>
-                        <div>
-                          <a
-                            onClick={() => toggleAnalysisExpand(a.id)}
-                            style={{ cursor: 'pointer', userSelect: 'none' }}
-                          >
-                            {isExpanded ? '隐藏' : '显示'}提示词和回复
-                          </a>
-                          {isExpanded && (
-                            <div style={{ marginTop: 8 }}>
-                              <div style={{ marginBottom: 8 }}>
-                                <Text strong>提示词</Text>
-                                <pre
-                                  style={{
-                                    background: '#f5f5f5',
-                                    padding: 12,
-                                    borderRadius: 6,
-                                    maxHeight: 250,
-                                    overflow: 'auto',
-                                    fontSize: 12,
-                                    marginTop: 4,
-                                    whiteSpace: 'pre-wrap',
-                                    wordBreak: 'break-word',
-                                  }}
-                                >
-                                  {a.prompt.length > CHAR_LIMIT
-                                    ? a.prompt.substring(0, CHAR_LIMIT) + '...'
-                                    : a.prompt}
-                                </pre>
-                              </div>
-                              <div>
-                                <Text strong>回复</Text>
-                                <pre
-                                  style={{
-                                    background: '#f5f5f5',
-                                    padding: 12,
-                                    borderRadius: 6,
-                                    maxHeight: 250,
-                                    overflow: 'auto',
-                                    fontSize: 12,
-                                    marginTop: 4,
-                                    whiteSpace: 'pre-wrap',
-                                    wordBreak: 'break-word',
-                                  }}
-                                >
-                                  {a.response.length > CHAR_LIMIT
-                                    ? a.response.substring(0, CHAR_LIMIT) +
-                                      '...'
-                                    : a.response}
-                                </pre>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </Card>
-                    )
-                  })}
-                </div>
-              ),
-          },
-        ]}
-        defaultActiveKey={analyses.length > 0 ? ['ai'] : []}
-        style={{ marginBottom: 24 }}
-      />
+          </div>
+        </Card>
+      )}
     </div>
   )
 }

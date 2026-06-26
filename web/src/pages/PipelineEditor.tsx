@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Typography, Button, Space, Spin, Breadcrumb, Modal, Table, Tag, message } from 'antd'
-import { PlusOutlined, ReloadOutlined, ImportOutlined } from '@ant-design/icons'
+import { Typography, Button, Space, Spin, Breadcrumb, Modal, Table, Tag, message, Alert } from 'antd'
+import { PlusOutlined, ReloadOutlined, ImportOutlined, ApartmentOutlined } from '@ant-design/icons'
 import { useNavigate, useParams } from 'react-router-dom'
 import PipelineCanvas from '../components/pipeline/PipelineCanvas'
 import { fetchPipeline, fetchTaskDefinitions, fetchPipelineTasks, assignTaskToPipeline } from '../api/client'
@@ -82,7 +82,7 @@ export default function PipelineEditor() {
         <div style={{ marginBottom: 16 }}>
           <Breadcrumb
             items={[
-              { title: <a onClick={() => navigate('/pipelines')}>返回流水线列表</a> },
+              { title: <a onClick={() => navigate('/pipelines')}>依赖拓扑</a> },
               { title: pipeline?.name || id },
             ]}
             style={{ marginBottom: 8 }}
@@ -90,7 +90,7 @@ export default function PipelineEditor() {
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               <Title level={3} style={{ margin: 0 }}>
-                流水线: {pipeline?.name}
+                任务组：{pipeline?.name}
               </Title>
               {pipeline?.description && (
                 <Text type="secondary">{pipeline.description}</Text>
@@ -103,18 +103,25 @@ export default function PipelineEditor() {
               <Button icon={<ImportOutlined />} onClick={() => setImportModalOpen(true)}>
                 导入任务
               </Button>
-              <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate(`/task-defs/new?pipeline=${id}`)}>
+              <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate(`/task-defs/new?pipeline=${id}&from=/pipelines/${id}`)}>
                 创建任务
               </Button>
             </Space>
           </div>
+          <Alert
+            type="info"
+            showIcon
+            icon={<ApartmentOutlined />}
+            message="当前拓扑使用现有单上游依赖模型；多上游依赖需要后端 task graph / dependency 表重构后完整启用。"
+            style={{ marginTop: 12 }}
+          />
         </div>
-        <div style={{ flex: 1, minHeight: 0, border: '1px solid #e8e8e8', borderRadius: 8, overflow: 'hidden' }}>
+        <div style={{ flex: 1, minHeight: 640, border: '1px solid #e8e8e8', borderRadius: 8, overflow: 'hidden', background: '#fff' }}>
           <PipelineCanvas key={refreshKey} pipelineId={id!} />
         </div>
       </div>
       <Modal
-        title="导入任务到流水线"
+        title="导入任务到任务组"
         open={importModalOpen}
         onOk={handleImport}
         onCancel={() => { setImportModalOpen(false); setSelectedTaskIds([]) }}
@@ -134,7 +141,7 @@ export default function PipelineEditor() {
             { title: '任务ID', dataIndex: 'task_id', key: 'task_id', render: (id: string) => <Text code>{id}</Text> },
             { title: '名称', dataIndex: 'name', key: 'name' },
             { title: '类型', dataIndex: 'kind', key: 'kind' },
-            { title: '所属管道', dataIndex: 'pipeline_id', key: 'pipeline_id', render: (pid: string | null) => pid ? <Tag>{pid}</Tag> : <Tag color="default">未分配</Tag> },
+            { title: '所属任务组', dataIndex: 'pipeline_id', key: 'pipeline_id', render: (pid: string | null) => pid ? <Tag>{pid}</Tag> : <Tag color="default">未分配</Tag> },
           ]}
           pagination={{ pageSize: 10 }}
           locale={{ emptyText: '没有可导入的任务' }}

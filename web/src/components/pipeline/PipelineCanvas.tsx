@@ -10,13 +10,17 @@ import {
 } from '@xyflow/react'
 import type { Connection, Edge } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { Modal, Select, Card, Empty, message, Space, Button } from 'antd'
+import { Modal, Select, Card, Empty, message, Space, Button, Drawer, Descriptions, Tag, Typography, Segmented } from 'antd'
+import { useNavigate } from 'react-router-dom'
 
 import { fetchPipelineTasks, fetchTasks, updateTaskDefinition } from '../../api/client'
 import type { TaskDefinition, TaskState } from '../../api/types'
 import TaskNode from './TaskNode'
 import DependencyEdge from './DependencyEdge'
 import type { TaskNodeType, DependencyEdgeType } from './types'
+import { KIND_COLORS, KIND_LABELS, runStatusColor, RUN_STATUS_LABELS } from '../../utils/pulseops'
+
+const { Text } = Typography
 
 const NODE_TYPES = { taskNode: TaskNode }
 const EDGE_TYPES = { dependencyEdge: DependencyEdge }
@@ -147,11 +151,19 @@ interface Props {
   pipelineId: string
 }
 
+type StatusFilter = 'all' | 'abnormal' | 'disabled'
+
 export default function PipelineCanvas({ pipelineId }: Props) {
+  const navigate = useNavigate()
   const [nodes, setNodes, onNodesChange] = useNodesState<TaskNodeType>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<DependencyEdgeType>([])
+  const [allNodes, setAllNodes] = useState<TaskNodeType[]>([])
+  const [allEdges, setAllEdges] = useState<DependencyEdgeType[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  const [selectedNode, setSelectedNode] = useState<TaskNodeType | null>(null)
+  const [selectedEdge, setSelectedEdge] = useState<DependencyEdgeType | null>(null)
 
   const taskDefsRef = useRef<TaskDefinition[]>([])
   const loadDataRef = useRef<() => Promise<void>>(async () => {})
@@ -174,11 +186,11 @@ export default function PipelineCanvas({ pipelineId }: Props) {
         node.data.onRefresh = () => { loadDataRef.current() }
       }
 
-      setNodes(graph.nodes)
-      setEdges(graph.edges)
+      setAllNodes(graph.nodes)
+      setAllEdges(graph.edges)
       setError(null)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load pipeline data')
+      setError(err instanceof Error ? err.message : '加载依赖拓扑失败')
     } finally {
       setLoading(false)
     }
@@ -190,9 +202,24 @@ export default function PipelineCanvas({ pipelineId }: Props) {
 
   useEffect(() => {
     loadData()
-    const interval = setInterval(loadData, 10_000)
+    const interval = setInterval(loadData, 15_000)
     return () => clearInterval(interval)
   }, [loadData])
+
+  useEffect(() => {
+    let nextNodes = allNodes
+    if (statusFilter === 'abnormal') {
+      nextNodes = allNodes.filter((node) => {
+        const run = node.data.lastRunStatus
+        return run === 'failed' || run === 'timeout' || node.data.status === 'unloaded'
+      })
+    } else if (statusFilter === 'disabled') {
+      nextNodes = allNodes.filter((node) => !node.data.enabled || node.data.status === 'disabled')
+    }
+    const nodeIDs = new Set(nextNodes.map((node) => node.id))
+    setNodes(nextNodes)
+    setEdges(allEdges.filter((edge) => nodeIDs.has(edge.source) && nodeIDs.has(edge.target)))
+  }, [allEdges, allNodes, setEdges, setNodes, statusFilter])
 
   const onConnect = useCallback(async (connection: Connection) => {
     const sourceId = connection.source
@@ -238,7 +265,7 @@ export default function PipelineCanvas({ pipelineId }: Props) {
           message.success('依赖已创建')
           loadData()
         } catch (err) {
-          message.error(err instanceof Error ? err.message : 'Failed to create dependency')
+          message.error(err instanceof Error ? err.message : '创建依赖失败')
         }
       },
     })
@@ -288,7 +315,7 @@ export default function PipelineCanvas({ pipelineId }: Props) {
             trigger: 'scheduled',
             watch_condition: '',
           })
-          message.success('依赖已移除')
+      message.success('依赖已移除')
           loadData()
         } catch (err) {
           message.error(err instanceof Error ? err.message : '删除失败')
@@ -328,6 +355,14 @@ export default function PipelineCanvas({ pipelineId }: Props) {
     [],
   )
 
+  const selectedTargetDef = selectedNode ? taskDefsRef.current.find((def) => def.task_id === selectedNode.id) : null
+  const selectedUpstream = selectedTargetDef?.watch_task_id
+    ? taskDefsRef.current.find((def) => def.task_id === selectedTargetDef.watch_task_id)
+    : null
+  const selectedDownstream = selectedNode
+    ? taskDefsRef.current.filter((def) => def.watch_task_id === selectedNode.id)
+    : []
+
   if (loading) {
     return (
       <div
@@ -340,7 +375,7 @@ export default function PipelineCanvas({ pipelineId }: Props) {
           fontSize: 14,
         }}
       >
-        Loading pipeline...
+          正在加载依赖拓扑...
       </div>
     )
   }
@@ -357,7 +392,7 @@ export default function PipelineCanvas({ pipelineId }: Props) {
           fontSize: 14,
         }}
       >
-        {error}
+          {error}
       </div>
     )
   }
@@ -374,7 +409,7 @@ export default function PipelineCanvas({ pipelineId }: Props) {
         }}
       >
         <Card>
-          <Empty description="此管道中暂无任务" />
+          <Empty description="此任务组中暂无任务" />
         </Card>
       </div>
     )
@@ -382,13 +417,61 @@ export default function PipelineCanvas({ pipelineId }: Props) {
 
   return (
     <>
+      <div
+        style={{
+          height: 44,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '0 12px',
+          borderBottom: '1px solid #edf0f2',
+          background: '#fff',
+        }}
+      >
+        <Space>
+          <Segmented
+            size="small"
+            value={statusFilter}
+            onChange={(value) => setStatusFilter(value as StatusFilter)}
+            options={[
+              { label: '全部', value: 'all' },
+              { label: '异常', value: 'abnormal' },
+              { label: '禁用', value: 'disabled' },
+            ]}
+          />
+          <Text type="secondary">节点 {nodes.length} / {allNodes.length}，依赖 {edges.length}</Text>
+        </Space>
+        <Space>
+          <Button size="small" onClick={() => {
+            const graph = buildGraph(taskDefsRef.current, [])
+            setAllNodes((prev) => graph.nodes.map((node) => ({
+              ...node,
+              data: prev.find((item) => item.id === node.id)?.data || node.data,
+            })))
+            setAllEdges((prev) => prev)
+          }}>
+            自动布局
+          </Button>
+          <Button size="small" onClick={() => loadData()}>
+            刷新
+          </Button>
+        </Space>
+      </div>
       <ReactFlow
         nodes={nodes}
         edges={edges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
-        onEdgeClick={onEdgeClick}
+        onNodeClick={(_, node) => {
+          setSelectedNode(node as TaskNodeType)
+          setSelectedEdge(null)
+        }}
+        onEdgeClick={(event, edge) => {
+          onEdgeClick(event, edge)
+          setSelectedEdge(edge as DependencyEdgeType)
+          setSelectedNode(null)
+        }}
         onEdgesDelete={onEdgesDelete}
         nodeTypes={NODE_TYPES}
         edgeTypes={EDGE_TYPES}
@@ -400,12 +483,69 @@ export default function PipelineCanvas({ pipelineId }: Props) {
         panOnScrollSpeed={1}
         selectionOnDrag
         attributionPosition="bottom-left"
-        style={{ background: '#f5f5f5' }}
+        style={{ background: '#f7f9fb', height: 'calc(100% - 44px)', minHeight: 590 }}
         connectionLineStyle={{ stroke: '#faad14', strokeWidth: 1.5, strokeDasharray: '5,5' }}
       >
         <Controls />
         <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#d9d9d9" />
       </ReactFlow>
+
+      <Drawer
+        title={selectedNode ? '节点详情' : '依赖详情'}
+        open={Boolean(selectedNode || selectedEdge)}
+        onClose={() => {
+          setSelectedNode(null)
+          setSelectedEdge(null)
+        }}
+        width={420}
+      >
+        {selectedNode && (
+          <Space direction="vertical" size={14} style={{ width: '100%' }}>
+            <Descriptions column={1} size="small">
+              <Descriptions.Item label="任务名称">{selectedNode.data.name}</Descriptions.Item>
+              <Descriptions.Item label="任务 ID"><Text code>{selectedNode.data.taskId}</Text></Descriptions.Item>
+              <Descriptions.Item label="类型">
+                <Tag color={KIND_COLORS[selectedNode.data.kind] || 'default'}>
+                  {KIND_LABELS[selectedNode.data.kind] || selectedNode.data.kind}
+                </Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="启用">{selectedNode.data.enabled ? '是' : '否'}</Descriptions.Item>
+              <Descriptions.Item label="运行态">{selectedNode.data.status || '—'}</Descriptions.Item>
+              <Descriptions.Item label="最近结果">
+                {selectedNode.data.lastRunStatus
+                  ? <Tag color={runStatusColor(selectedNode.data.lastRunStatus)}>{RUN_STATUS_LABELS[selectedNode.data.lastRunStatus] || selectedNode.data.lastRunStatus}</Tag>
+                  : <Text type="secondary">—</Text>}
+              </Descriptions.Item>
+              <Descriptions.Item label="上游任务">
+                {selectedUpstream ? selectedUpstream.name : <Text type="secondary">无</Text>}
+              </Descriptions.Item>
+              <Descriptions.Item label="下游任务">
+                {selectedDownstream.length > 0
+                  ? selectedDownstream.map((item) => <Tag key={item.task_id}>{item.name}</Tag>)
+                  : <Text type="secondary">无</Text>}
+              </Descriptions.Item>
+            </Descriptions>
+            <Space wrap>
+              <Button type="primary" onClick={() => navigate(`/tasks/${selectedNode.data.taskId}?from=/pipelines/${pipelineId}`)}>
+                查看详情
+              </Button>
+              <Button onClick={() => navigate(`/task-defs/${selectedNode.data.taskId}/edit?from=/pipelines/${pipelineId}`)}>
+                编辑配置
+              </Button>
+              <Button onClick={() => navigate(`/task-defs/new?upstream_task_id=${selectedNode.data.taskId}&upstream_name=${encodeURIComponent(selectedNode.data.name)}&pipeline=${pipelineId}&from=/pipelines/${pipelineId}`)}>
+                创建下游
+              </Button>
+            </Space>
+          </Space>
+        )}
+        {selectedEdge && (
+          <Descriptions column={1} size="small">
+            <Descriptions.Item label="上游">{selectedEdge.source}</Descriptions.Item>
+            <Descriptions.Item label="下游">{selectedEdge.target}</Descriptions.Item>
+            <Descriptions.Item label="触发条件">{selectedEdge.data?.condition || '总是触发'}</Descriptions.Item>
+          </Descriptions>
+        )}
+      </Drawer>
 
       <Modal
         title="编辑依赖"

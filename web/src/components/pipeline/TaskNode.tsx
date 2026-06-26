@@ -73,10 +73,6 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
   const borderColor = KIND_COLORS[kind] || '#d9d9d9'
   const dotColor = STATUS_DOT_COLORS[status || ''] || '#d9d9d9'
 
-  const handleClick = () => {
-    navigate(editUrl)
-  }
-
   const handleMenuClick = async ({ key }: { key: string }) => {
     switch (key) {
       case 'run':
@@ -85,7 +81,7 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
           message.success('任务已触发')
           onRefresh?.()
         } catch (err) {
-          message.error(err instanceof Error ? err.message : 'Failed to trigger task')
+          message.error(err instanceof Error ? err.message : '触发任务失败')
         }
         break
       case 'toggle':
@@ -99,7 +95,7 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
           }
           onRefresh?.()
         } catch (err) {
-          message.error(err instanceof Error ? err.message : 'Failed to toggle task')
+            message.error(err instanceof Error ? err.message : '切换启用状态失败')
         }
         break
       case 'detail':
@@ -117,10 +113,10 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
           onOk: async () => {
             try {
               await deleteTaskDefinition(taskId)
-               message.success('任务已删除')
-              window.location.reload()
+              message.success('任务已删除')
+              onRefresh?.()
             } catch (err) {
-              message.error(err instanceof Error ? err.message : 'Failed to delete task')
+              message.error(err instanceof Error ? err.message : '删除任务失败')
             }
           },
         })
@@ -143,7 +139,7 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
     { key: 'edit', label: '编辑', icon: <EditOutlined /> },
     {
       key: 'add-downstream',
-      label: '添加下游任务',
+      label: '创建下游任务',
       icon: <PlusCircleOutlined />,
       children: Object.entries(KIND_LABELS).map(([kindValue, label]) => ({
         key: `add-downstream:${kindValue}`,
@@ -157,7 +153,6 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
   return (
     <Dropdown menu={{ items: menuItems, onClick: handleMenuClick }} trigger={['contextMenu']}>
       <div
-        onClick={handleClick}
         style={{
           width: 240,
           padding: '12px 14px',

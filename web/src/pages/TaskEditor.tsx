@@ -64,9 +64,9 @@ export default function TaskEditor() {
     Record<string, unknown> | undefined
   >(undefined)
   const getDefaultTitle = () => {
-    if (isEdit) return 'Edit Task'
+    if (isEdit) return '编辑任务'
     if (upstreamName) return `为 "${upstreamName}" 创建下游任务`
-    return 'Create Task'
+    return '创建任务'
   }
   const [pageTitle, setPageTitle] = useState(getDefaultTitle())
   const [loading, setLoading] = useState(isEdit)
@@ -82,10 +82,10 @@ export default function TaskEditor() {
       setLoading(true)
       const def = await fetchTaskDefinition(id)
       setInitialValues(prepareInitialValues(def))
-      setPageTitle(`Edit Task: ${def.name}`)
+      setPageTitle(`编辑任务：${def.name}`)
       setError(null)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load task')
+      setError(err instanceof Error ? err.message : '加载任务失败')
     } finally {
       setLoading(false)
     }
@@ -136,14 +136,14 @@ export default function TaskEditor() {
       }
       if (isEdit && id) {
         await updateTaskDefinition(id, def)
-        message.success('Task updated')
+        message.success('任务已更新')
       } else {
         await createTaskDefinition(def)
-        message.success('Task created')
+        message.success('任务已创建')
       }
       navigate(returnUrl)
     } catch (err) {
-      message.error(err instanceof Error ? err.message : 'Operation failed')
+      message.error(err instanceof Error ? err.message : '操作失败')
     }
   }
 
@@ -173,7 +173,7 @@ export default function TaskEditor() {
         </Link>
         <Alert
           type="error"
-          message="Failed to load task"
+          message="加载任务失败"
           description={error}
           showIcon
         />
@@ -190,14 +190,17 @@ export default function TaskEditor() {
         </Space>
       </Link>
 
-      <Title level={2} style={{ marginBottom: 24 }}>
-        {pageTitle}
-      </Title>
+      <div className="page-header">
+        <div>
+          <Title level={2} className="page-title">{pageTitle}</Title>
+          <span className="page-subtitle">默认使用向导填写；需要底层字段时展开高级 JSON 预览。</span>
+        </div>
+      </div>
 
-      <Card title="所属管道" style={{ marginBottom: 24 }}>
+      <Card className="ops-card" title="所属任务组" style={{ marginBottom: 16 }}>
         <Select
           allowClear
-          placeholder="选择所属管道（可选）"
+          placeholder="选择所属任务组（可选）"
           value={selectedPipelineId}
           onChange={(val) => setSelectedPipelineId(val)}
           options={pipelines.map((p) => ({ value: p.id, label: p.name }))}
