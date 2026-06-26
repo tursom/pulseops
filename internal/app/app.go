@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -20,6 +21,7 @@ import (
 
 type App struct {
 	config        config.Config
+	platform      config.PlatformConfigSummary
 	logger        *slog.Logger
 	store         *store.PostgresStore
 	artifactStore store.ArtifactStore
@@ -36,10 +38,24 @@ func New(ctx context.Context, baseDir, configPath, staticDir string, logger *slo
 	if err != nil {
 		return nil, err
 	}
-	artifactStore, err := store.NewMinIOArtifactStore(cfg.ArtifactStore)
+	var savedPlatform *config.PlatformConfigSummary
+	if loaded, err := stateStore.LoadPlatformConfig(ctx); err == nil {
+		savedPlatform = &loaded
+		applyPlatformConfigSummary(&cfg, loaded)
+	} else if err != nil && !errors.Is(err, store.ErrMetaNotFound) {
+		logger.WarnContext(ctx, "load platform config override failed", "err", err)
+	}
+	platform := buildPlatformSummary(cfg)
+	var artifactStore store.ArtifactStore
+	artifactStore, err = store.NewMinIOArtifactStore(cfg.ArtifactStore)
 	if err != nil {
-		_ = stateStore.Close()
-		return nil, err
+		logger.WarnContext(ctx, "artifact store initialization failed, continuing in degraded mode", "err", err)
+		platform.Mode = "degraded"
+		platform.Applied = false
+		platform.ArtifactStore.Status = "config_error"
+		platform.ArtifactStore.Error = err.Error()
+		platform.Warnings = append(platform.Warnings, "artifact store: "+err.Error())
+		artifactStore = store.DisabledArtifactStore{Reason: err.Error()}
 	}
 	traceManager := trace.NewManager(logger, artifactStore, 4096)
 	// Load settings from DB
@@ -50,6 +66,9 @@ func New(ctx context.Context, baseDir, configPath, staticDir string, logger *slo
 			Sinks:           []config.SinkEntry{{Name: "postgres_main", Kind: "postgres"}},
 			MaxPayloadBytes: 4096,
 		}
+	}
+	if settings.MaxPayloadBytes > 0 {
+		traceManager.SetMaxPayloadBytes(settings.MaxPayloadBytes)
 	}
 	// Seed from TOML if DB has no sinks (first run)
 	if len(settings.Sinks) == 0 && len(cfg.Trace.Sinks) > 0 {
@@ -120,7 +139,12 @@ func New(ctx context.Context, baseDir, configPath, staticDir string, logger *slo
 		aiDriver := ai.NewDriver(aiClient, stateStore, logger)
 		if cfg.AI.PluginDir != "" {
 			if err := aiDriver.LoadPlugins(cfg.AI.PluginDir, logger); err != nil {
-				return nil, fmt.Errorf("load AI plugins: %w", err)
+				logger.WarnContext(ctx, "load AI plugins failed, continuing without plugins", "err", err)
+				platform.Mode = "degraded"
+				platform.Applied = false
+				platform.AI.Status = "config_error"
+				platform.AI.Error = err.Error()
+				platform.Warnings = append(platform.Warnings, "ai plugins: "+err.Error())
 			}
 		}
 		driverList = append(driverList, aiDriver)
@@ -144,7 +168,14 @@ func New(ctx context.Context, baseDir, configPath, staticDir string, logger *slo
 		logger.ErrorContext(ctx, "load task definitions from db failed", "err", err)
 	}
 
-	handler := api.Routes(staticDir, manager, stateStore, artifactStore, logger)
+	if savedPlatform != nil {
+		platform.Applied = true
+		if len(savedPlatform.Warnings) > 0 {
+			platform.Warnings = append(platform.Warnings, savedPlatform.Warnings...)
+		}
+	}
+
+	handler := api.Routes(staticDir, manager, stateStore, artifactStore, traceManager, platform, logger)
 	server := &http.Server{
 		Addr:         cfg.Server.Addr,
 		Handler:      handler,
@@ -156,12 +187,100 @@ func New(ctx context.Context, baseDir, configPath, staticDir string, logger *slo
 	}
 	return &App{
 		config:        cfg,
+		platform:      platform,
 		logger:        logger,
 		store:         stateStore,
 		artifactStore: artifactStore,
 		manager:       manager,
 		server:        server,
 	}, nil
+}
+
+func applyPlatformConfigSummary(cfg *config.Config, summary config.PlatformConfigSummary) {
+	if summary.ArtifactStore.Kind != "" {
+		cfg.ArtifactStore.Kind = summary.ArtifactStore.Kind
+	}
+	if summary.ArtifactStore.Provider != "" {
+		cfg.ArtifactStore.Provider = summary.ArtifactStore.Provider
+	}
+	if summary.ArtifactStore.Bucket != "" {
+		cfg.ArtifactStore.Bucket = summary.ArtifactStore.Bucket
+	}
+	if summary.ArtifactStore.Endpoint != "" {
+		cfg.ArtifactStore.Endpoint = summary.ArtifactStore.Endpoint
+	}
+	if summary.ArtifactStore.Region != "" {
+		cfg.ArtifactStore.Region = summary.ArtifactStore.Region
+	}
+	cfg.ArtifactStore.BasePath = summary.ArtifactStore.BasePath
+	cfg.ArtifactStore.ForcePathStyle = summary.ArtifactStore.ForcePathStyle
+	cfg.ArtifactStore.UseSSL = summary.ArtifactStore.UseSSL
+	if summary.ArtifactStore.AccessKey != "" {
+		cfg.ArtifactStore.AccessKey = summary.ArtifactStore.AccessKey
+	}
+	if summary.ArtifactStore.SecretKey != "" {
+		cfg.ArtifactStore.SecretKey = summary.ArtifactStore.SecretKey
+	}
+	if summary.ArtifactStore.PresignTTL != "" {
+		_ = cfg.ArtifactStore.PresignTTL.UnmarshalText([]byte(summary.ArtifactStore.PresignTTL))
+	}
+	cfg.AI.Enabled = summary.AI.Enabled
+	if summary.AI.Endpoint != "" {
+		cfg.AI.Endpoint = summary.AI.Endpoint
+	}
+	if summary.AI.Model != "" {
+		cfg.AI.Model = summary.AI.Model
+	}
+	if summary.AI.Timeout != "" {
+		_ = cfg.AI.DefaultTimeout.UnmarshalText([]byte(summary.AI.Timeout))
+	}
+	if summary.AI.MaxTokens > 0 {
+		cfg.AI.MaxTokens = summary.AI.MaxTokens
+	}
+	cfg.AI.Temperature = summary.AI.Temperature
+	if summary.AI.PluginDir != "" {
+		cfg.AI.PluginDir = config.ResolvePath(cfg.BaseDir, summary.AI.PluginDir)
+	}
+}
+
+func buildPlatformSummary(cfg config.Config) config.PlatformConfigSummary {
+	mode := "active"
+	return config.PlatformConfigSummary{
+		Mode:     mode,
+		Applied:  true,
+		Warnings: []string{},
+		Server: config.ServerConfigSummary{
+			Addr: cfg.Server.Addr,
+		},
+		Task: config.TaskConfigSummary{
+			ConfigDir: cfg.Task.ConfigDir,
+		},
+		State: config.StateConfigSummary{
+			Backend: cfg.State.Backend,
+		},
+		ArtifactStore: config.ArtifactConfigSummary{
+			Kind:           cfg.ArtifactStore.Kind,
+			Provider:       cfg.ArtifactStore.Provider,
+			Bucket:         cfg.ArtifactStore.Bucket,
+			Endpoint:       cfg.ArtifactStore.Endpoint,
+			Region:         cfg.ArtifactStore.Region,
+			BasePath:       cfg.ArtifactStore.BasePath,
+			PresignTTL:     cfg.ArtifactStore.PresignTTL.String(),
+			ForcePathStyle: cfg.ArtifactStore.ForcePathStyle,
+			UseSSL:         cfg.ArtifactStore.UseSSL,
+			Status:         "active",
+		},
+		AI: config.AIConfigSummary{
+			Enabled:     cfg.AI.Enabled,
+			Endpoint:    cfg.AI.Endpoint,
+			Model:       cfg.AI.Model,
+			Timeout:     cfg.AI.DefaultTimeout.String(),
+			MaxTokens:   cfg.AI.MaxTokens,
+			Temperature: cfg.AI.Temperature,
+			PluginDir:   cfg.AI.PluginDir,
+			Status:      "active",
+		},
+	}
 }
 
 func (a *App) Start(ctx context.Context) error {

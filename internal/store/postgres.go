@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"pulseops/internal/config"
@@ -98,9 +99,39 @@ type RunRecord struct {
 	Labels       map[string]string `json:"labels,omitempty"`
 }
 
+type RunListItem struct {
+	RunID         string            `json:"run_id"`
+	TaskID        string            `json:"task_id"`
+	TaskName      string            `json:"task_name,omitempty"`
+	TaskKind      string            `json:"task_kind"`
+	TriggerType   string            `json:"trigger_type"`
+	RunStatus     string            `json:"run_status"`
+	CheckStatus   string            `json:"check_status"`
+	StartedAt     time.Time         `json:"started_at"`
+	EndedAt       time.Time         `json:"ended_at"`
+	DurationMS    int64             `json:"duration_ms"`
+	ErrorMessage  string            `json:"error_message,omitempty"`
+	Summary       map[string]any    `json:"summary,omitempty"`
+	HasPayload    bool              `json:"has_payload"`
+	ArtifactCount int               `json:"artifact_count"`
+	FindingCount  int               `json:"finding_count"`
+	Labels        map[string]string `json:"labels,omitempty"`
+}
+
 type PaginatedRuns struct {
-	Records []RunRecord `json:"records"`
-	Total   int         `json:"total"`
+	Records []RunListItem `json:"records"`
+	Total   int           `json:"total"`
+}
+
+type RunQuery struct {
+	TaskID      string
+	Kind        string
+	RunStatus   string
+	CheckStatus string
+	Since       time.Duration
+	Limit       int
+	Offset      int
+	Labels      map[string]string
 }
 
 type Repository interface {
@@ -110,6 +141,9 @@ type Repository interface {
 	InsertRun(ctx context.Context, record RunRecord) error
 	ListRuns(ctx context.Context, taskID string, limit, offset int, since time.Duration) ([]RunRecord, error)
 	CountRuns(ctx context.Context, taskID string, since time.Duration) (int, error)
+	ListRunItems(ctx context.Context, taskID string, limit, offset int, since time.Duration) ([]RunListItem, error)
+	ListRunsAcrossTasks(ctx context.Context, query RunQuery) ([]RunListItem, int, error)
+	ListConsecutiveFailures(ctx context.Context, taskIDs []string) (map[string]int, error)
 	ListRunStats(ctx context.Context, taskID string, since time.Duration) ([]RunStat, error)
 	GetRun(ctx context.Context, taskID, runID string) (RunRecord, error)
 	ListArtifactsByRun(ctx context.Context, taskID, runID string) ([]ArtifactRef, error)
@@ -122,6 +156,8 @@ type Repository interface {
 	SetMeta(ctx context.Context, key, value string) error
 	LoadGlobalSettings(ctx context.Context) (config.GlobalSettings, error)
 	SaveGlobalSettings(ctx context.Context, s config.GlobalSettings) error
+	LoadPlatformConfig(ctx context.Context) (config.PlatformConfigSummary, error)
+	SavePlatformConfig(ctx context.Context, summary config.PlatformConfigSummary) error
 	ListTaskDefinitions(ctx context.Context) ([]config.TaskDefinition, error)
 	GetTaskDefinition(ctx context.Context, taskID string) (*config.TaskDefinition, error)
 	InsertTaskDefinition(ctx context.Context, def config.TaskDefinition) error
@@ -135,6 +171,11 @@ type Repository interface {
 	DeletePipeline(ctx context.Context, id string) error
 	ListTaskDefinitionsByPipeline(ctx context.Context, pipelineID string) ([]config.TaskDefinition, error)
 	UpdateTaskPipeline(ctx context.Context, taskID string, pipelineID *string) error
+	ListTaskDependencies(ctx context.Context) ([]config.TaskDependency, error)
+	ListTaskDependenciesByPipeline(ctx context.Context, pipelineID string) ([]config.TaskDependency, error)
+	ReplaceTaskDependencies(ctx context.Context, taskID string, dependencies []config.TaskDependency) error
+	UpsertTaskDependency(ctx context.Context, dependency config.TaskDependency) (config.TaskDependency, error)
+	DeleteTaskDependency(ctx context.Context, id string) error
 }
 
 type PostgresStore struct {
@@ -378,6 +419,69 @@ func (s *PostgresStore) ListRuns(ctx context.Context, taskID string, limit, offs
 	return records, nil
 }
 
+func (s *PostgresStore) ListRunItems(ctx context.Context, taskID string, limit, offset int, since time.Duration) ([]RunListItem, error) {
+	query := RunQuery{TaskID: taskID, Limit: limit, Offset: offset, Since: since}
+	items, _, err := s.ListRunsAcrossTasks(ctx, query)
+	return items, err
+}
+
+func (s *PostgresStore) ListRunsAcrossTasks(ctx context.Context, query RunQuery) ([]RunListItem, int, error) {
+	if query.Limit <= 0 {
+		query.Limit = 20
+	}
+	if query.Offset < 0 {
+		query.Offset = 0
+	}
+
+	where, args := buildRunQueryWhere(query)
+	countSQL := `SELECT COUNT(*) FROM runs r ` + where
+	var total int
+	if err := s.db.QueryRowContext(ctx, countSQL, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count runs across tasks: %w", err)
+	}
+
+	args = append(args, query.Limit, query.Offset)
+	limitIndex := len(args) - 1
+	offsetIndex := len(args)
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT r.run_id, r.task_id, COALESCE(td.name, ''), r.task_kind, r.trigger_type,
+		       r.run_status, r.check_status, r.started_at, r.ended_at, r.duration_ms,
+		       r.error_message, r.summary_json, r.payload IS NOT NULL,
+		       COALESCE(a.artifact_count, 0), COALESCE(f.finding_count, 0), r.labels_json
+		FROM runs r
+		LEFT JOIN task_definitions td ON td.task_id = r.task_id
+		LEFT JOIN (
+			SELECT run_id, COUNT(*) AS artifact_count
+			FROM artifacts
+			GROUP BY run_id
+		) a ON a.run_id = r.run_id
+		LEFT JOIN (
+			SELECT run_id, COUNT(*) AS finding_count
+			FROM findings
+			GROUP BY run_id
+		) f ON f.run_id = r.run_id
+		%s
+		ORDER BY r.started_at DESC
+		LIMIT $%d OFFSET $%d
+	`, where, limitIndex, offsetIndex), args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list runs across tasks: %w", err)
+	}
+	defer rows.Close()
+	var items []RunListItem
+	for rows.Next() {
+		item, err := scanRunListItem(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
 func (s *PostgresStore) CountRuns(ctx context.Context, taskID string, since time.Duration) (int, error) {
 	if since > 0 {
 		cutoff := time.Now().UTC().Add(-since)
@@ -392,6 +496,48 @@ func (s *PostgresStore) CountRuns(ctx context.Context, taskID string, since time
 		`SELECT COUNT(*) FROM runs WHERE task_id = $1`,
 		taskID).Scan(&n)
 	return n, err
+}
+
+func (s *PostgresStore) ListConsecutiveFailures(ctx context.Context, taskIDs []string) (map[string]int, error) {
+	result := make(map[string]int, len(taskIDs))
+	for _, taskID := range taskIDs {
+		result[taskID] = 0
+	}
+	if len(taskIDs) == 0 {
+		return result, nil
+	}
+	placeholders := make([]string, 0, len(taskIDs))
+	args := make([]any, 0, len(taskIDs))
+	for i, taskID := range taskIDs {
+		placeholders = append(placeholders, fmt.Sprintf("$%d", i+1))
+		args = append(args, taskID)
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT task_id, run_status, check_status
+		FROM runs
+		WHERE task_id IN (%s)
+		ORDER BY task_id ASC, started_at DESC
+	`, strings.Join(placeholders, ",")), args...)
+	if err != nil {
+		return nil, fmt.Errorf("list consecutive failures: %w", err)
+	}
+	defer rows.Close()
+	seenSuccess := map[string]bool{}
+	for rows.Next() {
+		var taskID, runStatus, checkStatus string
+		if err := rows.Scan(&taskID, &runStatus, &checkStatus); err != nil {
+			return nil, fmt.Errorf("scan consecutive failures: %w", err)
+		}
+		if seenSuccess[taskID] {
+			continue
+		}
+		if runStatus == "failed" || runStatus == "timeout" || checkStatus == "fail" {
+			result[taskID]++
+			continue
+		}
+		seenSuccess[taskID] = true
+	}
+	return result, rows.Err()
 }
 
 func (s *PostgresStore) ListRunStats(ctx context.Context, taskID string, since time.Duration) ([]RunStat, error) {
@@ -632,6 +778,66 @@ func scanRunRecord(scanner scanner) (RunRecord, error) {
 	return record, nil
 }
 
+func scanRunListItem(scanner scanner) (RunListItem, error) {
+	var (
+		item       RunListItem
+		summaryRaw []byte
+		labelsRaw  []byte
+	)
+	if err := scanner.Scan(
+		&item.RunID, &item.TaskID, &item.TaskName, &item.TaskKind, &item.TriggerType,
+		&item.RunStatus, &item.CheckStatus, &item.StartedAt, &item.EndedAt, &item.DurationMS,
+		&item.ErrorMessage, &summaryRaw, &item.HasPayload, &item.ArtifactCount, &item.FindingCount,
+		&labelsRaw,
+	); err != nil {
+		return RunListItem{}, err
+	}
+	if err := unmarshalMapBytes(summaryRaw, &item.Summary); err != nil {
+		return RunListItem{}, err
+	}
+	if err := unmarshalStringMapBytes(labelsRaw, &item.Labels); err != nil {
+		return RunListItem{}, err
+	}
+	return item, nil
+}
+
+func buildRunQueryWhere(query RunQuery) (string, []any) {
+	var clauses []string
+	var args []any
+	add := func(clause string, value any) {
+		args = append(args, value)
+		clauses = append(clauses, fmt.Sprintf(clause, len(args)))
+	}
+	if query.TaskID != "" {
+		add("r.task_id = $%d", query.TaskID)
+	}
+	if query.Kind != "" {
+		add("r.task_kind = $%d", query.Kind)
+	}
+	if query.RunStatus != "" {
+		add("r.run_status = $%d", query.RunStatus)
+	}
+	if query.CheckStatus != "" {
+		add("r.check_status = $%d", query.CheckStatus)
+	}
+	if query.Since > 0 {
+		add("r.started_at >= $%d", time.Now().UTC().Add(-query.Since))
+	}
+	for key, value := range query.Labels {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		args = append(args, key, value)
+		clauses = append(clauses, fmt.Sprintf("r.labels_json ->> $%d = $%d", len(args)-1, len(args)))
+	}
+	if len(clauses) == 0 {
+		return "", args
+	}
+	return "WHERE " + strings.Join(clauses, " AND "), args
+}
+
 func (s *PostgresStore) listFindings(ctx context.Context, runID string) ([]Finding, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT finding_id, run_id, task_id, sample_id, reason, data_json
@@ -691,6 +897,7 @@ const (
 	settingsKeySinks      = "trace_sinks"
 	settingsKeyMaxBytes   = "trace_max_payload_bytes"
 	settingsKeyRetainDays = "trace_default_retain_days"
+	platformConfigKey     = "platform_config"
 )
 
 func (s *PostgresStore) LoadGlobalSettings(ctx context.Context) (config.GlobalSettings, error) {
@@ -715,6 +922,29 @@ func (s *PostgresStore) SaveGlobalSettings(ctx context.Context, gs config.Global
 		return err
 	}
 	return nil
+}
+
+func (s *PostgresStore) LoadPlatformConfig(ctx context.Context) (config.PlatformConfigSummary, error) {
+	raw, err := s.GetMeta(ctx, platformConfigKey)
+	if err != nil {
+		if errors.Is(err, ErrMetaNotFound) {
+			return config.PlatformConfigSummary{}, ErrMetaNotFound
+		}
+		return config.PlatformConfigSummary{}, err
+	}
+	var summary config.PlatformConfigSummary
+	if err := json.Unmarshal([]byte(raw), &summary); err != nil {
+		return config.PlatformConfigSummary{}, fmt.Errorf("decode platform config: %w", err)
+	}
+	return summary, nil
+}
+
+func (s *PostgresStore) SavePlatformConfig(ctx context.Context, summary config.PlatformConfigSummary) error {
+	raw, err := json.Marshal(summary)
+	if err != nil {
+		return err
+	}
+	return s.SetMeta(ctx, platformConfigKey, string(raw))
 }
 
 func (s *PostgresStore) ListTaskDefinitions(ctx context.Context) ([]config.TaskDefinition, error) {
@@ -750,7 +980,13 @@ func (s *PostgresStore) ListTaskDefinitions(ctx context.Context) ([]config.TaskD
 		}
 		defs = append(defs, d)
 	}
-	return defs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.attachDependencies(ctx, defs); err != nil {
+		return nil, err
+	}
+	return defs, nil
 }
 
 func (s *PostgresStore) GetTaskDefinition(ctx context.Context, taskID string) (*config.TaskDefinition, error) {
@@ -783,6 +1019,15 @@ func (s *PostgresStore) GetTaskDefinition(ctx context.Context, taskID string) (*
 	if len(d.AlertJSON) > 0 {
 		_ = json.Unmarshal(d.AlertJSON, &d.Alert)
 	}
+	deps, err := s.ListTaskDependencies(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, dep := range deps {
+		if dep.DownstreamTaskID == d.TaskID {
+			d.Dependencies = append(d.Dependencies, dep)
+		}
+	}
 	return &d, nil
 }
 
@@ -800,6 +1045,11 @@ func (s *PostgresStore) InsertTaskDefinition(ctx context.Context, def config.Tas
 		string(def.TraceJSON), string(def.AlertJSON), def.PipelineID, now)
 	if err != nil {
 		return fmt.Errorf("insert task definition %s: %w", def.TaskID, err)
+	}
+	if def.Dependencies != nil {
+		if err := s.ReplaceTaskDependencies(ctx, def.TaskID, def.Dependencies); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -821,6 +1071,11 @@ func (s *PostgresStore) UpdateTaskDefinition(ctx context.Context, def config.Tas
 		string(def.TraceJSON), string(def.AlertJSON), def.PipelineID, now)
 	if err != nil {
 		return fmt.Errorf("update task definition %s: %w", def.TaskID, err)
+	}
+	if def.Dependencies != nil {
+		if err := s.ReplaceTaskDependencies(ctx, def.TaskID, def.Dependencies); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -932,7 +1187,13 @@ func (s *PostgresStore) ListTaskDefinitionsByPipeline(ctx context.Context, pipel
 		}
 		defs = append(defs, d)
 	}
-	return defs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.attachDependencies(ctx, defs); err != nil {
+		return nil, err
+	}
+	return defs, nil
 }
 
 func (s *PostgresStore) UpdateTaskPipeline(ctx context.Context, taskID string, pipelineID *string) error {
@@ -944,6 +1205,164 @@ func (s *PostgresStore) UpdateTaskPipeline(ctx context.Context, taskID string, p
 		return fmt.Errorf("update task pipeline %s: %w", taskID, err)
 	}
 	return nil
+}
+
+func (s *PostgresStore) ListTaskDependencies(ctx context.Context) ([]config.TaskDependency, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, upstream_task_id, downstream_task_id, condition, source_key, params_json, created_at, updated_at
+		FROM task_dependencies
+		ORDER BY upstream_task_id, downstream_task_id, source_key`)
+	if err != nil {
+		return nil, fmt.Errorf("list task dependencies: %w", err)
+	}
+	defer rows.Close()
+	var deps []config.TaskDependency
+	for rows.Next() {
+		dep, err := scanTaskDependency(rows)
+		if err != nil {
+			return nil, err
+		}
+		deps = append(deps, dep)
+	}
+	return deps, rows.Err()
+}
+
+func (s *PostgresStore) ListTaskDependenciesByPipeline(ctx context.Context, pipelineID string) ([]config.TaskDependency, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT d.id, d.upstream_task_id, d.downstream_task_id, d.condition, d.source_key,
+		       d.params_json, d.created_at, d.updated_at
+		FROM task_dependencies d
+		JOIN task_definitions td ON td.task_id = d.downstream_task_id
+		WHERE td.pipeline_id = $1
+		ORDER BY d.upstream_task_id, d.downstream_task_id, d.source_key`, pipelineID)
+	if err != nil {
+		return nil, fmt.Errorf("list task dependencies by pipeline: %w", err)
+	}
+	defer rows.Close()
+	var deps []config.TaskDependency
+	for rows.Next() {
+		dep, err := scanTaskDependency(rows)
+		if err != nil {
+			return nil, err
+		}
+		deps = append(deps, dep)
+	}
+	return deps, rows.Err()
+}
+
+func (s *PostgresStore) ReplaceTaskDependencies(ctx context.Context, taskID string, dependencies []config.TaskDependency) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin replace task dependencies: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM task_dependencies WHERE downstream_task_id = $1`, taskID); err != nil {
+		return fmt.Errorf("delete task dependencies %s: %w", taskID, err)
+	}
+	for _, dep := range dependencies {
+		if dep.UpstreamTaskID == "" {
+			return fmt.Errorf("dependency upstream_task_id is required")
+		}
+		dep.DownstreamTaskID = taskID
+		if dep.ID == "" {
+			dep.ID = uuid.NewString()
+		}
+		paramsJSON, err := marshalJSONBytes(dep.Params)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO task_dependencies (
+				id, upstream_task_id, downstream_task_id, condition, source_key, params_json, created_at, updated_at
+			) VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW(), NOW())
+		`, dep.ID, dep.UpstreamTaskID, dep.DownstreamTaskID, dep.Condition, dep.SourceKey, string(paramsJSON)); err != nil {
+			return fmt.Errorf("insert task dependency %s -> %s: %w", dep.UpstreamTaskID, taskID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit replace task dependencies: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) UpsertTaskDependency(ctx context.Context, dependency config.TaskDependency) (config.TaskDependency, error) {
+	if dependency.UpstreamTaskID == "" {
+		return config.TaskDependency{}, fmt.Errorf("upstream_task_id is required")
+	}
+	if dependency.DownstreamTaskID == "" {
+		return config.TaskDependency{}, fmt.Errorf("downstream_task_id is required")
+	}
+	if dependency.ID == "" {
+		dependency.ID = uuid.NewString()
+	}
+	paramsJSON, err := marshalJSONBytes(dependency.Params)
+	if err != nil {
+		return config.TaskDependency{}, err
+	}
+	err = s.db.QueryRowContext(ctx, `
+		INSERT INTO task_dependencies (
+			id, upstream_task_id, downstream_task_id, condition, source_key, params_json, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW(), NOW())
+		ON CONFLICT (upstream_task_id, downstream_task_id, source_key) DO UPDATE SET
+			condition = EXCLUDED.condition,
+			params_json = EXCLUDED.params_json,
+			updated_at = NOW()
+		RETURNING id, upstream_task_id, downstream_task_id, condition, source_key, params_json, created_at, updated_at
+	`, dependency.ID, dependency.UpstreamTaskID, dependency.DownstreamTaskID, dependency.Condition, dependency.SourceKey, string(paramsJSON)).
+		Scan(
+			&dependency.ID, &dependency.UpstreamTaskID, &dependency.DownstreamTaskID,
+			&dependency.Condition, &dependency.SourceKey, &dependency.ParamsJSON,
+			&dependency.CreatedAt, &dependency.UpdatedAt,
+		)
+	if err != nil {
+		return config.TaskDependency{}, fmt.Errorf("upsert task dependency: %w", err)
+	}
+	if len(dependency.ParamsJSON) > 0 {
+		_ = json.Unmarshal(dependency.ParamsJSON, &dependency.Params)
+	}
+	return dependency, nil
+}
+
+func (s *PostgresStore) DeleteTaskDependency(ctx context.Context, id string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM task_dependencies WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("delete task dependency %s: %w", id, err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) attachDependencies(ctx context.Context, defs []config.TaskDefinition) error {
+	if len(defs) == 0 {
+		return nil
+	}
+	deps, err := s.ListTaskDependencies(ctx)
+	if err != nil {
+		return err
+	}
+	byTask := map[string][]config.TaskDependency{}
+	for _, dep := range deps {
+		byTask[dep.DownstreamTaskID] = append(byTask[dep.DownstreamTaskID], dep)
+	}
+	for i := range defs {
+		defs[i].Dependencies = byTask[defs[i].TaskID]
+	}
+	return nil
+}
+
+func scanTaskDependency(scanner scanner) (config.TaskDependency, error) {
+	var dep config.TaskDependency
+	if err := scanner.Scan(
+		&dep.ID, &dep.UpstreamTaskID, &dep.DownstreamTaskID,
+		&dep.Condition, &dep.SourceKey, &dep.ParamsJSON,
+		&dep.CreatedAt, &dep.UpdatedAt,
+	); err != nil {
+		return config.TaskDependency{}, fmt.Errorf("scan task dependency: %w", err)
+	}
+	if len(dep.ParamsJSON) > 0 {
+		if err := json.Unmarshal(dep.ParamsJSON, &dep.Params); err != nil {
+			return config.TaskDependency{}, fmt.Errorf("unmarshal dependency params: %w", err)
+		}
+	}
+	return dep, nil
 }
 
 func marshalJSONBytes(v any) ([]byte, error) {

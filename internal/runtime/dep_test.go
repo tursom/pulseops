@@ -38,9 +38,9 @@ func TestMatchCondition(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown field always matches", func(t *testing.T) {
-		if !matchCondition("unknown_field == 'value'", record) {
-			t.Fatal("unknown field should match (default to true)")
+	t.Run("unknown field never matches", func(t *testing.T) {
+		if matchCondition("unknown_field == 'value'", record) {
+			t.Fatal("unknown field should not match")
 		}
 	})
 

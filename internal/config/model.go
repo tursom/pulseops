@@ -116,6 +116,57 @@ type GlobalSettings struct {
 	DefaultRetainDays int         `json:"default_retain_days"`
 }
 
+type PlatformConfigSummary struct {
+	Mode          string                `json:"mode"`
+	Applied       bool                  `json:"applied"`
+	Warnings      []string              `json:"warnings"`
+	Server        ServerConfigSummary   `json:"server"`
+	Task          TaskConfigSummary     `json:"task"`
+	State         StateConfigSummary    `json:"state"`
+	ArtifactStore ArtifactConfigSummary `json:"artifact_store"`
+	AI            AIConfigSummary       `json:"ai"`
+}
+
+type ServerConfigSummary struct {
+	Addr string `json:"addr"`
+}
+
+type TaskConfigSummary struct {
+	ConfigDir string `json:"config_dir"`
+}
+
+type StateConfigSummary struct {
+	Backend string `json:"backend"`
+}
+
+type ArtifactConfigSummary struct {
+	Kind           string `json:"kind"`
+	Provider       string `json:"provider"`
+	Bucket         string `json:"bucket"`
+	Endpoint       string `json:"endpoint"`
+	Region         string `json:"region"`
+	BasePath       string `json:"base_path"`
+	PresignTTL     string `json:"presign_ttl"`
+	ForcePathStyle bool   `json:"force_path_style"`
+	UseSSL         bool   `json:"use_ssl"`
+	AccessKey      string `json:"access_key,omitempty"`
+	SecretKey      string `json:"secret_key,omitempty"`
+	Status         string `json:"status"`
+	Error          string `json:"error,omitempty"`
+}
+
+type AIConfigSummary struct {
+	Enabled     bool    `json:"enabled"`
+	Endpoint    string  `json:"endpoint"`
+	Model       string  `json:"model"`
+	Timeout     string  `json:"timeout"`
+	MaxTokens   int     `json:"max_tokens"`
+	Temperature float64 `json:"temperature"`
+	PluginDir   string  `json:"plugin_dir"`
+	Status      string  `json:"status"`
+	Error       string  `json:"error,omitempty"`
+}
+
 func ParseGlobalSettings(sinksRaw, maxBytesRaw, retainDaysRaw string) GlobalSettings {
 	s := GlobalSettings{
 		MaxPayloadBytes:   4096,
@@ -150,9 +201,10 @@ type TaskSpec struct {
 	Trace    TracePolicy       `toml:"trace" json:"trace"`
 	Alert    AlertPolicy       `toml:"alert" json:"alert"`
 
-	Trigger        string `toml:"trigger" json:"trigger"`                 // "scheduled"|"manual"|"on_run", default "scheduled"
-	WatchTaskID    string `toml:"watch_task" json:"watch_task"`           // 当 trigger=on_run 时监听的源任务 ID
-	WatchCondition string `toml:"watch_condition" json:"watch_condition"` // 可选触发条件表达式，如 "check_status == 'fail'"
+	Trigger        string           `toml:"trigger" json:"trigger"`                 // "scheduled"|"manual"|"on_run", default "scheduled"
+	WatchTaskID    string           `toml:"watch_task" json:"watch_task"`           // 当 trigger=on_run 时监听的源任务 ID
+	WatchCondition string           `toml:"watch_condition" json:"watch_condition"` // 可选触发条件表达式，如 "check_status == 'fail'"
+	Dependencies   []TaskDependency `toml:"-" json:"dependencies,omitempty"`
 
 	SourcePath string `toml:"-" json:"source_path"`
 	SourceHash string `toml:"-" json:"source_hash"`
@@ -178,6 +230,18 @@ type Pipeline struct {
 	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
 }
 
+type TaskDependency struct {
+	ID               string         `json:"id" db:"id"`
+	UpstreamTaskID   string         `json:"upstream_task_id" db:"upstream_task_id"`
+	DownstreamTaskID string         `json:"downstream_task_id" db:"downstream_task_id"`
+	Condition        string         `json:"condition" db:"condition"`
+	SourceKey        string         `json:"source_key,omitempty" db:"source_key"`
+	Params           map[string]any `json:"params,omitempty" db:"-"`
+	ParamsJSON       []byte         `json:"-" db:"params_json"`
+	CreatedAt        time.Time      `json:"created_at" db:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at" db:"updated_at"`
+}
+
 type TaskDefinition struct {
 	TaskID         string            `json:"task_id" db:"task_id"`
 	Name           string            `json:"name" db:"name"`
@@ -198,6 +262,7 @@ type TaskDefinition struct {
 	Alert          AlertPolicy       `json:"alert,omitempty" db:"-"`
 	AlertJSON      []byte            `json:"-" db:"alert_json"`
 	PipelineID     *string           `json:"pipeline_id" db:"pipeline_id"`
+	Dependencies   []TaskDependency  `json:"dependencies,omitempty" db:"-"`
 	CreatedAt      time.Time         `json:"created_at" db:"created_at"`
 	UpdatedAt      time.Time         `json:"updated_at" db:"updated_at"`
 }
@@ -212,6 +277,7 @@ func (d *TaskDefinition) ToTaskSpec() (TaskSpec, error) {
 		Trigger:        d.Trigger,
 		WatchTaskID:    d.WatchTaskID,
 		WatchCondition: d.WatchCondition,
+		Dependencies:   d.Dependencies,
 	}
 	if d.Interval != "" {
 		if err := spec.Interval.UnmarshalText([]byte(d.Interval)); err != nil {
@@ -260,6 +326,7 @@ func FromTaskSpec(spec TaskSpec) TaskDefinition {
 		Trigger:        spec.Trigger,
 		WatchTaskID:    spec.WatchTaskID,
 		WatchCondition: spec.WatchCondition,
+		Dependencies:   spec.Dependencies,
 	}
 	if labelsJSON, err := json.Marshal(spec.Labels); err == nil && string(labelsJSON) != "null" {
 		d.LabelsJSON = labelsJSON
@@ -395,10 +462,37 @@ func (spec TaskSpec) ValidateBasic() error {
 		return fmt.Errorf("invalid trigger %q, must be scheduled, manual, or on_run", spec.Trigger)
 	}
 	if spec.Trigger == "on_run" && spec.WatchTaskID == "" {
-		return errors.New("task with trigger on_run must set watch_task")
+		hasDependency := false
+		for _, dep := range spec.Dependencies {
+			if dep.UpstreamTaskID != "" {
+				hasDependency = true
+				break
+			}
+		}
+		if !hasDependency {
+			return errors.New("task with trigger on_run must set watch_task or dependencies")
+		}
 	}
 	if spec.Trigger != "on_run" && spec.WatchTaskID != "" {
 		return errors.New("watch_task is only valid when trigger is on_run")
+	}
+	if spec.WatchCondition != "" {
+		if err := ValidateWatchCondition(spec.WatchCondition); err != nil {
+			return err
+		}
+	}
+	for _, dep := range spec.Dependencies {
+		if dep.UpstreamTaskID == "" {
+			return errors.New("dependency upstream_task_id is required")
+		}
+		if dep.DownstreamTaskID != "" && dep.DownstreamTaskID != spec.ID {
+			return fmt.Errorf("dependency downstream_task_id %q does not match task id %q", dep.DownstreamTaskID, spec.ID)
+		}
+		if dep.Condition != "" {
+			if err := ValidateWatchCondition(dep.Condition); err != nil {
+				return fmt.Errorf("dependency %s: %w", dep.UpstreamTaskID, err)
+			}
+		}
 	}
 	if spec.Interval.Duration > 0 && spec.Cron != "" {
 		return errors.New("task cannot set both interval and cron")
@@ -408,6 +502,57 @@ func (spec TaskSpec) ValidateBasic() error {
 	}
 	if spec.Timeout.Duration < 0 {
 		return errors.New("task timeout must be positive")
+	}
+	return nil
+}
+
+func (spec TaskSpec) DependencyRules() []TaskDependency {
+	rules := make([]TaskDependency, 0, len(spec.Dependencies)+1)
+	if spec.Trigger == "on_run" && spec.WatchTaskID != "" {
+		rules = append(rules, TaskDependency{
+			ID:               "legacy:" + spec.WatchTaskID + ":" + spec.ID,
+			UpstreamTaskID:   spec.WatchTaskID,
+			DownstreamTaskID: spec.ID,
+			Condition:        spec.WatchCondition,
+		})
+	}
+	for _, dep := range spec.Dependencies {
+		if dep.DownstreamTaskID == "" {
+			dep.DownstreamTaskID = spec.ID
+		}
+		rules = append(rules, dep)
+	}
+	return rules
+}
+
+func ValidateWatchCondition(condition string) error {
+	condition = strings.TrimSpace(condition)
+	if condition == "" {
+		return nil
+	}
+	parts := strings.SplitN(condition, "==", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid watch_condition %q, expected field == value", condition)
+	}
+	field := strings.TrimSpace(parts[0])
+	switch field {
+	case "check_status", "run_status":
+	default:
+		return fmt.Errorf("unsupported watch_condition field %q", field)
+	}
+	expected := strings.Trim(strings.TrimSpace(parts[1]), "'\"")
+	if expected == "" {
+		return fmt.Errorf("watch_condition %q has empty expected value", condition)
+	}
+	switch field {
+	case "check_status":
+		if expected != "pass" && expected != "fail" && expected != "unknown" {
+			return fmt.Errorf("unsupported check_status value %q", expected)
+		}
+	case "run_status":
+		if expected != "success" && expected != "failed" && expected != "timeout" {
+			return fmt.Errorf("unsupported run_status value %q", expected)
+		}
 	}
 	return nil
 }

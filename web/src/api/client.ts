@@ -1,5 +1,4 @@
 import type {
-  TaskState,
   TaskDefinition,
   Pipeline,
   RunRecord,
@@ -13,6 +12,15 @@ import type {
   SampleResponse,
   PaginatedRuns,
   RunStat,
+  TaskView,
+  DashboardSummary,
+  RunListItem,
+  TaskGraph,
+  TaskDependency,
+  BatchTaskResponse,
+  SettingsResponse,
+  TaskValidationResponse,
+  PlatformConfigSummary,
 } from './types'
 
 // Generic fetch wrapper
@@ -34,18 +42,34 @@ export async function fetchHealth(): Promise<HealthResponse> {
   return request<HealthResponse>('/api/healthz')
 }
 
+export async function fetchPlatformConfig(): Promise<PlatformConfigSummary> {
+  return request<PlatformConfigSummary>('/api/platform-config')
+}
+
+export async function updatePlatformConfig(config: PlatformConfigSummary): Promise<PlatformConfigSummary> {
+  return request<PlatformConfigSummary>('/api/platform-config', {
+    method: 'PUT',
+    body: JSON.stringify(config),
+  })
+}
+
 // GET /api/tasks
-export async function fetchTasks(): Promise<TaskState[]> {
-  return request<TaskState[]>('/api/tasks')
+export async function fetchTasks(): Promise<TaskView[]> {
+  return request<TaskView[]>('/api/tasks')
 }
 
 // GET /api/tasks/{id}
-export async function fetchTask(id: string): Promise<TaskState> {
-  return request<TaskState>(`/api/tasks/${encodeURIComponent(id)}`)
+export async function fetchTask(id: string): Promise<TaskView> {
+  return request<TaskView>(`/api/tasks/${encodeURIComponent(id)}`)
+}
+
+export async function fetchDashboardSummary(since = '24h'): Promise<DashboardSummary> {
+  const params = new URLSearchParams({ since })
+  return request<DashboardSummary>(`/api/dashboard/summary?${params.toString()}`)
 }
 
 // GET /api/tasks/{id}/runs
-export async function fetchTaskRuns(id: string, limit?: number, since?: string): Promise<RunRecord[]> {
+export async function fetchTaskRuns(id: string, limit?: number, since?: string): Promise<RunListItem[]> {
   const data = await fetchTaskRunsPaginated(id, limit, 0, since)
   return data.records
 }
@@ -63,6 +87,28 @@ export async function fetchTaskRunsPaginated(
   if (since) params.set('since', since)
   const qs = params.toString()
   return request<PaginatedRuns>(`/api/tasks/${encodeURIComponent(id)}/runs${qs ? `?${qs}` : ''}`)
+}
+
+export async function fetchRuns(paramsInput: {
+  task_id?: string
+  kind?: string
+  run_status?: string
+  check_status?: string
+  since?: string
+  limit?: number
+  offset?: number
+  labels?: Record<string, string>
+} = {}): Promise<PaginatedRuns> {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(paramsInput)) {
+    if (key === 'labels' || value === undefined || value === '') continue
+    params.set(key, String(value))
+  }
+  for (const [key, value] of Object.entries(paramsInput.labels || {})) {
+    if (value) params.set(`label.${key}`, value)
+  }
+  const qs = params.toString()
+  return request<PaginatedRuns>(`/api/runs${qs ? `?${qs}` : ''}`)
 }
 
 // GET /api/tasks/{id}/runs/stats
@@ -121,6 +167,13 @@ export async function triggerTaskRun(id: string): Promise<RunRecord> {
   return request<RunRecord>(`/api/tasks/${encodeURIComponent(id)}/run`, { method: 'POST' })
 }
 
+export async function batchTaskAction(action: 'run' | 'enable' | 'disable' | 'reload', taskIds: string[]): Promise<BatchTaskResponse> {
+  return request<BatchTaskResponse>('/api/tasks/batch', {
+    method: 'POST',
+    body: JSON.stringify({ action, task_ids: taskIds }),
+  })
+}
+
 // POST /api/tasks/{id}/runs/{runID}/rerun
 export async function retriggerTaskRun(id: string, runID: string): Promise<RunRecord> {
   return request<RunRecord>(`/api/tasks/${encodeURIComponent(id)}/runs/${encodeURIComponent(runID)}/rerun`, { method: 'POST' })
@@ -174,6 +227,27 @@ export async function deleteTaskDefinition(id: string): Promise<{ status: string
   })
 }
 
+export async function validateTaskDefinition(def: TaskDefinition): Promise<TaskValidationResponse> {
+  return request<TaskValidationResponse>('/api/task-defs/validate', {
+    method: 'POST',
+    body: JSON.stringify(def),
+  })
+}
+
+export async function dryRunTaskDefinition(def: TaskDefinition): Promise<TaskValidationResponse> {
+  return request<TaskValidationResponse>('/api/task-defs/dry-run', {
+    method: 'POST',
+    body: JSON.stringify(def),
+  })
+}
+
+export async function testRunTaskDefinition(def: TaskDefinition): Promise<RunRecord> {
+  return request<RunRecord>('/api/task-defs/test-run', {
+    method: 'POST',
+    body: JSON.stringify(def),
+  })
+}
+
 export async function fetchPipelines(): Promise<Pipeline[]> {
   return request<Pipeline[]>('/api/pipelines')
 }
@@ -218,12 +292,32 @@ export async function unassignTaskFromPipeline(pipelineId: string, taskId: strin
   })
 }
 
-export async function fetchSettings(): Promise<GlobalSettings> {
-  return request<GlobalSettings>('/api/settings')
+export async function fetchTaskGraph(pipelineId?: string): Promise<TaskGraph> {
+  const params = new URLSearchParams()
+  if (pipelineId) params.set('pipeline_id', pipelineId)
+  const qs = params.toString()
+  return request<TaskGraph>(`/api/task-graph${qs ? `?${qs}` : ''}`)
 }
 
-export async function updateSettings(settings: GlobalSettings): Promise<GlobalSettings> {
-  return request<GlobalSettings>('/api/settings', {
+export async function upsertTaskDependency(dep: Partial<TaskDependency> & Pick<TaskDependency, 'upstream_task_id' | 'downstream_task_id'>): Promise<TaskDependency> {
+  return request<TaskDependency>('/api/task-dependencies', {
+    method: 'POST',
+    body: JSON.stringify(dep),
+  })
+}
+
+export async function deleteTaskDependency(id: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/task-dependencies/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  })
+}
+
+export async function fetchSettings(): Promise<SettingsResponse> {
+  return request<SettingsResponse>('/api/settings')
+}
+
+export async function updateSettings(settings: GlobalSettings): Promise<SettingsResponse> {
+  return request<SettingsResponse>('/api/settings', {
     method: 'PUT',
     body: JSON.stringify(settings),
   })

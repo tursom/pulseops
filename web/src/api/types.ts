@@ -43,6 +43,25 @@ export interface RunRecord {
   labels?: Record<string, string>
 }
 
+export interface RunListItem {
+  run_id: string
+  task_id: string
+  task_name?: string
+  task_kind: string
+  trigger_type: string
+  run_status: string
+  check_status: string
+  started_at: string
+  ended_at: string
+  duration_ms: number
+  error_message?: string
+  summary?: Record<string, unknown>
+  has_payload: boolean
+  artifact_count: number
+  finding_count: number
+  labels?: Record<string, string>
+}
+
 export interface RunStat {
   run_id: string
   started_at: string
@@ -51,7 +70,7 @@ export interface RunStat {
 }
 
 export interface PaginatedRuns {
-  records: RunRecord[]
+  records: RunListItem[]
   total: number
 }
 
@@ -127,10 +146,22 @@ export interface TaskDefinition {
   watch_task_id: string
   watch_condition: string
   pipeline_id?: string | null
+  dependencies?: TaskDependency[]
   trace?: TracePolicy
   alert?: AlertPolicy
   created_at: string
   updated_at: string
+}
+
+export interface TaskDependency {
+  id: string
+  upstream_task_id: string
+  downstream_task_id: string
+  condition: string
+  source_key?: string
+  params?: Record<string, unknown>
+  created_at?: string
+  updated_at?: string
 }
 
 // === Trace policy (nested in TaskDefinition) ===
@@ -155,6 +186,47 @@ export interface GlobalSettings {
   default_retain_days: number
 }
 
+export interface SettingsResponse {
+  settings: GlobalSettings
+  applied: boolean
+  warnings: string[]
+}
+
+export interface PlatformConfigSummary {
+  mode: string
+  applied: boolean
+  warnings: string[]
+  server: { addr: string }
+  task: { config_dir: string }
+  state: { backend: string }
+  artifact_store: {
+    kind: string
+    provider: string
+    bucket: string
+    endpoint: string
+    region: string
+    base_path: string
+    presign_ttl: string
+    force_path_style: boolean
+    use_ssl: boolean
+    access_key?: string
+    secret_key?: string
+    status: string
+    error?: string
+  }
+  ai: {
+    enabled: boolean
+    endpoint: string
+    model: string
+    timeout: string
+    max_tokens: number
+    temperature: number
+    plugin_dir: string
+    status: string
+    error?: string
+  }
+}
+
 // === Alert policy (nested in TaskDefinition) ===
 export interface AlertPolicy {
   consecutive_failures: number
@@ -171,6 +243,114 @@ export interface TaskDetailResponse {
   status: string
   definition: TaskDefinition
   runtime: TaskState
+}
+
+export interface TaskRuntimeView {
+  status: string
+  last_run_status?: string
+  last_check_status?: string
+  last_run_at?: string | null
+  next_run_at?: string | null
+  last_duration_ms?: number
+  last_error?: string
+  consecutive_failures: number
+}
+
+export interface TaskDependencyView {
+  upstream_task_id?: string
+  downstream_count: number
+  upstream_count: number
+  pipeline_id?: string
+  watch_condition?: string
+  dependency_status?: string
+}
+
+export interface TaskView extends TaskState {
+  config_status: 'valid' | 'load_error' | 'missing_runtime'
+  load_error?: string
+  runtime: TaskRuntimeView
+  dependency: TaskDependencyView
+  definition?: TaskDefinition
+  dependencies?: TaskDependency[]
+}
+
+export interface DashboardCounts {
+  total: number
+  enabled: number
+  failed: number
+  check_failed: number
+  load_failed: number
+  stale: number
+  disabled: number
+}
+
+export interface DashboardHealth {
+  status: string
+  label: string
+  detail: string
+}
+
+export interface LabelAggregate {
+  key: string
+  value: string
+  total: number
+  abnormal: number
+}
+
+export interface DashboardSummary {
+  counts: DashboardCounts
+  health: DashboardHealth
+  anomalies: TaskView[]
+  recent_runs: RunListItem[]
+  label_groups: LabelAggregate[]
+  generated_at: string
+  refresh_after: string
+}
+
+export interface TaskGraphNode {
+  task_id: string
+  name: string
+  kind: string
+  enabled: boolean
+  labels: Record<string, string>
+  pipeline_id?: string
+  config_status: string
+  runtime: TaskRuntimeView
+}
+
+export interface TaskGraphEdge {
+  id: string
+  upstream_task_id: string
+  downstream_task_id: string
+  condition?: string
+  source_key?: string
+  params?: Record<string, unknown>
+  valid: boolean
+  error?: string
+  legacy?: boolean
+}
+
+export interface TaskGraph {
+  nodes: TaskGraphNode[]
+  edges: TaskGraphEdge[]
+}
+
+export interface BatchTaskResult {
+  task_id: string
+  ok: boolean
+  error?: string
+  run?: RunRecord
+}
+
+export interface BatchTaskResponse {
+  action: string
+  results: BatchTaskResult[]
+}
+
+export interface TaskValidationResponse {
+  valid: boolean
+  errors: string[]
+  normalized?: unknown
 }
 
 // === Reload/enable/disable response ===

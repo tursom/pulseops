@@ -33,7 +33,12 @@ type Manager struct {
 	mu       sync.RWMutex
 	tasks    map[string]*managedTask
 	pathToID map[string]string
-	depTasks map[string][]*managedTask
+	depTasks map[string][]managedDependency
+}
+
+type managedDependency struct {
+	task      *managedTask
+	condition string
 }
 
 func NewManager(
@@ -56,7 +61,7 @@ func NewManager(
 		metrics:  NewMetrics(),
 		tasks:    map[string]*managedTask{},
 		pathToID: map[string]string{},
-		depTasks: map[string][]*managedTask{},
+		depTasks: map[string][]managedDependency{},
 	}
 }
 
@@ -96,19 +101,48 @@ func (m *Manager) LoadAllFromDB(ctx context.Context) error {
 	for _, def := range defs {
 		spec, err := def.ToTaskSpec()
 		if err != nil {
-			loadErrs = append(loadErrs, fmt.Errorf("task %s: %w", def.TaskID, err))
+			wrapped := fmt.Errorf("task %s: %w", def.TaskID, err)
+			m.persistDefinitionLoadError(ctx, def, wrapped)
+			loadErrs = append(loadErrs, wrapped)
 			continue
 		}
 		spec.Normalize(m.cfg)
 		if err := spec.ValidateBasic(); err != nil {
-			loadErrs = append(loadErrs, fmt.Errorf("task %s: %w", def.TaskID, err))
+			wrapped := fmt.Errorf("task %s: %w", def.TaskID, err)
+			m.persistDefinitionLoadError(ctx, def, wrapped)
+			loadErrs = append(loadErrs, wrapped)
 			continue
 		}
 		if err := m.UpsertTaskSpec(ctx, spec); err != nil {
+			m.persistDefinitionLoadError(ctx, def, err)
 			loadErrs = append(loadErrs, err)
 		}
 	}
 	return errors.Join(loadErrs...)
+}
+
+func (m *Manager) persistDefinitionLoadError(ctx context.Context, def config.TaskDefinition, err error) {
+	labels := def.Labels
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	state := store.TaskState{
+		TaskID:          def.TaskID,
+		Name:            def.Name,
+		Kind:            def.Kind,
+		Enabled:         def.Enabled,
+		Status:          "reload_failed",
+		Labels:          labels,
+		LastReloadError: err.Error(),
+		UpdatedAt:       time.Now(),
+	}
+	if state.Name == "" {
+		state.Name = def.TaskID
+	}
+	if err := m.store.UpsertTaskState(ctx, state); err != nil {
+		m.logger.ErrorContext(ctx, "persist task load error failed", "task_id", def.TaskID, "err", err)
+	}
+	_ = m.store.InsertReloadFailure(ctx, def.TaskID, def.TaskID, state.LastReloadError)
 }
 
 func (m *Manager) UpsertTaskFromDB(ctx context.Context, def config.TaskDefinition) (store.TaskState, error) {
@@ -121,10 +155,94 @@ func (m *Manager) UpsertTaskFromDB(ctx context.Context, def config.TaskDefinitio
 		return store.TaskState{}, fmt.Errorf("validate task %s: %w", def.TaskID, err)
 	}
 	if err := m.UpsertTaskSpec(ctx, spec); err != nil {
+		m.persistDefinitionLoadError(ctx, def, err)
 		return store.TaskState{}, err
 	}
 	state, _ := m.GetTask(def.TaskID)
 	return state, nil
+}
+
+func (m *Manager) ValidateTaskDefinition(def config.TaskDefinition) (config.TaskSpec, error) {
+	spec, err := def.ToTaskSpec()
+	if err != nil {
+		return spec, fmt.Errorf("convert task %s: %w", def.TaskID, err)
+	}
+	spec.Normalize(m.cfg)
+	if err := spec.ValidateBasic(); err != nil {
+		return spec, fmt.Errorf("validate task %s: %w", def.TaskID, err)
+	}
+	driver, ok := m.drivers.Get(spec.Kind)
+	if !ok {
+		return spec, fmt.Errorf("task %s driver %q not found", spec.ID, spec.Kind)
+	}
+	if err := driver.Validate(spec); err != nil {
+		return spec, fmt.Errorf("validate task %s: %w", spec.ID, err)
+	}
+	return spec, nil
+}
+
+func (m *Manager) TestRunTaskDefinition(ctx context.Context, def config.TaskDefinition) (store.RunRecord, error) {
+	spec, err := m.ValidateTaskDefinition(def)
+	if err != nil {
+		return store.RunRecord{}, err
+	}
+	driver, ok := m.drivers.Get(spec.Kind)
+	if !ok {
+		return store.RunRecord{}, fmt.Errorf("task %s driver %q not found", spec.ID, spec.Kind)
+	}
+	runner, err := driver.NewRunner(spec, m.deps)
+	if err != nil {
+		return store.RunRecord{}, fmt.Errorf("build runner for %s: %w", spec.ID, err)
+	}
+	runID := fmt.Sprintf("%s-dry-run-%d", spec.ID, time.Now().UnixNano())
+	startedAt := time.Now()
+	runCtx := ctx
+	cancel := func() {}
+	if spec.Timeout.Duration > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, spec.Timeout.Duration)
+	}
+	defer cancel()
+	runCtx = context.WithValue(runCtx, ctxkey.CtxRunID, runID)
+	result, runErr := runner.Run(runCtx, task.TriggerManual)
+	endedAt := time.Now()
+	runStatus := "success"
+	if runErr != nil {
+		runStatus = "failed"
+		if errors.Is(runErr, context.DeadlineExceeded) {
+			runStatus = "timeout"
+		}
+	}
+	checkStatus := result.CheckStatus
+	if checkStatus == "" {
+		if runErr != nil {
+			checkStatus = "fail"
+		} else {
+			checkStatus = "pass"
+		}
+	}
+	payload, payloadErr := json.Marshal(result.Payload)
+	if payloadErr != nil {
+		runErr = errors.Join(runErr, fmt.Errorf("marshal run payload: %w", payloadErr))
+		runStatus = "failed"
+	}
+	return store.RunRecord{
+		RunID:        runID,
+		TaskID:       spec.ID,
+		TaskKind:     spec.Kind,
+		TriggerType:  "dry_run",
+		RunStatus:    runStatus,
+		CheckStatus:  checkStatus,
+		StartedAt:    startedAt,
+		EndedAt:      endedAt,
+		DurationMS:   endedAt.Sub(startedAt).Milliseconds(),
+		ErrorMessage: errString(runErr),
+		Summary:      cloneAnyMap(result.Summary),
+		Payload:      payload,
+		Findings:     cloneFindings(result.Findings),
+		Stdout:       result.Stdout,
+		Stderr:       result.Stderr,
+		Labels:       cloneLabels(spec.Labels),
+	}, runErr
 }
 
 func (m *Manager) UpsertTaskSpec(ctx context.Context, spec config.TaskSpec) error {
@@ -167,8 +285,13 @@ func (m *Manager) UpsertTaskSpec(ctx context.Context, spec config.TaskSpec) erro
 	}
 	m.metrics.tasksLoaded.Set(float64(len(m.tasks)))
 
-	if candidate.spec.Trigger == "on_run" && candidate.spec.WatchTaskID != "" {
-		m.depTasks[candidate.spec.WatchTaskID] = append(m.depTasks[candidate.spec.WatchTaskID], candidate)
+	if candidate.spec.Trigger == "on_run" || len(candidate.spec.Dependencies) > 0 {
+		for _, dep := range candidate.spec.DependencyRules() {
+			m.depTasks[dep.UpstreamTaskID] = append(m.depTasks[dep.UpstreamTaskID], managedDependency{
+				task:      candidate,
+				condition: dep.Condition,
+			})
+		}
 	}
 	for _, item := range toStop {
 		m.removeDepTask(item)
@@ -229,17 +352,18 @@ func (m *Manager) removeDepTask(entry *managedTask) {
 	if entry == nil {
 		return
 	}
-	if entry.spec.Trigger == "on_run" && entry.spec.WatchTaskID != "" {
-		deps := m.depTasks[entry.spec.WatchTaskID]
-		for i, dep := range deps {
-			if dep == entry {
-				m.depTasks[entry.spec.WatchTaskID] = append(deps[:i], deps[i+1:]...)
-				break
+	for upstream, deps := range m.depTasks {
+		next := deps[:0]
+		for _, dep := range deps {
+			if dep.task != entry {
+				next = append(next, dep)
 			}
 		}
-		if len(m.depTasks[entry.spec.WatchTaskID]) == 0 {
-			delete(m.depTasks, entry.spec.WatchTaskID)
+		if len(next) == 0 {
+			delete(m.depTasks, upstream)
+			continue
 		}
+		m.depTasks[upstream] = next
 	}
 }
 
@@ -318,7 +442,7 @@ func (m *Manager) triggerDepTasks(sourceTaskID string, record store.RunRecord) {
 	deps := m.depTasks[sourceTaskID]
 	m.mu.RUnlock()
 	for _, dep := range deps {
-		dep.triggerFromDependency(record)
+		dep.task.triggerFromDependency(record, dep.condition)
 	}
 }
 
@@ -571,8 +695,8 @@ func (t *managedTask) setEnabled(ctx context.Context, enabled bool) error {
 	}
 }
 
-func (t *managedTask) triggerFromDependency(sourceRecord store.RunRecord) {
-	if t.spec.WatchCondition != "" && !matchCondition(t.spec.WatchCondition, sourceRecord) {
+func (t *managedTask) triggerFromDependency(sourceRecord store.RunRecord, condition string) {
+	if condition != "" && !matchCondition(condition, sourceRecord) {
 		return
 	}
 	select {
@@ -587,9 +711,12 @@ func matchCondition(condition string, record store.RunRecord) bool {
 	if condition == "" {
 		return true
 	}
+	if err := config.ValidateWatchCondition(condition); err != nil {
+		return false
+	}
 	parts := strings.SplitN(condition, "==", 2)
 	if len(parts) != 2 {
-		return true
+		return false
 	}
 	field := strings.TrimSpace(parts[0])
 	expected := strings.Trim(strings.TrimSpace(parts[1]), "'\"")
@@ -599,7 +726,7 @@ func matchCondition(condition string, record store.RunRecord) bool {
 	case "run_status":
 		return record.RunStatus == expected
 	default:
-		return true
+		return false
 	}
 }
 

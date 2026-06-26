@@ -23,85 +23,63 @@ import {
   UnorderedListOutlined,
 } from '@ant-design/icons'
 import {
-  fetchTaskDefinitions,
-  fetchTaskRuns,
-  fetchTasks,
+  fetchDashboardSummary,
 } from '../api/client'
-import type { RunRecord } from '../api/types'
+import type { RunListItem } from '../api/types'
 import {
-  aggregateLabels,
   AUTO_REFRESH_MS,
   checkStatusColor,
   CHECK_STATUS_LABELS,
+  decorateTaskView,
   formatDuration,
   formatRelativeTime,
   formatTime,
   KIND_COLORS,
   KIND_LABELS,
-  mergeTaskViews,
   runIsAbnormal,
   runStatusColor,
   RUN_STATUS_LABELS,
   shortID,
-  summarizeTasks,
   type LabelAggregate,
   type TaskView,
 } from '../utils/pulseops'
 
 const { Title, Text } = Typography
 
-function healthState(tasks: TaskView[], loadError: string | null): { color: string; label: string; detail: string } {
+function healthColor(status: string, loadError: string | null): string {
   if (loadError) {
-    return { color: '#cf1322', label: '数据加载失败', detail: loadError }
+    return '#cf1322'
   }
-  if (tasks.some((task) => task.last_reload_error)) {
-    return { color: '#fa8c16', label: '存在配置加载错误', detail: '至少一个任务定义无法加载到运行态' }
-  }
-  if (tasks.some((task) => task.severity === 'critical')) {
-    return { color: '#cf1322', label: '存在失败任务', detail: '需要优先处理失败、超时或检查未通过任务' }
-  }
-  if (tasks.some((task) => task.severity === 'warning')) {
-    return { color: '#fa8c16', label: '存在待确认任务', detail: '存在未加载或长时间未运行任务' }
-  }
-  return { color: '#0f9f7a', label: '正常', detail: '当前未发现需要立即处理的任务' }
-}
-
-function priority(tasks: TaskView[]): TaskView[] {
-  return tasks
-    .filter((task) => task.severity === 'critical' || task.severity === 'warning')
-    .slice(0, 12)
+  if (status === 'failed') return '#cf1322'
+  if (status === 'config_error' || status === 'warning') return '#fa8c16'
+  return '#0f9f7a'
 }
 
 export default function Dashboard() {
   const navigate = useNavigate()
   const [tasks, setTasks] = useState<TaskView[]>([])
-  const [recentRuns, setRecentRuns] = useState<RunRecord[]>([])
+  const [recentRuns, setRecentRuns] = useState<RunListItem[]>([])
+  const [summary, setSummary] = useState({ total: 0, enabled: 0, failed: 0, checkFailed: 0, loadFailed: 0 })
+  const [health, setHealth] = useState({ status: 'ok', label: '正常', detail: '当前未发现需要立即处理的任务' })
+  const [labelAgg, setLabelAgg] = useState<LabelAggregate[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [lastRefreshAt, setLastRefreshAt] = useState<Date | null>(null)
 
   const loadData = useCallback(async () => {
     try {
-      const [defs, states] = await Promise.all([fetchTaskDefinitions(), fetchTasks()])
-      const merged = mergeTaskViews(defs, states)
-      setTasks(merged)
-
-      const active = merged
-        .filter((task) => task.status !== 'unloaded')
-        .sort((a, b) => {
-          const aw = a.severity === 'critical' ? 0 : 1
-          const bw = b.severity === 'critical' ? 0 : 1
-          return aw - bw
-        })
-        .slice(0, 10)
-
-      const runResults = await Promise.allSettled(active.map((task) => fetchTaskRuns(task.task_id, 4)))
-      const runs = runResults
-        .flatMap((result) => (result.status === 'fulfilled' ? result.value : []))
-        .sort((a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime())
-        .slice(0, 12)
-
-      setRecentRuns(runs)
+      const data = await fetchDashboardSummary('24h')
+      setTasks(data.anomalies.map(decorateTaskView))
+      setRecentRuns(data.recent_runs)
+      setSummary({
+        total: data.counts.total,
+        enabled: data.counts.enabled,
+        failed: data.counts.failed,
+        checkFailed: data.counts.check_failed,
+        loadFailed: data.counts.load_failed,
+      })
+      setHealth(data.health)
+      setLabelAgg(data.label_groups)
       setError(null)
       setLastRefreshAt(new Date())
     } catch (err) {
@@ -117,12 +95,10 @@ export default function Dashboard() {
     return () => clearInterval(interval)
   }, [loadData])
 
-  const summary = useMemo(() => summarizeTasks(tasks), [tasks])
-  const health = useMemo(() => healthState(tasks, error), [tasks, error])
-  const anomalies = useMemo(() => priority(tasks), [tasks])
-  const labelAgg = useMemo(() => aggregateLabels(tasks), [tasks])
+  const anomalies = useMemo(() => tasks, [tasks])
 
   const abnormalRuns = recentRuns.filter(runIsAbnormal).length
+  const healthDotColor = healthColor(health.status, error)
 
   const anomalyColumns: ColumnsType<TaskView> = [
     {
@@ -194,7 +170,7 @@ export default function Dashboard() {
     },
   ]
 
-  const runColumns: ColumnsType<RunRecord> = [
+  const runColumns: ColumnsType<RunListItem> = [
     {
       title: '运行',
       key: 'run',
@@ -287,7 +263,7 @@ export default function Dashboard() {
                 width: 14,
                 height: 14,
                 borderRadius: '50%',
-                background: health.color,
+                background: healthDotColor,
                 display: 'inline-block',
               }}
             />
@@ -367,7 +343,7 @@ export default function Dashboard() {
             {recentRuns.length === 0 ? (
               <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无运行记录" />
             ) : (
-              <Table<RunRecord>
+              <Table<RunListItem>
                 className="dense-table"
                 columns={runColumns}
                 dataSource={recentRuns}

@@ -1,4 +1,4 @@
-import type { TaskDefinition, TaskState, RunRecord, AIAnalysisRecord } from '../api/types'
+import type { TaskDefinition, TaskState, RunRecord, RunListItem, AIAnalysisRecord, TaskView as APITaskView } from '../api/types'
 
 export const AUTO_REFRESH_MS = 15_000
 
@@ -45,9 +45,7 @@ export const TASK_STATUS_LABELS: Record<string, string> = {
 
 export type TaskSeverity = 'critical' | 'warning' | 'normal' | 'disabled'
 
-export interface TaskView extends TaskState {
-  definition?: TaskDefinition
-  config_status: 'valid' | 'load_error' | 'missing_runtime'
+export interface TaskView extends APITaskView {
   anomaly_type?: string
   anomaly_reason?: string
   severity: TaskSeverity
@@ -93,7 +91,10 @@ export function emptyTaskState(def: TaskDefinition): TaskState {
   }
 }
 
-export function mergeTaskViews(defs: TaskDefinition[], states: TaskState[]): TaskView[] {
+export function mergeTaskViews(defs: TaskDefinition[], states: APITaskView[] | TaskState[]): TaskView[] {
+  if (states.some((state) => 'config_status' in state)) {
+    return (states as APITaskView[]).map((state) => decorateTaskView(state)).sort(compareTaskViews)
+  }
   const stateMap = new Map(states.map((state) => [state.task_id, state]))
   const defMap = new Map(defs.map((def) => [def.task_id, def]))
 
@@ -105,24 +106,40 @@ export function mergeTaskViews(defs: TaskDefinition[], states: TaskState[]): Tas
     }
   }
 
-  return views.sort((a, b) => {
-    const severityOrder: Record<TaskSeverity, number> = { critical: 0, warning: 1, normal: 2, disabled: 3 }
-    const diff = severityOrder[a.severity] - severityOrder[b.severity]
-    if (diff !== 0) return diff
-    return latestTime(b) - latestTime(a)
-  })
+  return views.sort(compareTaskViews)
 }
 
 export function toTaskView(state: TaskState, definition?: TaskDefinition): TaskView {
+  const apiView = state as APITaskView
   const view: TaskView = {
     ...state,
     labels: state.labels || definition?.labels || {},
     definition,
-    config_status: state.last_reload_error
-      ? 'load_error'
-      : state.status === 'unloaded'
-        ? 'missing_runtime'
-        : 'valid',
+    runtime: apiView.runtime || {
+      status: state.status,
+      last_run_status: state.last_run_status,
+      last_check_status: state.last_check_status,
+      last_run_at: state.last_run_at,
+      next_run_at: state.next_run_at,
+      last_duration_ms: state.last_duration_ms,
+      last_error: state.last_error,
+      consecutive_failures: 0,
+    },
+    dependency: apiView.dependency || {
+      upstream_task_id: definition?.watch_task_id,
+      upstream_count: definition?.watch_task_id ? 1 : 0,
+      downstream_count: 0,
+      pipeline_id: definition?.pipeline_id || undefined,
+      watch_condition: definition?.watch_condition,
+    },
+    dependencies: apiView.dependencies || definition?.dependencies || [],
+    config_status: apiView.config_status || (
+      state.last_reload_error
+        ? 'load_error'
+        : state.status === 'unloaded'
+          ? 'missing_runtime'
+          : 'valid'
+    ),
     severity: 'normal',
   }
 
@@ -174,6 +191,17 @@ export function toTaskView(state: TaskState, definition?: TaskDefinition): TaskV
   }
 
   return view
+}
+
+export function decorateTaskView(input: APITaskView): TaskView {
+  return toTaskView(input, input.definition)
+}
+
+function compareTaskViews(a: TaskView, b: TaskView): number {
+  const severityOrder: Record<TaskSeverity, number> = { critical: 0, warning: 1, normal: 2, disabled: 3 }
+  const diff = severityOrder[a.severity] - severityOrder[b.severity]
+  if (diff !== 0) return diff
+  return latestTime(b) - latestTime(a)
 }
 
 export function summarizeTasks(tasks: TaskView[]): TaskSummary {
@@ -267,7 +295,7 @@ export function shortID(id: string | undefined, length = 12): string {
   return id.length > length ? `${id.slice(0, length)}...` : id
 }
 
-export function runIsAbnormal(run: RunRecord): boolean {
+export function runIsAbnormal(run: RunRecord | RunListItem): boolean {
   return run.run_status === 'failed' || run.run_status === 'timeout' || run.check_status === 'fail' || Boolean(run.error_message)
 }
 
@@ -296,12 +324,21 @@ export function safeJson(value: unknown): string {
 }
 
 export function collectDownstream(defs: TaskDefinition[], taskId: string): TaskDefinition[] {
-  return defs.filter((def) => def.trigger === 'on_run' && def.watch_task_id === taskId)
+  return defs.filter((def) => (
+    (def.trigger === 'on_run' && def.watch_task_id === taskId) ||
+    (def.dependencies || []).some((dep) => dep.upstream_task_id === taskId)
+  ))
 }
 
 export function collectUpstream(defs: TaskDefinition[], task: TaskDefinition | undefined): TaskDefinition[] {
-  if (!task?.watch_task_id) return []
-  return defs.filter((def) => def.task_id === task.watch_task_id)
+  if (!task) return []
+  const upstreamIds = new Set<string>()
+  if (task.watch_task_id) upstreamIds.add(task.watch_task_id)
+  for (const dep of task.dependencies || []) {
+    if (dep.upstream_task_id) upstreamIds.add(dep.upstream_task_id)
+  }
+  if (upstreamIds.size === 0) return []
+  return defs.filter((def) => upstreamIds.has(def.task_id))
 }
 
 export function statusColorForTask(task: TaskView | TaskState): string {

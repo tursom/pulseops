@@ -12,36 +12,47 @@ import {
   Select,
   Space,
   Spin,
+  Switch,
   Table,
   Tag,
   Typography,
 } from 'antd'
 import { DeleteOutlined, PlusOutlined, SaveOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
-import type { GlobalSettings, SinkEntry } from '../api/types'
-import { fetchSettings, updateSettings } from '../api/client'
+import type { GlobalSettings, PlatformConfigSummary, SinkEntry } from '../api/types'
+import { fetchPlatformConfig, fetchSettings, updatePlatformConfig, updateSettings } from '../api/client'
 
 const { Title, Text } = Typography
 
 export default function Settings() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [platformSaving, setPlatformSaving] = useState(false)
   const [form] = Form.useForm()
+  const [platformForm] = Form.useForm()
   const [sinks, setSinks] = useState<SinkEntry[]>([])
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null)
+  const [applied, setApplied] = useState(false)
+  const [warnings, setWarnings] = useState<string[]>([])
+  const [platform, setPlatform] = useState<PlatformConfigSummary | null>(null)
 
   useEffect(() => {
-    fetchSettings()
-      .then((settings) => {
+    Promise.all([fetchSettings(), fetchPlatformConfig()])
+      .then(([response, platformConfig]) => {
+        const settings = response.settings
         form.setFieldsValue({
           max_payload_bytes: settings.max_payload_bytes,
           default_retain_days: settings.default_retain_days,
         })
         setSinks(settings.sinks || [])
+        setApplied(response.applied)
+        setPlatform(platformConfig)
+        platformForm.setFieldsValue(platformConfig)
+        setWarnings([...(response.warnings || []), ...(platformConfig.warnings || [])])
       })
       .catch((err) => message.error(err instanceof Error ? err.message : '加载设置失败'))
       .finally(() => setLoading(false))
-  }, [form])
+  }, [form, platformForm])
 
   const postgresCount = useMemo(() => sinks.filter((sink) => sink.kind === 'postgres').length, [sinks])
   const hasWebhook = sinks.some((sink) => sink.kind === 'webhook')
@@ -59,14 +70,38 @@ export default function Settings() {
         default_retain_days: values.default_retain_days,
         sinks,
       }
-      await updateSettings(settings)
+      const response = await updateSettings(settings)
+      setApplied(response.applied)
+      setWarnings(response.warnings || [])
       setLastSavedAt(new Date())
-      message.success('设置已保存')
+      message.success(response.applied ? '设置已保存并热应用' : '设置已保存')
     } catch (err) {
       if (err && typeof err === 'object' && 'errorFields' in err) return
       message.error(err instanceof Error ? err.message : '保存设置失败')
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleSavePlatform = async () => {
+    if (!platform) return
+    try {
+      setPlatformSaving(true)
+      const values = await platformForm.validateFields()
+      const updated: PlatformConfigSummary = {
+        ...platform,
+        ai: { ...platform.ai, ...(values.ai || {}) },
+        artifact_store: { ...platform.artifact_store, ...(values.artifact_store || {}) },
+      }
+      const response = await updatePlatformConfig(updated)
+      setPlatform(response)
+      setWarnings(response.warnings || [])
+      message.success('平台配置已保存，重启后应用')
+    } catch (err) {
+      if (err && typeof err === 'object' && 'errorFields' in err) return
+      message.error(err instanceof Error ? err.message : '保存平台配置失败')
+    } finally {
+      setPlatformSaving(false)
     }
   }
 
@@ -193,10 +228,20 @@ export default function Settings() {
         message={postgresCount > 0 ? '配置应用状态：已可保存到 DB' : '配置风险：缺少 Postgres Sink'}
         description={
           lastSavedAt
-            ? `最近保存：${lastSavedAt.toLocaleString()}。当前后端保存 /api/settings 后未明确返回 trace sink 热生效状态。`
-            : '保存后后端会写入 DB；运行中 sink 和 max payload 是否热生效仍需要后端 reload 返回 applied 状态。'
+            ? `最近保存：${lastSavedAt.toLocaleString()}。${applied ? '后端已返回热应用成功。' : '后端未完成热应用，请检查告警。'}`
+            : `${applied ? '当前配置已应用。' : '当前配置仅已读取，保存后会返回应用状态。'}`
         }
       />
+
+      {warnings.length > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 14 }}
+          message="配置提示"
+          description={warnings.join('；')}
+        />
+      )}
 
       <div className="two-column-settings">
         <Space direction="vertical" size={14} style={{ width: '100%' }}>
@@ -247,39 +292,106 @@ export default function Settings() {
 
         <Space direction="vertical" size={14} style={{ width: '100%' }}>
           <Card className="ops-card" title="AI 配置">
-            <Descriptions column={1} size="small">
-              <Descriptions.Item label="开关"><Tag color="default">启动配置</Tag></Descriptions.Item>
-              <Descriptions.Item label="Provider / Endpoint"><Text type="secondary">需要平台配置 API</Text></Descriptions.Item>
-              <Descriptions.Item label="模型 / 超时 / Token"><Text type="secondary">需要平台配置 API</Text></Descriptions.Item>
-              <Descriptions.Item label="插件目录"><Text type="secondary">当前由 TOML 启动参数提供</Text></Descriptions.Item>
-            </Descriptions>
+            <Form form={platformForm} layout="vertical">
+              <Form.Item name={['ai', 'enabled']} label="AI 开关" valuePropName="checked">
+                <Switch />
+              </Form.Item>
+              <Form.Item name={['ai', 'endpoint']} label="Endpoint">
+                <Input placeholder="https://api.example.com" />
+              </Form.Item>
+              <Form.Item name={['ai', 'model']} label="模型">
+                <Input placeholder="deepseek-chat" />
+              </Form.Item>
+              <Space style={{ width: '100%' }} align="start">
+                <Form.Item name={['ai', 'timeout']} label="超时">
+                  <Input placeholder="30s" />
+                </Form.Item>
+                <Form.Item name={['ai', 'max_tokens']} label="Max Tokens">
+                  <InputNumber min={0} />
+                </Form.Item>
+                <Form.Item name={['ai', 'temperature']} label="Temperature">
+                  <InputNumber min={0} max={2} step={0.1} />
+                </Form.Item>
+              </Space>
+              <Form.Item name={['ai', 'plugin_dir']} label="插件目录">
+                <Input placeholder="plugins" />
+              </Form.Item>
+              <Tag color={platform?.ai.status === 'config_error' ? 'orange' : 'blue'}>{platform?.ai.status || '启动配置'}</Tag>
+              {platform?.ai.error && <Text type="danger"> {platform.ai.error}</Text>}
+            </Form>
           </Card>
 
           <Card className="ops-card" title="对象存储配置">
-            <Descriptions column={1} size="small">
-              <Descriptions.Item label="provider / bucket"><Text type="secondary">需要平台配置 API</Text></Descriptions.Item>
-              <Descriptions.Item label="endpoint / region"><Text type="secondary">需要平台配置 API</Text></Descriptions.Item>
-              <Descriptions.Item label="base path / presign TTL"><Text type="secondary">当前由启动配置提供</Text></Descriptions.Item>
-              <Descriptions.Item label="path style"><Text type="secondary">当前由启动配置提供</Text></Descriptions.Item>
-            </Descriptions>
+            <Form form={platformForm} layout="vertical">
+              <Space style={{ width: '100%' }} align="start">
+                <Form.Item name={['artifact_store', 'provider']} label="Provider">
+                  <Input placeholder="minio" />
+                </Form.Item>
+                <Form.Item name={['artifact_store', 'bucket']} label="Bucket">
+                  <Input />
+                </Form.Item>
+              </Space>
+              <Space style={{ width: '100%' }} align="start">
+                <Form.Item name={['artifact_store', 'endpoint']} label="Endpoint">
+                  <Input />
+                </Form.Item>
+                <Form.Item name={['artifact_store', 'region']} label="Region">
+                  <Input />
+                </Form.Item>
+              </Space>
+              <Space style={{ width: '100%' }} align="start">
+                <Form.Item name={['artifact_store', 'base_path']} label="Base Path">
+                  <Input />
+                </Form.Item>
+                <Form.Item name={['artifact_store', 'presign_ttl']} label="Presign TTL">
+                  <Input placeholder="15m" />
+                </Form.Item>
+              </Space>
+              <Space>
+                <Form.Item name={['artifact_store', 'force_path_style']} valuePropName="checked">
+                  <Switch checkedChildren="Path Style" unCheckedChildren="Auto" />
+                </Form.Item>
+                <Form.Item name={['artifact_store', 'use_ssl']} valuePropName="checked">
+                  <Switch checkedChildren="SSL" unCheckedChildren="Plain" />
+                </Form.Item>
+              </Space>
+              <Tag color={platform?.artifact_store.status === 'config_error' ? 'orange' : 'blue'}>{platform?.artifact_store.status || '启动配置'}</Tag>
+              {platform?.artifact_store.error && <Text type="danger"> {platform.artifact_store.error}</Text>}
+            </Form>
+          </Card>
+
+          <Card className="ops-card" title="平台配置保存">
+            <Space direction="vertical" style={{ width: '100%' }}>
+              <Alert
+                type="info"
+                showIcon
+                message="AI 和对象存储配置保存到 DB 后需要重启服务应用"
+                description="Trace Sink 和最大 Payload 字节数在上方保存后可热应用。"
+              />
+              <Button block type="primary" icon={<SaveOutlined />} loading={platformSaving} onClick={handleSavePlatform}>
+                保存平台配置
+              </Button>
+            </Space>
           </Card>
 
           <Card className="ops-card" title="运行配置摘要">
             <Descriptions column={1} size="small">
-              <Descriptions.Item label="服务地址"><Text type="secondary">后端未返回</Text></Descriptions.Item>
-              <Descriptions.Item label="任务配置目录"><Text type="secondary">后端未返回</Text></Descriptions.Item>
-              <Descriptions.Item label="状态存储"><Tag color="blue">Postgres</Tag></Descriptions.Item>
-              <Descriptions.Item label="对象存储"><Tag color="default">启动配置</Tag></Descriptions.Item>
-              <Descriptions.Item label="AI"><Tag color="default">启动配置</Tag></Descriptions.Item>
+              <Descriptions.Item label="服务地址"><Text type="secondary">{platform?.server.addr || '—'}</Text></Descriptions.Item>
+              <Descriptions.Item label="任务配置目录"><Text type="secondary">{platform?.task.config_dir || '—'}</Text></Descriptions.Item>
+              <Descriptions.Item label="状态存储"><Tag color="blue">{platform?.state.backend || 'Postgres'}</Tag></Descriptions.Item>
+              <Descriptions.Item label="对象存储"><Tag color={platform?.artifact_store.status === 'config_error' ? 'orange' : 'blue'}>{platform?.artifact_store.kind || '—'}</Tag></Descriptions.Item>
+              <Descriptions.Item label="AI"><Tag color={platform?.ai.enabled ? 'green' : 'default'}>{platform?.ai.enabled ? platform.ai.model || '启用' : '关闭'}</Tag></Descriptions.Item>
             </Descriptions>
           </Card>
 
           <Card className="ops-card" title="人工恢复能力">
             <Alert
-              type="warning"
+              type={platform?.mode === 'degraded' ? 'warning' : 'success'}
               showIcon
-              message="Degraded / config_error 启动模式仍缺后端支持"
-              description="当前初始化对象存储、Postgres 或 AI 插件失败时仍可能阻断管理界面启动，需要后端补 degraded 模式和 /api/platform-config。"
+              message={platform?.mode === 'degraded' ? '当前处于 degraded / config_error 模式' : '当前平台配置已应用'}
+              description={platform?.mode === 'degraded'
+                ? '非核心配置错误不会阻断管理界面；请根据上方错误修复对象存储或 AI 配置。Postgres 状态库仍是启动核心依赖。'
+                : '后端已返回平台配置摘要；对象存储和 AI 状态可在本页确认。'}
             />
           </Card>
         </Space>

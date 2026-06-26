@@ -25,9 +25,9 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons'
 import {
+  batchTaskAction,
   disableTask,
   enableTask,
-  fetchTaskDefinitions,
   fetchTasks,
   triggerTaskRun,
 } from '../api/client'
@@ -35,12 +35,12 @@ import {
   AUTO_REFRESH_MS,
   checkStatusColor,
   CHECK_STATUS_LABELS,
+  decorateTaskView,
   formatDuration,
   formatRelativeTime,
   formatTime,
   KIND_COLORS,
   KIND_LABELS,
-  mergeTaskViews,
   runStatusColor,
   RUN_STATUS_LABELS,
   statusColorForTask,
@@ -105,8 +105,8 @@ export default function TaskList() {
 
   const loadTasks = useCallback(async () => {
     try {
-      const [defs, states] = await Promise.all([fetchTaskDefinitions(), fetchTasks()])
-      setTasks(mergeTaskViews(defs, states))
+      const states = await fetchTasks()
+      setTasks(states.map(decorateTaskView))
       setError(null)
       setLastRefreshAt(new Date())
     } catch (err) {
@@ -230,34 +230,26 @@ export default function TaskList() {
   const handleBatchAction = useCallback(
     async (action: BatchAction) => {
       setBatchLoading(true)
-      const details: string[] = []
-      let successCount = 0
-      let failCount = 0
+      try {
+        const result = await batchTaskAction(action, selectedRowKeys)
+        const successCount = result.results.filter((item) => item.ok).length
+        const failed = result.results.filter((item) => !item.ok)
+        setSelectedRowKeys([])
+        await loadTasks()
 
-      for (const taskId of selectedRowKeys) {
-        try {
-          if (action === 'enable') await enableTask(taskId)
-          if (action === 'disable') await disableTask(taskId)
-          if (action === 'run') await triggerTaskRun(taskId)
-          successCount += 1
-        } catch (err) {
-          failCount += 1
-          details.push(`${taskId}: ${err instanceof Error ? err.message : '失败'}`)
+        const label = action === 'enable' ? '启用' : action === 'disable' ? '禁用' : '执行'
+        if (failed.length === 0) {
+          message.success(`已${label} ${successCount} 个任务`)
+        } else {
+          message.warning({
+            content: `已${label} ${successCount} 个，失败 ${failed.length} 个。${failed.slice(0, 2).map((item) => `${item.task_id}: ${item.error || '失败'}`).join('；')}`,
+            duration: 6,
+          })
         }
-      }
-
-      setBatchLoading(false)
-      setSelectedRowKeys([])
-      await loadTasks()
-
-      const label = action === 'enable' ? '启用' : action === 'disable' ? '禁用' : '执行'
-      if (failCount === 0) {
-        message.success(`已${label} ${successCount} 个任务`)
-      } else {
-        message.warning({
-          content: `已${label} ${successCount} 个，失败 ${failCount} 个。${details.slice(0, 2).join('；')}`,
-          duration: 6,
-        })
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : '批量操作失败')
+      } finally {
+        setBatchLoading(false)
       }
     },
     [selectedRowKeys, loadTasks],

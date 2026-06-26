@@ -37,6 +37,24 @@ type ArtifactStore interface {
 	Delete(ctx context.Context, key string) error
 }
 
+type DisabledArtifactStore struct {
+	Reason string
+}
+
+func (s DisabledArtifactStore) Kind() string { return "disabled" }
+func (s DisabledArtifactStore) Put(context.Context, string, io.Reader, ArtifactMeta) (ArtifactRef, error) {
+	return ArtifactRef{}, fmt.Errorf("artifact store is disabled: %s", s.Reason)
+}
+func (s DisabledArtifactStore) Get(context.Context, string) (io.ReadCloser, error) {
+	return nil, fmt.Errorf("artifact store is disabled: %s", s.Reason)
+}
+func (s DisabledArtifactStore) PresignGet(context.Context, string, time.Duration) (string, error) {
+	return "", fmt.Errorf("artifact store is disabled: %s", s.Reason)
+}
+func (s DisabledArtifactStore) Delete(context.Context, string) error {
+	return fmt.Errorf("artifact store is disabled: %s", s.Reason)
+}
+
 type objectClient interface {
 	BucketExists(ctx context.Context, bucketName string) (bool, error)
 	MakeBucket(ctx context.Context, bucketName string, opts minio.MakeBucketOptions) error

@@ -112,7 +112,7 @@ export default function PipelineEditor() {
             type="info"
             showIcon
             icon={<ApartmentOutlined />}
-            message="当前拓扑使用现有单上游依赖模型；多上游依赖需要后端 task graph / dependency 表重构后完整启用。"
+            message="当前拓扑已使用后端任务图和依赖表；旧 watch_task_id 字段生成的历史边也可在画布中编辑或删除。"
             style={{ marginTop: 12 }}
           />
         </div>

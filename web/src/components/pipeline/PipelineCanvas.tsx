@@ -13,8 +13,8 @@ import '@xyflow/react/dist/style.css'
 import { Modal, Select, Card, Empty, message, Space, Button, Drawer, Descriptions, Tag, Typography, Segmented } from 'antd'
 import { useNavigate } from 'react-router-dom'
 
-import { fetchPipelineTasks, fetchTasks, updateTaskDefinition } from '../../api/client'
-import type { TaskDefinition, TaskState } from '../../api/types'
+import { deleteTaskDependency, fetchPipelineTasks, fetchTaskGraph, updateTaskDefinition, upsertTaskDependency } from '../../api/client'
+import type { TaskDefinition, TaskGraph, TaskGraphEdge } from '../../api/types'
 import TaskNode from './TaskNode'
 import DependencyEdge from './DependencyEdge'
 import type { TaskNodeType, DependencyEdgeType } from './types'
@@ -35,48 +35,47 @@ interface GraphData {
   edges: DependencyEdgeType[]
 }
 
-function buildGraph(
-  defs: TaskDefinition[],
-  states: TaskState[],
-): GraphData {
-  const statusMap = new Map(states.map((s) => [s.task_id, s]))
+function buildGraph(graphData: TaskGraph): GraphData {
   const nodes: TaskNodeType[] = []
   const edges: DependencyEdgeType[] = []
 
-  for (const def of defs) {
-    const state = statusMap.get(def.task_id)
+  for (const node of graphData.nodes) {
     nodes.push({
-      id: def.task_id,
+      id: node.task_id,
       type: 'taskNode',
       position: { x: 0, y: 0 },
       data: {
-        taskId: def.task_id,
-        name: def.name,
-        kind: def.kind,
-        enabled: def.enabled,
-        pipelineId: def.pipeline_id || undefined,
-        status: state?.status,
-        lastRunStatus: state?.last_run_status,
+        taskId: node.task_id,
+        name: node.name,
+        kind: node.kind,
+        enabled: node.enabled,
+        pipelineId: node.pipeline_id,
+        status: node.runtime?.status,
+        lastRunStatus: node.runtime?.last_run_status,
       },
     })
   }
 
-  for (const def of defs) {
-    if (def.trigger === 'on_run' && def.watch_task_id !== '') {
-      edges.push({
-        id: `dep-${def.watch_task_id}->${def.task_id}`,
-        type: 'dependencyEdge' as const,
-        source: def.watch_task_id,
-        target: def.task_id,
-        data: { condition: def.watch_condition || undefined },
-        markerEnd: {
-          type: MarkerType.ArrowClosed,
-          width: 14,
-          height: 14,
-          color: '#faad14',
-        },
-      })
-    }
+  for (const edge of graphData.edges) {
+    edges.push({
+      id: edge.id,
+      type: 'dependencyEdge' as const,
+      source: edge.upstream_task_id,
+      target: edge.downstream_task_id,
+      data: {
+        condition: edge.condition || undefined,
+        dependencyId: edge.id,
+        legacy: edge.legacy,
+        valid: edge.valid,
+        error: edge.error,
+      },
+      markerEnd: {
+        type: MarkerType.ArrowClosed,
+        width: 14,
+        height: 14,
+        color: edge.valid ? '#faad14' : '#ff4d4f',
+      },
+    })
   }
 
   const adjacency = new Map<string, string[]>()
@@ -166,6 +165,7 @@ export default function PipelineCanvas({ pipelineId }: Props) {
   const [selectedEdge, setSelectedEdge] = useState<DependencyEdgeType | null>(null)
 
   const taskDefsRef = useRef<TaskDefinition[]>([])
+  const graphEdgesRef = useRef<TaskGraphEdge[]>([])
   const loadDataRef = useRef<() => Promise<void>>(async () => {})
 
   const [depEditorOpen, setDepEditorOpen] = useState(false)
@@ -175,12 +175,13 @@ export default function PipelineCanvas({ pipelineId }: Props) {
 
   const loadData = useCallback(async () => {
     try {
-      const [defs, states] = await Promise.all([
+      const [defs, graphResponse] = await Promise.all([
         fetchPipelineTasks(pipelineId),
-        fetchTasks(),
+        fetchTaskGraph(pipelineId),
       ])
       taskDefsRef.current = defs
-      const graph = buildGraph(defs, states)
+      graphEdgesRef.current = graphResponse.edges
+      const graph = buildGraph(graphResponse)
 
       for (const node of graph.nodes) {
         node.data.onRefresh = () => { loadDataRef.current() }
@@ -194,7 +195,7 @@ export default function PipelineCanvas({ pipelineId }: Props) {
     } finally {
       setLoading(false)
     }
-  }, [pipelineId, setNodes, setEdges])
+  }, [pipelineId])
 
   useEffect(() => {
     loadDataRef.current = loadData
@@ -256,11 +257,10 @@ export default function PipelineCanvas({ pipelineId }: Props) {
       ),
       onOk: async () => {
         try {
-          await updateTaskDefinition(targetId, {
-            ...targetDef,
-            watch_task_id: sourceId,
-            trigger: 'on_run',
-            watch_condition: condition,
+          await upsertTaskDependency({
+            upstream_task_id: sourceId,
+            downstream_task_id: targetId,
+            condition,
           })
           message.success('依赖已创建')
           loadData()
@@ -272,36 +272,44 @@ export default function PipelineCanvas({ pipelineId }: Props) {
   }, [loadData])
 
   const onEdgeClick = useCallback((_event: React.MouseEvent, edge: Edge) => {
-    const defs = taskDefsRef.current
-    const targetDef = defs.find(d => d.task_id === edge.target)
-    if (!targetDef) return
+    const graphEdge = graphEdgesRef.current.find((item) => item.id === edge.id)
+    if (!graphEdge) return
     setDepEditorSource(edge.source)
     setDepEditorTarget(edge.target)
-    setDepEditorCondition(targetDef.watch_condition || '')
+    setDepEditorCondition(graphEdge.condition || '')
     setDepEditorOpen(true)
   }, [])
 
   const handleSaveDependency = useCallback(async () => {
-    const defs = taskDefsRef.current
-    const targetDef = defs.find(d => d.task_id === depEditorTarget)
-    if (!targetDef) return
+    const graphEdge = graphEdgesRef.current.find((item) => item.upstream_task_id === depEditorSource && item.downstream_task_id === depEditorTarget)
+    if (!graphEdge) return
     try {
-      await updateTaskDefinition(depEditorTarget, {
-        ...targetDef,
-        watch_condition: depEditorCondition,
-      })
+      if (graphEdge.legacy) {
+        const targetDef = taskDefsRef.current.find((def) => def.task_id === depEditorTarget)
+        if (!targetDef) return
+        await updateTaskDefinition(depEditorTarget, {
+          ...targetDef,
+          watch_condition: depEditorCondition,
+        })
+      } else {
+        await upsertTaskDependency({
+          id: graphEdge.id,
+          upstream_task_id: depEditorSource,
+          downstream_task_id: depEditorTarget,
+          condition: depEditorCondition,
+        })
+      }
       message.success('依赖已更新')
       loadData()
     } catch (err) {
       message.error(err instanceof Error ? err.message : '更新失败')
     }
     setDepEditorOpen(false)
-  }, [depEditorTarget, depEditorCondition, loadData])
+  }, [depEditorSource, depEditorTarget, depEditorCondition, loadData])
 
   const handleDeleteDependency = useCallback(async () => {
-    const defs = taskDefsRef.current
-    const targetDef = defs.find(d => d.task_id === depEditorTarget)
-    if (!targetDef) return
+    const graphEdge = graphEdgesRef.current.find((item) => item.upstream_task_id === depEditorSource && item.downstream_task_id === depEditorTarget)
+    if (!graphEdge) return
     Modal.confirm({
       title: '删除依赖？',
       content: <p>移除到 <strong>{depEditorSource}</strong> 的依赖链接？</p>,
@@ -309,13 +317,20 @@ export default function PipelineCanvas({ pipelineId }: Props) {
       okButtonProps: { danger: true },
       onOk: async () => {
         try {
-          await updateTaskDefinition(depEditorTarget, {
-            ...targetDef,
-            watch_task_id: '',
-            trigger: 'scheduled',
-            watch_condition: '',
-          })
-      message.success('依赖已移除')
+          if (graphEdge.legacy) {
+            const targetDef = taskDefsRef.current.find((def) => def.task_id === depEditorTarget)
+            if (!targetDef) return
+            await updateTaskDefinition(depEditorTarget, {
+              ...targetDef,
+              watch_task_id: '',
+              watch_condition: '',
+              trigger: targetDef.dependencies?.length ? targetDef.trigger : 'scheduled',
+            })
+            message.success('依赖已移除')
+          } else {
+            await deleteTaskDependency(graphEdge.id)
+            message.success('依赖已移除')
+          }
           loadData()
         } catch (err) {
           message.error(err instanceof Error ? err.message : '删除失败')
@@ -326,16 +341,20 @@ export default function PipelineCanvas({ pipelineId }: Props) {
   }, [depEditorSource, depEditorTarget, loadData])
 
   const onEdgesDelete = useCallback(async (deletedEdges: Edge[]) => {
-    const defs = taskDefsRef.current
     for (const edge of deletedEdges) {
-      const targetDef = defs.find(d => d.task_id === edge.target)
-      if (targetDef) {
-        await updateTaskDefinition(targetDef.task_id, {
-          ...targetDef,
-          watch_task_id: '',
-          trigger: 'scheduled',
-          watch_condition: '',
-        })
+      const graphEdge = graphEdgesRef.current.find((item) => item.id === edge.id)
+      if (graphEdge?.legacy) {
+        const targetDef = taskDefsRef.current.find((def) => def.task_id === graphEdge.downstream_task_id)
+        if (targetDef) {
+          await updateTaskDefinition(targetDef.task_id, {
+            ...targetDef,
+            watch_task_id: '',
+            watch_condition: '',
+            trigger: targetDef.dependencies?.length ? targetDef.trigger : 'scheduled',
+          })
+        }
+      } else if (graphEdge) {
+        await deleteTaskDependency(graphEdge.id)
       }
     }
     message.success('依赖已移除')
@@ -355,12 +374,17 @@ export default function PipelineCanvas({ pipelineId }: Props) {
     [],
   )
 
-  const selectedTargetDef = selectedNode ? taskDefsRef.current.find((def) => def.task_id === selectedNode.id) : null
-  const selectedUpstream = selectedTargetDef?.watch_task_id
-    ? taskDefsRef.current.find((def) => def.task_id === selectedTargetDef.watch_task_id)
-    : null
+  const selectedUpstreamEdges = selectedNode
+    ? graphEdgesRef.current.filter((edge) => edge.downstream_task_id === selectedNode.id)
+    : []
+  const selectedUpstream = selectedUpstreamEdges
+    .map((edge) => taskDefsRef.current.find((def) => def.task_id === edge.upstream_task_id))
+    .filter((item): item is TaskDefinition => Boolean(item))
   const selectedDownstream = selectedNode
-    ? taskDefsRef.current.filter((def) => def.watch_task_id === selectedNode.id)
+    ? graphEdgesRef.current
+      .filter((edge) => edge.upstream_task_id === selectedNode.id)
+      .map((edge) => taskDefsRef.current.find((def) => def.task_id === edge.downstream_task_id))
+      .filter((item): item is TaskDefinition => Boolean(item))
     : []
 
   if (loading) {
@@ -443,7 +467,23 @@ export default function PipelineCanvas({ pipelineId }: Props) {
         </Space>
         <Space>
           <Button size="small" onClick={() => {
-            const graph = buildGraph(taskDefsRef.current, [])
+            const graph = buildGraph({
+              nodes: allNodes.map((node) => ({
+                task_id: node.data.taskId,
+                name: node.data.name,
+                kind: node.data.kind,
+                enabled: node.data.enabled,
+                pipeline_id: node.data.pipelineId,
+                labels: {},
+                config_status: 'valid',
+                runtime: {
+                  status: node.data.status || '',
+                  last_run_status: node.data.lastRunStatus,
+                  consecutive_failures: 0,
+                },
+              })),
+              edges: graphEdgesRef.current,
+            })
             setAllNodes((prev) => graph.nodes.map((node) => ({
               ...node,
               data: prev.find((item) => item.id === node.id)?.data || node.data,
@@ -517,7 +557,9 @@ export default function PipelineCanvas({ pipelineId }: Props) {
                   : <Text type="secondary">—</Text>}
               </Descriptions.Item>
               <Descriptions.Item label="上游任务">
-                {selectedUpstream ? selectedUpstream.name : <Text type="secondary">无</Text>}
+                {selectedUpstream.length > 0
+                  ? selectedUpstream.map((item) => <Tag key={item.task_id}>{item.name}</Tag>)
+                  : <Text type="secondary">无</Text>}
               </Descriptions.Item>
               <Descriptions.Item label="下游任务">
                 {selectedDownstream.length > 0
@@ -543,6 +585,12 @@ export default function PipelineCanvas({ pipelineId }: Props) {
             <Descriptions.Item label="上游">{selectedEdge.source}</Descriptions.Item>
             <Descriptions.Item label="下游">{selectedEdge.target}</Descriptions.Item>
             <Descriptions.Item label="触发条件">{selectedEdge.data?.condition || '总是触发'}</Descriptions.Item>
+            <Descriptions.Item label="来源">{selectedEdge.data?.legacy ? '旧 watch_task_id 字段' : '依赖表'}</Descriptions.Item>
+            <Descriptions.Item label="状态">
+              {selectedEdge.data?.valid === false
+                ? <Tag color="red">{selectedEdge.data.error || '无效'}</Tag>
+                : <Tag color="green">有效</Tag>}
+            </Descriptions.Item>
           </Descriptions>
         )}
       </Drawer>

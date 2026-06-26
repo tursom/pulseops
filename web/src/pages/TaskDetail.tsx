@@ -38,11 +38,11 @@ import {
 } from '../api/client'
 import type {
   AIAnalysisRecord,
-  RunRecord,
+  RunListItem,
   RunStat,
   SampleResponse,
   TaskDefinition,
-  TaskState,
+  TaskView as APITaskView,
 } from '../api/types'
 import DurationChart from '../components/DurationChart'
 import {
@@ -62,7 +62,7 @@ import {
   safeJson,
   shortID,
   statusColorForTask,
-  toTaskView,
+  decorateTaskView,
   type TaskView,
 } from '../utils/pulseops'
 
@@ -74,10 +74,6 @@ const TIME_RANGE_OPTIONS = [
   { label: '最近 30 天', value: '720h' },
   { label: '全部', value: '' },
 ]
-
-function definitionFromTask(task: TaskState | null): TaskDefinition | undefined {
-  return (task as unknown as { definition?: TaskDefinition } | null)?.definition
-}
 
 function sampleDisplayData(sample: SampleResponse | null | undefined): unknown {
   return sample?.display_data ?? sample?.data
@@ -101,10 +97,10 @@ export default function TaskDetail() {
   const [searchParams] = useSearchParams()
   const returnUrl = searchParams.get('from') || '/tasks'
 
-  const [task, setTask] = useState<TaskState | null>(null)
+  const [task, setTask] = useState<APITaskView | null>(null)
   const [defs, setDefs] = useState<TaskDefinition[]>([])
   const [chartRuns, setChartRuns] = useState<RunStat[]>([])
-  const [tableRuns, setTableRuns] = useState<RunRecord[]>([])
+  const [tableRuns, setTableRuns] = useState<RunListItem[]>([])
   const [total, setTotal] = useState(0)
   const [analyses, setAnalyses] = useState<AIAnalysisRecord[]>([])
   const [loading, setLoading] = useState(true)
@@ -153,8 +149,8 @@ export default function TaskDetail() {
     return () => clearInterval(interval)
   }, [fetchData])
 
-  const def = useMemo(() => definitionFromTask(task) || defs.find((item) => item.task_id === id), [defs, id, task])
-  const view = useMemo(() => (task ? toTaskView(task, def) : null), [def, task])
+  const def = useMemo(() => task?.definition || defs.find((item) => item.task_id === id), [defs, id, task])
+  const view = useMemo(() => (task ? decorateTaskView(task) : null), [task])
   const upstream = useMemo(() => collectUpstream(defs, def), [defs, def])
   const downstream = useMemo(() => (id ? collectDownstream(defs, id) : []), [defs, id])
   const latestFailedRun = useMemo(
@@ -166,7 +162,7 @@ export default function TaskDetail() {
   useEffect(() => {
     if (!def) return
     const params = def.params || {}
-    const upstreamId = (params.source_task_id as string) || def.watch_task_id || ''
+    const upstreamId = (params.source_task_id as string) || def.watch_task_id || def.dependencies?.[0]?.upstream_task_id || ''
     const exprs = params.extract_exprs as Array<{ source: string; jq_expr?: string }> | undefined
     if (def.kind !== 'data_process' || !upstreamId || !exprs?.length) {
       setSamples({})
@@ -244,7 +240,7 @@ export default function TaskDetail() {
     }
   }
 
-  const runColumns: ColumnsType<RunRecord> = [
+  const runColumns: ColumnsType<RunListItem> = [
     {
       title: '运行 ID',
       dataIndex: 'run_id',
@@ -329,7 +325,7 @@ export default function TaskDetail() {
     'artifact:stderr': 'Artifact Stderr',
   }
   const extractExprs = def?.params?.extract_exprs as Array<{ field: string; source: string; jq_expr: string; agg_mode?: string }> | undefined
-  const dataSourceTaskId = ((def?.params || {}).source_task_id as string) || def?.watch_task_id || ''
+  const dataSourceTaskId = ((def?.params || {}).source_task_id as string) || def?.watch_task_id || def?.dependencies?.[0]?.upstream_task_id || ''
 
   return (
     <div className="page-shell">
@@ -420,7 +416,9 @@ export default function TaskDetail() {
                 {downstream.length > 0 ? downstream.map((item) => <Tag key={item.task_id}>{item.name}</Tag>) : <Text type="secondary">无</Text>}
               </Descriptions.Item>
               <Descriptions.Item label="触发条件">
-                {def?.watch_condition ? <Text code>{def.watch_condition}</Text> : <Text type="secondary">不限制或非依赖触发</Text>}
+                {def?.dependencies?.length
+                  ? def.dependencies.map((dep) => <Tag key={dep.id || dep.upstream_task_id}>{dep.condition || '总是触发'}</Tag>)
+                  : def?.watch_condition ? <Text code>{def.watch_condition}</Text> : <Text type="secondary">不限制或非依赖触发</Text>}
               </Descriptions.Item>
             </Descriptions>
           </Card>
@@ -434,7 +432,7 @@ export default function TaskDetail() {
           </Card>
 
           <Card className="ops-card" title={`运行历史 (${total})`}>
-            <Table<RunRecord>
+              <Table<RunListItem>
               className="dense-table"
               columns={runColumns}
               dataSource={tableRuns}
@@ -452,14 +450,15 @@ export default function TaskDetail() {
                 },
               }}
               expandable={{
-                rowExpandable: (run) => Boolean(run.summary || run.stdout || run.stderr),
+                rowExpandable: (run) => Boolean(run.summary || run.has_payload || run.artifact_count || run.finding_count),
                 expandedRowRender: (run) => (
                   <Space direction="vertical" style={{ width: '100%' }}>
                     {run.summary && (
                       <pre className="code-block">{safeJson(run.summary)}</pre>
                     )}
-                    {run.stdout && <pre className="code-block">{run.stdout}</pre>}
-                    {run.stderr && <pre className="code-block danger-text">{run.stderr}</pre>}
+                    <Text type="secondary">
+                      Payload：{run.has_payload ? '有' : '无'}，产物 {run.artifact_count} 个，检查发现 {run.finding_count} 条。
+                    </Text>
                   </Space>
                 ),
               }}

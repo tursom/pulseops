@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -29,67 +30,198 @@ type TaskManager interface {
 	ReloadTask(ctx context.Context, id string) error
 	SetTaskEnabled(ctx context.Context, id string, enabled bool) error
 	UpsertTaskFromDB(ctx context.Context, def config.TaskDefinition) (store.TaskState, error)
+	ValidateTaskDefinition(def config.TaskDefinition) (config.TaskSpec, error)
+	TestRunTaskDefinition(ctx context.Context, def config.TaskDefinition) (store.RunRecord, error)
 	RemoveTaskByID(ctx context.Context, taskID string) error
 }
 
-func Routes(staticDir string, manager TaskManager, repository store.Repository, artifactStore store.ArtifactStore, logger *slog.Logger) http.Handler {
+type SettingsReloader interface {
+	ReloadSinks(entries []config.SinkEntry, store *store.PostgresStore) error
+	SetMaxPayloadBytes(maxPayloadBytes int)
+}
+
+type settingsResponse struct {
+	Settings config.GlobalSettings `json:"settings"`
+	Applied  bool                  `json:"applied"`
+	Warnings []string              `json:"warnings"`
+}
+
+type taskRuntimeView struct {
+	Status              string     `json:"status"`
+	LastRunStatus       string     `json:"last_run_status,omitempty"`
+	LastCheckStatus     string     `json:"last_check_status,omitempty"`
+	LastRunAt           *time.Time `json:"last_run_at,omitempty"`
+	NextRunAt           *time.Time `json:"next_run_at,omitempty"`
+	LastDurationMS      int64      `json:"last_duration_ms,omitempty"`
+	LastError           string     `json:"last_error,omitempty"`
+	ConsecutiveFailures int        `json:"consecutive_failures"`
+}
+
+type taskDependencyView struct {
+	UpstreamTaskID   string `json:"upstream_task_id,omitempty"`
+	DownstreamCount  int    `json:"downstream_count"`
+	UpstreamCount    int    `json:"upstream_count"`
+	PipelineID       string `json:"pipeline_id,omitempty"`
+	WatchCondition   string `json:"watch_condition,omitempty"`
+	DependencyStatus string `json:"dependency_status,omitempty"`
+}
+
+type taskView struct {
+	store.TaskState
+	ConfigStatus string                  `json:"config_status"`
+	LoadError    string                  `json:"load_error,omitempty"`
+	Runtime      taskRuntimeView         `json:"runtime"`
+	Dependency   taskDependencyView      `json:"dependency"`
+	Definition   *config.TaskDefinition  `json:"definition,omitempty"`
+	Dependencies []config.TaskDependency `json:"dependencies,omitempty"`
+}
+
+type dashboardSummary struct {
+	Counts       dashboardCounts     `json:"counts"`
+	Health       dashboardHealth     `json:"health"`
+	Anomalies    []taskView          `json:"anomalies"`
+	RecentRuns   []store.RunListItem `json:"recent_runs"`
+	LabelGroups  []labelAggregate    `json:"label_groups"`
+	GeneratedAt  time.Time           `json:"generated_at"`
+	RefreshAfter string              `json:"refresh_after"`
+}
+
+type dashboardCounts struct {
+	Total       int `json:"total"`
+	Enabled     int `json:"enabled"`
+	Failed      int `json:"failed"`
+	CheckFailed int `json:"check_failed"`
+	LoadFailed  int `json:"load_failed"`
+	Stale       int `json:"stale"`
+	Disabled    int `json:"disabled"`
+}
+
+type dashboardHealth struct {
+	Status string `json:"status"`
+	Label  string `json:"label"`
+	Detail string `json:"detail"`
+}
+
+type labelAggregate struct {
+	Key      string `json:"key"`
+	Value    string `json:"value"`
+	Total    int    `json:"total"`
+	Abnormal int    `json:"abnormal"`
+}
+
+type taskGraph struct {
+	Nodes []taskGraphNode `json:"nodes"`
+	Edges []taskGraphEdge `json:"edges"`
+}
+
+type taskGraphNode struct {
+	TaskID       string            `json:"task_id"`
+	Name         string            `json:"name"`
+	Kind         string            `json:"kind"`
+	Enabled      bool              `json:"enabled"`
+	Labels       map[string]string `json:"labels"`
+	PipelineID   string            `json:"pipeline_id,omitempty"`
+	ConfigStatus string            `json:"config_status"`
+	Runtime      taskRuntimeView   `json:"runtime"`
+}
+
+type taskGraphEdge struct {
+	ID               string         `json:"id"`
+	UpstreamTaskID   string         `json:"upstream_task_id"`
+	DownstreamTaskID string         `json:"downstream_task_id"`
+	Condition        string         `json:"condition,omitempty"`
+	SourceKey        string         `json:"source_key,omitempty"`
+	Params           map[string]any `json:"params,omitempty"`
+	Valid            bool           `json:"valid"`
+	Error            string         `json:"error,omitempty"`
+	Legacy           bool           `json:"legacy,omitempty"`
+}
+
+type batchTaskRequest struct {
+	Action  string   `json:"action"`
+	TaskIDs []string `json:"task_ids"`
+}
+
+type batchTaskResult struct {
+	TaskID string           `json:"task_id"`
+	OK     bool             `json:"ok"`
+	Error  string           `json:"error,omitempty"`
+	Run    *store.RunRecord `json:"run,omitempty"`
+}
+
+type taskValidationResponse struct {
+	Valid      bool     `json:"valid"`
+	Errors     []string `json:"errors"`
+	Normalized any      `json:"normalized,omitempty"`
+}
+
+func Routes(staticDir string, manager TaskManager, repository store.Repository, artifactStore store.ArtifactStore, settingsReloader SettingsReloader, platform config.PlatformConfigSummary, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 
 	// API routes — register before static/file routes for specificity priority
 	mux.Handle("GET /metrics", promhttp.Handler())
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"status": "ok",
+			"status": platform.Mode,
 			"time":   time.Now().Format(time.RFC3339),
 		})
 	})
-	mux.HandleFunc("GET /api/tasks", func(w http.ResponseWriter, r *http.Request) {
-		tasks := manager.ListTasks()
-		if tasks == nil {
-			tasks = []store.TaskState{}
-		}
-		writeJSON(w, http.StatusOK, tasks)
+	mux.HandleFunc("GET /api/platform-config", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, platform)
 	})
-	mux.HandleFunc("GET /api/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
-		taskState, ok := manager.GetTask(r.PathValue("id"))
-		if !ok {
-			writeError(w, http.StatusNotFound, "task not found")
+	mux.HandleFunc("PUT /api/platform-config", func(w http.ResponseWriter, r *http.Request) {
+		var updated config.PlatformConfigSummary
+		if err := json.NewDecoder(r.Body).Decode(&updated); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
 			return
 		}
-		def, err := repository.GetTaskDefinition(r.Context(), r.PathValue("id"))
-		if err != nil && err != sql.ErrNoRows {
+		updated.Mode = platform.Mode
+		updated.Applied = false
+		updated.Warnings = append(updated.Warnings, "AI and artifact store changes are saved and require service restart")
+		if err := repository.SavePlatformConfig(r.Context(), updated); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if def != nil {
-			if len(def.LabelsJSON) > 0 {
-				json.Unmarshal(def.LabelsJSON, &def.Labels)
-			}
-			if len(def.ParamsJSON) > 0 {
-				json.Unmarshal(def.ParamsJSON, &def.Params)
-			}
+		writeJSON(w, http.StatusOK, updated)
+	})
+	mux.HandleFunc("GET /api/dashboard/summary", func(w http.ResponseWriter, r *http.Request) {
+		since := parseDurationQuery(r, "since", 24*time.Hour)
+		views, err := buildTaskViews(r.Context(), manager, repository, "")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"task_id":             taskState.TaskID,
-			"name":                taskState.Name,
-			"kind":                taskState.Kind,
-			"enabled":             taskState.Enabled,
-			"status":              taskState.Status,
-			"labels":              taskState.Labels,
-			"last_run_at":         taskState.LastRunAt,
-			"next_run_at":         taskState.NextRunAt,
-			"last_run_status":     taskState.LastRunStatus,
-			"last_check_status":   taskState.LastCheckStatus,
-			"last_error":          taskState.LastError,
-			"last_duration_ms":    taskState.LastDurationMS,
-			"last_reload_error":   taskState.LastReloadError,
-			"last_sample_seed":    taskState.LastSampleSeed,
-			"last_sample_count":   taskState.LastSampleCount,
-			"last_mismatch_count": taskState.LastMismatchCount,
-			"source_path":         taskState.SourcePath,
-			"updated_at":          taskState.UpdatedAt,
-			"definition":          def,
-		})
+		recentRuns, _, err := repository.ListRunsAcrossTasks(r.Context(), store.RunQuery{Since: since, Limit: 20})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, buildDashboardSummary(views, recentRuns))
+	})
+	mux.HandleFunc("GET /api/tasks", func(w http.ResponseWriter, r *http.Request) {
+		views, err := buildTaskViews(r.Context(), manager, repository, "")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		views = filterTaskViews(r, views)
+		if views == nil {
+			views = []taskView{}
+		}
+		writeJSON(w, http.StatusOK, views)
+	})
+	mux.HandleFunc("GET /api/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		views, err := buildTaskViews(r.Context(), manager, repository, id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if len(views) == 0 {
+			writeError(w, http.StatusNotFound, "task not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, views[0])
 	})
 	mux.HandleFunc("GET /api/tasks/{id}/sample", func(w http.ResponseWriter, r *http.Request) {
 		source := r.URL.Query().Get("source")
@@ -109,7 +241,7 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 		since, _ := time.ParseDuration(r.URL.Query().Get("since"))
-		records, err := repository.ListRuns(r.Context(), r.PathValue("id"), limit, offset, since)
+		records, err := repository.ListRunItems(r.Context(), r.PathValue("id"), limit, offset, since)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -120,7 +252,19 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 			return
 		}
 		if records == nil {
-			records = []store.RunRecord{}
+			records = []store.RunListItem{}
+		}
+		writeJSON(w, http.StatusOK, store.PaginatedRuns{Records: records, Total: total})
+	})
+	mux.HandleFunc("GET /api/runs", func(w http.ResponseWriter, r *http.Request) {
+		query := parseRunQuery(r)
+		records, total, err := repository.ListRunsAcrossTasks(r.Context(), query)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if records == nil {
+			records = []store.RunListItem{}
 		}
 		writeJSON(w, http.StatusOK, store.PaginatedRuns{Records: records, Total: total})
 	})
@@ -274,6 +418,18 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "disabled"})
 	})
+	mux.HandleFunc("POST /api/tasks/batch", func(w http.ResponseWriter, r *http.Request) {
+		var req batchTaskRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+			return
+		}
+		results := runBatchTaskAction(r.Context(), manager, req)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"action":  req.Action,
+			"results": results,
+		})
+	})
 
 	mux.HandleFunc("GET /api/task-defs", func(w http.ResponseWriter, r *http.Request) {
 		defs, err := repository.ListTaskDefinitions(r.Context())
@@ -300,6 +456,48 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		writeJSON(w, http.StatusOK, def)
 	})
 
+	mux.HandleFunc("POST /api/task-defs/validate", func(w http.ResponseWriter, r *http.Request) {
+		var def config.TaskDefinition
+		if err := json.NewDecoder(r.Body).Decode(&def); err != nil {
+			writeJSON(w, http.StatusBadRequest, taskValidationResponse{Valid: false, Errors: []string{"invalid body: " + err.Error()}})
+			return
+		}
+		resp := validateTaskDefinition(manager, def)
+		status := http.StatusOK
+		if !resp.Valid {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, resp)
+	})
+
+	mux.HandleFunc("POST /api/task-defs/dry-run", func(w http.ResponseWriter, r *http.Request) {
+		var def config.TaskDefinition
+		if err := json.NewDecoder(r.Body).Decode(&def); err != nil {
+			writeJSON(w, http.StatusBadRequest, taskValidationResponse{Valid: false, Errors: []string{"invalid body: " + err.Error()}})
+			return
+		}
+		resp := validateTaskDefinition(manager, def)
+		status := http.StatusOK
+		if !resp.Valid {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, resp)
+	})
+
+	mux.HandleFunc("POST /api/task-defs/test-run", func(w http.ResponseWriter, r *http.Request) {
+		var def config.TaskDefinition
+		if err := json.NewDecoder(r.Body).Decode(&def); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+			return
+		}
+		record, err := manager.TestRunTaskDefinition(r.Context(), def)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"record": record, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, record)
+	})
+
 	mux.HandleFunc("POST /api/task-defs", func(w http.ResponseWriter, r *http.Request) {
 		var def config.TaskDefinition
 		if err := json.NewDecoder(r.Body).Decode(&def); err != nil {
@@ -312,6 +510,10 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		}
 		if def.Kind == "" {
 			writeError(w, http.StatusBadRequest, "kind is required")
+			return
+		}
+		if resp := validateTaskDefinition(manager, def); !resp.Valid {
+			writeJSON(w, http.StatusBadRequest, resp)
 			return
 		}
 		populateJSONBytes(&def)
@@ -350,6 +552,10 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		if updated.PipelineID == nil {
 			updated.PipelineID = existing.PipelineID
 		}
+		if resp := validateTaskDefinition(manager, updated); !resp.Valid {
+			writeJSON(w, http.StatusBadRequest, resp)
+			return
+		}
 		populateJSONBytes(&updated)
 		if err := repository.UpdateTaskDefinition(r.Context(), updated); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -365,8 +571,7 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 	mux.HandleFunc("DELETE /api/task-defs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if err := manager.RemoveTaskByID(r.Context(), id); err != nil {
-			writeError(w, http.StatusNotFound, err.Error())
-			return
+			logger.WarnContext(r.Context(), "remove runtime task failed before deleting definition", "task_id", id, "err", err)
 		}
 		if err := repository.DeleteTaskDefinition(r.Context(), id); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -488,13 +693,74 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "unassigned", "task_id": taskID})
 	})
 
+	mux.HandleFunc("GET /api/task-graph", func(w http.ResponseWriter, r *http.Request) {
+		pipelineID := r.URL.Query().Get("pipeline_id")
+		graph, err := buildTaskGraph(r.Context(), manager, repository, pipelineID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, graph)
+	})
+
+	mux.HandleFunc("POST /api/task-dependencies", func(w http.ResponseWriter, r *http.Request) {
+		var dep config.TaskDependency
+		if err := json.NewDecoder(r.Body).Decode(&dep); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+			return
+		}
+		if dep.Condition != "" {
+			if err := config.ValidateWatchCondition(dep.Condition); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		saved, err := repository.UpsertTaskDependency(r.Context(), dep)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := reloadTaskDefinitionFromDB(r.Context(), manager, repository, saved.DownstreamTaskID); err != nil {
+			writeError(w, http.StatusInternalServerError, "dependency saved but failed to reload downstream task: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, saved)
+	})
+
+	mux.HandleFunc("DELETE /api/task-dependencies/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		deps, err := repository.ListTaskDependencies(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		downstreamTaskID := ""
+		for _, dep := range deps {
+			if dep.ID == id {
+				downstreamTaskID = dep.DownstreamTaskID
+				break
+			}
+		}
+		if err := repository.DeleteTaskDependency(r.Context(), id); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if downstreamTaskID != "" {
+			if err := reloadTaskDefinitionFromDB(r.Context(), manager, repository, downstreamTaskID); err != nil {
+				writeError(w, http.StatusInternalServerError, "dependency deleted but failed to reload downstream task: "+err.Error())
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	})
+
 	mux.HandleFunc("GET /api/settings", func(w http.ResponseWriter, r *http.Request) {
 		settings, err := repository.LoadGlobalSettings(r.Context())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, settings)
+		writeJSON(w, http.StatusOK, settingsResponse{Settings: settings, Applied: true, Warnings: settingsWarnings(settings)})
 	})
 
 	mux.HandleFunc("PUT /api/settings", func(w http.ResponseWriter, r *http.Request) {
@@ -507,7 +773,23 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, updated)
+		warnings := settingsWarnings(updated)
+		applied := false
+		if settingsReloader != nil {
+			if pg, ok := repository.(*store.PostgresStore); ok {
+				if err := settingsReloader.ReloadSinks(updated.Sinks, pg); err != nil {
+					warnings = append(warnings, err.Error())
+				} else {
+					settingsReloader.SetMaxPayloadBytes(updated.MaxPayloadBytes)
+					applied = true
+				}
+			} else {
+				warnings = append(warnings, "settings saved but live reload is unavailable for this repository")
+			}
+		} else {
+			warnings = append(warnings, "settings saved but live reload is unavailable")
+		}
+		writeJSON(w, http.StatusOK, settingsResponse{Settings: updated, Applied: applied, Warnings: warnings})
 	})
 
 	if staticDir != "" {
@@ -543,6 +825,542 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func buildTaskViews(ctx context.Context, manager TaskManager, repository store.Repository, taskID string) ([]taskView, error) {
+	defs, err := repository.ListTaskDefinitions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	deps, err := repository.ListTaskDependencies(ctx)
+	if err != nil {
+		return nil, err
+	}
+	stateMap := map[string]store.TaskState{}
+	for _, state := range manager.ListTasks() {
+		stateMap[state.TaskID] = state
+	}
+	defMap := map[string]*config.TaskDefinition{}
+	for i := range defs {
+		defMap[defs[i].TaskID] = &defs[i]
+	}
+	depIndex := buildDependencyIndex(defs, deps)
+	taskIDs := make([]string, 0, len(defs)+len(stateMap))
+	for _, def := range defs {
+		taskIDs = append(taskIDs, def.TaskID)
+	}
+	for taskID := range stateMap {
+		if _, ok := defMap[taskID]; !ok {
+			taskIDs = append(taskIDs, taskID)
+		}
+	}
+	consecutiveFailures, err := repository.ListConsecutiveFailures(ctx, taskIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	views := make([]taskView, 0, len(defs)+len(stateMap))
+	for i := range defs {
+		def := &defs[i]
+		if taskID != "" && def.TaskID != taskID {
+			continue
+		}
+		state, ok := stateMap[def.TaskID]
+		if !ok {
+			state = emptyStateFromDefinition(*def)
+		}
+		views = append(views, buildTaskView(state, def, depIndex, consecutiveFailures[state.TaskID]))
+		delete(stateMap, def.TaskID)
+	}
+	for _, state := range stateMap {
+		if taskID != "" && state.TaskID != taskID {
+			continue
+		}
+		views = append(views, buildTaskView(state, defMap[state.TaskID], depIndex, consecutiveFailures[state.TaskID]))
+	}
+	sortTaskViews(views)
+	return views, nil
+}
+
+type dependencyIndex struct {
+	upstreamByTask   map[string][]config.TaskDependency
+	downstreamByTask map[string][]config.TaskDependency
+}
+
+func buildDependencyIndex(defs []config.TaskDefinition, deps []config.TaskDependency) dependencyIndex {
+	index := dependencyIndex{
+		upstreamByTask:   map[string][]config.TaskDependency{},
+		downstreamByTask: map[string][]config.TaskDependency{},
+	}
+	for _, dep := range deps {
+		index.upstreamByTask[dep.DownstreamTaskID] = append(index.upstreamByTask[dep.DownstreamTaskID], dep)
+		index.downstreamByTask[dep.UpstreamTaskID] = append(index.downstreamByTask[dep.UpstreamTaskID], dep)
+	}
+	for _, def := range defs {
+		if def.Trigger != "on_run" || def.WatchTaskID == "" {
+			continue
+		}
+		legacy := config.TaskDependency{
+			ID:               "legacy:" + def.WatchTaskID + ":" + def.TaskID,
+			UpstreamTaskID:   def.WatchTaskID,
+			DownstreamTaskID: def.TaskID,
+			Condition:        def.WatchCondition,
+		}
+		index.upstreamByTask[def.TaskID] = append(index.upstreamByTask[def.TaskID], legacy)
+		index.downstreamByTask[def.WatchTaskID] = append(index.downstreamByTask[def.WatchTaskID], legacy)
+	}
+	return index
+}
+
+func buildTaskView(state store.TaskState, def *config.TaskDefinition, depIndex dependencyIndex, consecutiveFailures int) taskView {
+	if state.Labels == nil {
+		state.Labels = map[string]string{}
+	}
+	view := taskView{
+		TaskState:    state,
+		ConfigStatus: "valid",
+		Runtime: taskRuntimeView{
+			Status:          state.Status,
+			LastRunStatus:   state.LastRunStatus,
+			LastCheckStatus: state.LastCheckStatus,
+			LastRunAt:       state.LastRunAt,
+			NextRunAt:       state.NextRunAt,
+			LastDurationMS:  state.LastDurationMS,
+			LastError:       state.LastError,
+		},
+		Definition: def,
+	}
+	if def != nil {
+		view.Dependencies = depIndex.upstreamByTask[def.TaskID]
+		if def.PipelineID != nil {
+			view.Dependency.PipelineID = *def.PipelineID
+		}
+	}
+	view.Runtime.ConsecutiveFailures = consecutiveFailures
+	upstreams := depIndex.upstreamByTask[state.TaskID]
+	downstreams := depIndex.downstreamByTask[state.TaskID]
+	view.Dependency.UpstreamCount = len(upstreams)
+	view.Dependency.DownstreamCount = len(downstreams)
+	if len(upstreams) > 0 {
+		view.Dependency.UpstreamTaskID = upstreams[0].UpstreamTaskID
+		view.Dependency.WatchCondition = upstreams[0].Condition
+		view.Dependency.DependencyStatus = "configured"
+	}
+	if state.LastReloadError != "" {
+		view.ConfigStatus = "load_error"
+		view.LoadError = state.LastReloadError
+	} else if state.Status == "unloaded" {
+		view.ConfigStatus = "missing_runtime"
+	}
+	return view
+}
+
+func emptyStateFromDefinition(def config.TaskDefinition) store.TaskState {
+	labels := def.Labels
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	return store.TaskState{
+		TaskID:    def.TaskID,
+		Name:      def.Name,
+		Kind:      def.Kind,
+		Enabled:   def.Enabled,
+		Status:    "unloaded",
+		Labels:    labels,
+		UpdatedAt: def.UpdatedAt,
+	}
+}
+
+func filterTaskViews(r *http.Request, views []taskView) []taskView {
+	query := r.URL.Query()
+	search := strings.ToLower(strings.TrimSpace(query.Get("search")))
+	kind := query.Get("kind")
+	status := query.Get("status")
+	runStatus := query.Get("run_status")
+	checkStatus := query.Get("check_status")
+	enabled := query.Get("enabled")
+	result := views[:0]
+	for _, view := range views {
+		if search != "" {
+			haystack := strings.ToLower(strings.Join([]string{
+				view.TaskID,
+				view.Name,
+				view.Kind,
+				view.LastError,
+				view.LastReloadError,
+				view.LoadError,
+			}, "\n"))
+			if !strings.Contains(haystack, search) {
+				continue
+			}
+		}
+		if kind != "" && view.Kind != kind {
+			continue
+		}
+		if status != "" && view.Status != status {
+			continue
+		}
+		if runStatus != "" && view.LastRunStatus != runStatus {
+			continue
+		}
+		if checkStatus != "" && view.LastCheckStatus != checkStatus {
+			continue
+		}
+		if enabled == "true" && !view.Enabled {
+			continue
+		}
+		if enabled == "false" && view.Enabled {
+			continue
+		}
+		matchedLabels := true
+		for key, values := range query {
+			if !strings.HasPrefix(key, "label.") || len(values) == 0 || values[0] == "" {
+				continue
+			}
+			labelKey := strings.TrimPrefix(key, "label.")
+			if view.Labels[labelKey] != values[0] {
+				matchedLabels = false
+				break
+			}
+		}
+		if !matchedLabels {
+			continue
+		}
+		result = append(result, view)
+	}
+	return result
+}
+
+func sortTaskViews(views []taskView) {
+	severity := func(view taskView) int {
+		if !view.Enabled || view.Status == "disabled" {
+			return 3
+		}
+		if view.LastReloadError != "" || view.LastRunStatus == "failed" || view.LastRunStatus == "timeout" || view.LastCheckStatus == "fail" {
+			return 0
+		}
+		if view.Status == "unloaded" || isStaleTask(view.TaskState) {
+			return 1
+		}
+		return 2
+	}
+	latest := func(view taskView) time.Time {
+		if view.LastRunAt != nil {
+			return *view.LastRunAt
+		}
+		return view.UpdatedAt
+	}
+	sort.Slice(views, func(i, j int) bool {
+		left, right := severity(views[i]), severity(views[j])
+		if left != right {
+			return left < right
+		}
+		return latest(views[i]).After(latest(views[j]))
+	})
+}
+
+func buildDashboardSummary(views []taskView, recentRuns []store.RunListItem) dashboardSummary {
+	counts := dashboardCounts{Total: len(views)}
+	var anomalies []taskView
+	for _, view := range views {
+		if view.Enabled {
+			counts.Enabled++
+		}
+		if !view.Enabled || view.Status == "disabled" {
+			counts.Disabled++
+		}
+		if view.LastRunStatus == "failed" || view.LastRunStatus == "timeout" {
+			counts.Failed++
+		}
+		if view.LastCheckStatus == "fail" {
+			counts.CheckFailed++
+		}
+		if view.LastReloadError != "" {
+			counts.LoadFailed++
+		}
+		if view.Enabled && isStaleTask(view.TaskState) {
+			counts.Stale++
+		}
+		if taskIsAbnormal(view) {
+			anomalies = append(anomalies, view)
+		}
+	}
+	if len(anomalies) > 12 {
+		anomalies = anomalies[:12]
+	}
+	return dashboardSummary{
+		Counts:       counts,
+		Health:       dashboardHealthFromCounts(counts),
+		Anomalies:    anomalies,
+		RecentRuns:   recentRuns,
+		LabelGroups:  aggregateTaskLabels(views),
+		GeneratedAt:  time.Now(),
+		RefreshAfter: "15s",
+	}
+}
+
+func dashboardHealthFromCounts(counts dashboardCounts) dashboardHealth {
+	if counts.LoadFailed > 0 {
+		return dashboardHealth{Status: "config_error", Label: "存在配置加载错误", Detail: "至少一个任务定义无法加载到运行态"}
+	}
+	if counts.Failed > 0 || counts.CheckFailed > 0 {
+		return dashboardHealth{Status: "failed", Label: "存在失败任务", Detail: "需要优先处理失败、超时或检查未通过任务"}
+	}
+	if counts.Stale > 0 {
+		return dashboardHealth{Status: "warning", Label: "存在待确认任务", Detail: "存在长时间未运行任务"}
+	}
+	return dashboardHealth{Status: "ok", Label: "正常", Detail: "当前未发现需要立即处理的任务"}
+}
+
+func aggregateTaskLabels(views []taskView) []labelAggregate {
+	keys := []string{"env", "service", "kind"}
+	items := map[string]labelAggregate{}
+	for _, view := range views {
+		for _, key := range keys {
+			value := view.Kind
+			if key != "kind" {
+				value = view.Labels[key]
+			}
+			if value == "" {
+				continue
+			}
+			mapKey := key + ":" + value
+			item := items[mapKey]
+			item.Key = key
+			item.Value = value
+			item.Total++
+			if taskIsAbnormal(view) {
+				item.Abnormal++
+			}
+			items[mapKey] = item
+		}
+	}
+	result := make([]labelAggregate, 0, len(items))
+	for _, item := range items {
+		result = append(result, item)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Abnormal != result[j].Abnormal {
+			return result[i].Abnormal > result[j].Abnormal
+		}
+		return result[i].Total > result[j].Total
+	})
+	return result
+}
+
+func taskIsAbnormal(view taskView) bool {
+	return view.LastReloadError != "" ||
+		view.LastRunStatus == "failed" ||
+		view.LastRunStatus == "timeout" ||
+		view.LastCheckStatus == "fail" ||
+		view.Status == "unloaded" ||
+		(view.Enabled && isStaleTask(view.TaskState))
+}
+
+func isStaleTask(state store.TaskState) bool {
+	if !state.Enabled || state.LastRunAt == nil {
+		return false
+	}
+	return time.Since(*state.LastRunAt) > 24*time.Hour
+}
+
+func parseRunQuery(r *http.Request) store.RunQuery {
+	query := r.URL.Query()
+	limit, _ := strconv.Atoi(query.Get("limit"))
+	offset, _ := strconv.Atoi(query.Get("offset"))
+	runQuery := store.RunQuery{
+		TaskID:      query.Get("task_id"),
+		Kind:        query.Get("kind"),
+		RunStatus:   query.Get("run_status"),
+		CheckStatus: query.Get("check_status"),
+		Since:       parseDurationQuery(r, "since", 0),
+		Limit:       limit,
+		Offset:      offset,
+		Labels:      map[string]string{},
+	}
+	for key, values := range query {
+		if !strings.HasPrefix(key, "label.") || len(values) == 0 || values[0] == "" {
+			continue
+		}
+		runQuery.Labels[strings.TrimPrefix(key, "label.")] = values[0]
+	}
+	return runQuery
+}
+
+func parseDurationQuery(r *http.Request, key string, fallback time.Duration) time.Duration {
+	value := r.URL.Query().Get(key)
+	if value == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return fallback
+	}
+	return d
+}
+
+func runBatchTaskAction(ctx context.Context, manager TaskManager, req batchTaskRequest) []batchTaskResult {
+	results := make([]batchTaskResult, 0, len(req.TaskIDs))
+	for _, taskID := range req.TaskIDs {
+		result := batchTaskResult{TaskID: taskID}
+		switch req.Action {
+		case "run":
+			run, err := manager.RunTask(ctx, taskID, task.TriggerManual)
+			if err != nil {
+				result.Error = err.Error()
+			} else {
+				result.OK = true
+				result.Run = &run
+			}
+		case "enable":
+			if err := manager.SetTaskEnabled(ctx, taskID, true); err != nil {
+				result.Error = err.Error()
+			} else {
+				result.OK = true
+			}
+		case "disable":
+			if err := manager.SetTaskEnabled(ctx, taskID, false); err != nil {
+				result.Error = err.Error()
+			} else {
+				result.OK = true
+			}
+		case "reload":
+			if err := manager.ReloadTask(ctx, taskID); err != nil {
+				result.Error = err.Error()
+			} else {
+				result.OK = true
+			}
+		default:
+			result.Error = "unsupported action"
+		}
+		results = append(results, result)
+	}
+	return results
+}
+
+func reloadTaskDefinitionFromDB(ctx context.Context, manager TaskManager, repository store.Repository, taskID string) error {
+	def, err := repository.GetTaskDefinition(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	_, err = manager.UpsertTaskFromDB(ctx, *def)
+	return err
+}
+
+func validateTaskDefinition(manager TaskManager, def config.TaskDefinition) taskValidationResponse {
+	populateJSONBytes(&def)
+	spec, err := manager.ValidateTaskDefinition(def)
+	if err != nil {
+		return taskValidationResponse{Valid: false, Errors: []string{err.Error()}}
+	}
+	return taskValidationResponse{Valid: true, Errors: []string{}, Normalized: spec}
+}
+
+func buildTaskGraph(ctx context.Context, manager TaskManager, repository store.Repository, pipelineID string) (taskGraph, error) {
+	views, err := buildTaskViews(ctx, manager, repository, "")
+	if err != nil {
+		return taskGraph{}, err
+	}
+	nodes := make([]taskGraphNode, 0, len(views))
+	taskIDs := map[string]struct{}{}
+	for _, view := range views {
+		if pipelineID != "" && view.Dependency.PipelineID != pipelineID {
+			continue
+		}
+		taskIDs[view.TaskID] = struct{}{}
+		nodes = append(nodes, taskGraphNode{
+			TaskID:       view.TaskID,
+			Name:         view.Name,
+			Kind:         view.Kind,
+			Enabled:      view.Enabled,
+			Labels:       view.Labels,
+			PipelineID:   view.Dependency.PipelineID,
+			ConfigStatus: view.ConfigStatus,
+			Runtime:      view.Runtime,
+		})
+	}
+	deps, err := repository.ListTaskDependencies(ctx)
+	if err != nil {
+		return taskGraph{}, err
+	}
+	var defs []config.TaskDefinition
+	for _, view := range views {
+		if view.Definition != nil {
+			defs = append(defs, *view.Definition)
+		}
+	}
+	depIndex := buildDependencyIndex(defs, deps)
+	edgeMap := map[string]taskGraphEdge{}
+	for _, list := range depIndex.upstreamByTask {
+		for _, dep := range list {
+			if pipelineID != "" {
+				if _, ok := taskIDs[dep.UpstreamTaskID]; !ok {
+					if _, ok := taskIDs[dep.DownstreamTaskID]; !ok {
+						continue
+					}
+				}
+			}
+			edge := dependencyToGraphEdge(dep, taskIDs)
+			if strings.HasPrefix(dep.ID, "legacy:") {
+				edge.Legacy = true
+			}
+			edgeMap[edge.ID] = edge
+		}
+	}
+	edges := make([]taskGraphEdge, 0, len(edgeMap))
+	for _, edge := range edgeMap {
+		edges = append(edges, edge)
+	}
+	sort.Slice(edges, func(i, j int) bool { return edges[i].ID < edges[j].ID })
+	return taskGraph{Nodes: nodes, Edges: edges}, nil
+}
+
+func dependencyToGraphEdge(dep config.TaskDependency, taskIDs map[string]struct{}) taskGraphEdge {
+	id := dep.ID
+	if id == "" {
+		id = dep.UpstreamTaskID + "->" + dep.DownstreamTaskID
+	}
+	edge := taskGraphEdge{
+		ID:               id,
+		UpstreamTaskID:   dep.UpstreamTaskID,
+		DownstreamTaskID: dep.DownstreamTaskID,
+		Condition:        dep.Condition,
+		SourceKey:        dep.SourceKey,
+		Params:           dep.Params,
+		Valid:            true,
+	}
+	if _, ok := taskIDs[dep.UpstreamTaskID]; !ok && len(taskIDs) > 0 {
+		edge.Valid = false
+		edge.Error = "upstream task not found"
+	}
+	if err := config.ValidateWatchCondition(dep.Condition); err != nil {
+		edge.Valid = false
+		edge.Error = err.Error()
+	}
+	return edge
+}
+
+func settingsWarnings(settings config.GlobalSettings) []string {
+	var warnings []string
+	hasPostgres := false
+	for _, sink := range settings.Sinks {
+		if sink.Kind == "postgres" {
+			hasPostgres = true
+		}
+		if sink.Kind == "webhook" && sink.URL == "" {
+			warnings = append(warnings, "webhook sink "+sink.Name+" has empty url")
+		}
+	}
+	if !hasPostgres {
+		warnings = append(warnings, "at least one postgres sink is required for durable trace records")
+	}
+	if settings.MaxPayloadBytes <= 0 {
+		warnings = append(warnings, "max_payload_bytes should be positive")
+	}
+	if settings.DefaultRetainDays > 0 && settings.DefaultRetainDays < 7 {
+		warnings = append(warnings, "default_retain_days is shorter than 7 days")
+	}
+	return warnings
 }
 
 func populateJSONBytes(def *config.TaskDefinition) {

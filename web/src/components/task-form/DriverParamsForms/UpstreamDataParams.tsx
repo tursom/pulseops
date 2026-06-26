@@ -44,7 +44,9 @@ const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
   const sourceTaskId = form ? Form.useWatch(['params', 'source_task_id'], form) as string : undefined;
   const trigger = form ? Form.useWatch('trigger', form) as string : undefined;
   const watchTaskId = form ? Form.useWatch('watch_task_id', form) as string : undefined;
-  const resolvedTaskId = sourceTaskId || (trigger === 'on_run' ? watchTaskId : null) || null;
+  const dependencies = form ? Form.useWatch('dependencies', form) as Array<{ upstream_task_id?: string }> | undefined : undefined;
+  const dependencyTaskId = dependencies?.find((dep) => dep.upstream_task_id)?.upstream_task_id;
+  const resolvedTaskId = sourceTaskId || dependencyTaskId || (trigger === 'on_run' ? watchTaskId : null) || null;
 
   const [taskDefs, setTaskDefs] = useState<TaskDefinition[]>([]);
   const [taskDefsLoading, setTaskDefsLoading] = useState(false);
@@ -92,7 +94,7 @@ const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
   }, [])
 
   useEffect(() => {
-    const taskId = sourceTaskId || (trigger === 'on_run' ? watchTaskId : null) || null
+    const taskId = sourceTaskId || dependencyTaskId || (trigger === 'on_run' ? watchTaskId : null) || null
     if (!taskId) {
       setPreviewData({})
       setPreviewLoading(false)
@@ -100,7 +102,7 @@ const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
       return
     }
     fetchPreview(taskId)
-  }, [sourceTaskId, watchTaskId, trigger, fetchPreview])
+  }, [sourceTaskId, dependencyTaskId, watchTaskId, trigger, fetchPreview])
 
   return (
     <>

@@ -9,6 +9,7 @@ import {
   Collapse,
   Button,
   InputNumber,
+  message,
   Radio,
   Space,
   Spin,
@@ -17,7 +18,7 @@ import {
 } from 'antd'
 import { MinusCircleOutlined, PlusOutlined, ProfileOutlined, SettingOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import type { TaskDefinition } from '../../api/types'
-import { fetchTaskDefinitions } from '../../api/client'
+import { dryRunTaskDefinition, fetchTaskDefinitions, testRunTaskDefinition, validateTaskDefinition } from '../../api/client'
 import { driverForms } from './DriverParamsForms'
 import { safeJson } from '../../utils/pulseops'
 
@@ -54,6 +55,38 @@ function formListToRecord(
   )
 }
 
+function normalizeFormDefinition(values: Record<string, unknown>): TaskDefinition {
+  const def = { ...values } as Record<string, unknown>
+
+  if (Array.isArray(def.labels)) {
+    def.labels = formListToRecord(
+      def.labels as { key: string; value: string }[],
+    )
+  }
+
+  const params = def.params as Record<string, unknown> | undefined
+  if (params) {
+    if (Array.isArray(params.headers)) {
+      params.headers = formListToRecord(
+        params.headers as { key: string; value: string }[],
+      )
+    }
+    if (Array.isArray(params.env)) {
+      params.env = formListToRecord(
+        params.env as { key: string; value: string }[],
+      )
+    }
+    const source = params.source as Record<string, unknown> | undefined
+    if (source && Array.isArray(source.headers)) {
+      source.headers = formListToRecord(
+        source.headers as { key: string; value: string }[],
+      )
+    }
+  }
+
+  return def as unknown as TaskDefinition
+}
+
 interface TaskFormProps {
   initialValues?: Record<string, unknown>
   mode: 'create' | 'edit'
@@ -70,6 +103,7 @@ export default function TaskForm({
   const [taskDefs, setTaskDefs] = useState<TaskDefinition[]>([])
   const [taskDefsLoading, setTaskDefsLoading] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [testLoading, setTestLoading] = useState(false)
   const [preview, setPreview] = useState<Record<string, unknown>>({})
 
   const kind = Form.useWatch('kind', form)
@@ -88,39 +122,42 @@ export default function TaskForm({
     try {
       setSubmitLoading(true)
       const values = await form.validateFields()
-
-      const def = { ...values } as Record<string, unknown>
-
-      if (Array.isArray(def.labels)) {
-        def.labels = formListToRecord(
-          def.labels as { key: string; value: string }[],
-        )
-      }
-
-      const params = def.params as Record<string, unknown> | undefined
-      if (params) {
-        if (Array.isArray(params.headers)) {
-          params.headers = formListToRecord(
-            params.headers as { key: string; value: string }[],
-          )
-        }
-        if (Array.isArray(params.env)) {
-          params.env = formListToRecord(
-            params.env as { key: string; value: string }[],
-          )
-        }
-        const source = params.source as Record<string, unknown> | undefined
-        if (source && Array.isArray(source.headers)) {
-          source.headers = formListToRecord(
-            source.headers as { key: string; value: string }[],
-          )
-        }
-      }
-
-      await onSubmit(def as unknown as TaskDefinition)
+      const taskDefinition = normalizeFormDefinition(values)
+      await validateTaskDefinition(taskDefinition)
+      await onSubmit(taskDefinition)
     } catch {
     } finally {
       setSubmitLoading(false)
+    }
+  }
+
+  const handleDryRun = async () => {
+    try {
+      setTestLoading(true)
+      const values = await form.validateFields()
+      await dryRunTaskDefinition(normalizeFormDefinition(values))
+      message.success('后端校验通过')
+    } catch (err) {
+      if (err && typeof err === 'object' && 'errorFields' in err) return
+      message.error(err instanceof Error ? err.message : '校验失败')
+    } finally {
+      setTestLoading(false)
+    }
+  }
+
+  const handleTestRun = async () => {
+    try {
+      setTestLoading(true)
+      const values = await form.validateFields()
+      const run = await testRunTaskDefinition(normalizeFormDefinition(values))
+      message.success(`试运行完成：${run.run_status}/${run.check_status}`)
+      setPreview({ ...form.getFieldsValue(true), test_run: run })
+      setAdvancedOpen(true)
+    } catch (err) {
+      if (err && typeof err === 'object' && 'errorFields' in err) return
+      message.error(err instanceof Error ? err.message : '试运行失败')
+    } finally {
+      setTestLoading(false)
     }
   }
 
@@ -421,7 +458,7 @@ export default function TaskForm({
                   type="warning"
                   showIcon
                   message="高级模式会直接暴露底层字段"
-                  description="当前后端尚无独立 validate/test-run/dry-run 接口，保存时才会返回后端校验结果。"
+                  description="保存前会调用后端 validate；也可以在提交前执行 dry-run 或 test-run 调试。"
                   style={{ marginBottom: 12 }}
                 />
                 <pre className="code-block">{safeJson(preview)}</pre>
@@ -435,6 +472,12 @@ export default function TaskForm({
       <Form.Item style={{ textAlign: 'right' }}>
         <Space>
           <Text type="secondary">保存成功后返回来源页面</Text>
+          <Button onClick={handleDryRun} loading={testLoading}>
+            校验配置
+          </Button>
+          <Button onClick={handleTestRun} loading={testLoading}>
+            试运行
+          </Button>
           <Button type="primary" htmlType="submit" loading={submitLoading}>
             {mode === 'create' ? '创建任务' : '保存修改'}
           </Button>

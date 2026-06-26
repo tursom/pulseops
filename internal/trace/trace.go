@@ -50,6 +50,15 @@ func (m *Manager) Register(sink Sink) {
 	m.mu.Unlock()
 }
 
+func (m *Manager) SetMaxPayloadBytes(maxPayloadBytes int) {
+	if maxPayloadBytes <= 0 {
+		maxPayloadBytes = 4096
+	}
+	m.mu.Lock()
+	m.maxPayloadBytes = maxPayloadBytes
+	m.mu.Unlock()
+}
+
 func (m *Manager) Process(ctx context.Context, policy config.TracePolicy, record store.RunRecord) (store.RunRecord, error) {
 	if strings.EqualFold(policy.Level, "off") || strings.EqualFold(policy.Level, "none") {
 		record.Payload = nil

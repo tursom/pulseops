@@ -253,6 +253,15 @@ func (r *sampleRepository) ListRuns(context.Context, string, int, int, time.Dura
 func (r *sampleRepository) CountRuns(context.Context, string, time.Duration) (int, error) {
 	return len(r.runs), nil
 }
+func (r *sampleRepository) ListRunItems(context.Context, string, int, int, time.Duration) ([]store.RunListItem, error) {
+	return nil, nil
+}
+func (r *sampleRepository) ListRunsAcrossTasks(context.Context, store.RunQuery) ([]store.RunListItem, int, error) {
+	return nil, 0, nil
+}
+func (r *sampleRepository) ListConsecutiveFailures(context.Context, []string) (map[string]int, error) {
+	return map[string]int{}, nil
+}
 func (r *sampleRepository) ListRunStats(context.Context, string, time.Duration) ([]store.RunStat, error) {
 	return nil, nil
 }
@@ -287,6 +296,12 @@ func (r *sampleRepository) LoadGlobalSettings(context.Context) (config.GlobalSet
 func (r *sampleRepository) SaveGlobalSettings(context.Context, config.GlobalSettings) error {
 	return nil
 }
+func (r *sampleRepository) LoadPlatformConfig(context.Context) (config.PlatformConfigSummary, error) {
+	return config.PlatformConfigSummary{}, store.ErrMetaNotFound
+}
+func (r *sampleRepository) SavePlatformConfig(context.Context, config.PlatformConfigSummary) error {
+	return nil
+}
 func (r *sampleRepository) ListTaskDefinitions(context.Context) ([]config.TaskDefinition, error) {
 	return nil, nil
 }
@@ -315,6 +330,19 @@ func (r *sampleRepository) ListTaskDefinitionsByPipeline(context.Context, string
 func (r *sampleRepository) UpdateTaskPipeline(context.Context, string, *string) error {
 	return nil
 }
+func (r *sampleRepository) ListTaskDependencies(context.Context) ([]config.TaskDependency, error) {
+	return nil, nil
+}
+func (r *sampleRepository) ListTaskDependenciesByPipeline(context.Context, string) ([]config.TaskDependency, error) {
+	return nil, nil
+}
+func (r *sampleRepository) ReplaceTaskDependencies(context.Context, string, []config.TaskDependency) error {
+	return nil
+}
+func (r *sampleRepository) UpsertTaskDependency(context.Context, config.TaskDependency) (config.TaskDependency, error) {
+	return config.TaskDependency{}, nil
+}
+func (r *sampleRepository) DeleteTaskDependency(context.Context, string) error { return nil }
 
 type sampleArtifactStore struct {
 	bodies map[string]string

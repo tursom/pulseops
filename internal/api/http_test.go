@@ -44,7 +44,7 @@ func TestArtifactEndpoints(t *testing.T) {
 				PreviewText: "{}",
 			},
 		},
-	}, &fakeArtifactStore{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, &fakeArtifactStore{}, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks/task-a/runs/run-1/artifacts", nil)
 	rec := httptest.NewRecorder()
@@ -88,7 +88,7 @@ func TestRunDetailHydratesPayloadFromArtifact(t *testing.T) {
 		bodies: map[string]string{
 			"prod/task-a/run-1/payload.json": `{"body":{"status":"ok"}}`,
 		},
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks/task-a/runs/run-1", nil)
 	rec := httptest.NewRecorder()
@@ -129,7 +129,7 @@ func TestRunDetailKeepsInlinePayload(t *testing.T) {
 		bodies: map[string]string{
 			"prod/task-a/run-1/payload.json": `{"inline":false}`,
 		},
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks/task-a/runs/run-1", nil)
 	rec := httptest.NewRecorder()
@@ -145,9 +145,148 @@ func TestRunDetailKeepsInlinePayload(t *testing.T) {
 	}
 }
 
+func TestTaskViewIncludesDefinitionAndDependencies(t *testing.T) {
+	t.Parallel()
+
+	handler := Routes("", &fakeTaskManager{}, &fakeRepository{
+		defs: []config.TaskDefinition{{
+			TaskID:  "task-a",
+			Name:    "Task A",
+			Kind:    "http_check",
+			Enabled: true,
+			Labels:  map[string]string{"env": "test"},
+		}},
+		dependencies: []config.TaskDependency{{
+			ID:               "dep-1",
+			UpstreamTaskID:   "source-a",
+			DownstreamTaskID: "task-a",
+			Condition:        "run_status == success",
+		}},
+	}, &fakeArtifactStore{}, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/task-a", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"config_status":"valid"`) || !strings.Contains(body, `"upstream_count":1`) {
+		t.Fatalf("expected task view contract, got %s", body)
+	}
+	if !strings.Contains(body, `"definition"`) || !strings.Contains(body, `"dependencies"`) {
+		t.Fatalf("expected definition and dependencies, got %s", body)
+	}
+}
+
+func TestDashboardSummaryReturnsAggregates(t *testing.T) {
+	t.Parallel()
+
+	handler := Routes("", &fakeTaskManager{}, &fakeRepository{
+		defs: []config.TaskDefinition{{
+			TaskID:  "task-a",
+			Name:    "Task A",
+			Kind:    "http_check",
+			Enabled: true,
+			Labels:  map[string]string{"env": "test"},
+		}},
+		runItems: []store.RunListItem{{
+			RunID:       "run-1",
+			TaskID:      "task-a",
+			TaskName:    "Task A",
+			TaskKind:    "http_check",
+			RunStatus:   "success",
+			CheckStatus: "pass",
+			StartedAt:   time.Now(),
+			EndedAt:     time.Now(),
+		}},
+	}, &fakeArtifactStore{}, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/summary", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"counts"`) || !strings.Contains(body, `"recent_runs"`) || !strings.Contains(body, `"label_groups"`) {
+		t.Fatalf("expected dashboard summary contract, got %s", body)
+	}
+}
+
+func TestTaskGraphReturnsDependencyEdges(t *testing.T) {
+	t.Parallel()
+
+	handler := Routes("", &fakeTaskManager{}, &fakeRepository{
+		defs: []config.TaskDefinition{
+			{TaskID: "source-a", Name: "Source A", Kind: "http_check", Enabled: true},
+			{TaskID: "task-a", Name: "Task A", Kind: "data_process", Enabled: true},
+		},
+		dependencies: []config.TaskDependency{{
+			ID:               "dep-1",
+			UpstreamTaskID:   "source-a",
+			DownstreamTaskID: "task-a",
+			Condition:        "check_status == pass",
+		}},
+	}, &fakeArtifactStore{}, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/task-graph", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"nodes"`) || !strings.Contains(body, `"edges"`) || !strings.Contains(body, `"upstream_task_id":"source-a"`) {
+		t.Fatalf("expected task graph contract, got %s", body)
+	}
+}
+
+func TestTaskDefinitionValidateRejectsInvalidCondition(t *testing.T) {
+	t.Parallel()
+
+	handler := Routes("", &fakeTaskManager{}, &fakeRepository{}, &fakeArtifactStore{}, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/task-defs/validate", strings.NewReader(`{
+		"task_id":"task-a",
+		"name":"Task A",
+		"kind":"http_check",
+		"enabled":true,
+		"trigger":"on_run",
+		"watch_task_id":"source-a",
+		"watch_condition":"unknown == value"
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad request, got %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"valid":false`) {
+		t.Fatalf("expected invalid validation response, got %s", rec.Body.String())
+	}
+}
+
+func testPlatform() config.PlatformConfigSummary {
+	return config.PlatformConfigSummary{Mode: "active", Applied: true}
+}
+
 type fakeTaskManager struct{}
 
-func (m *fakeTaskManager) ListTasks() []store.TaskState { return nil }
+func (m *fakeTaskManager) ListTasks() []store.TaskState {
+	now := time.Now()
+	return []store.TaskState{{
+		TaskID:          "task-a",
+		Name:            "Task A",
+		Kind:            "http_check",
+		Enabled:         true,
+		Status:          "running",
+		Labels:          map[string]string{"env": "test"},
+		LastRunAt:       &now,
+		LastRunStatus:   "success",
+		LastCheckStatus: "pass",
+		UpdatedAt:       now,
+	}}
+}
 func (m *fakeTaskManager) GetTask(string) (store.TaskState, bool) {
 	return store.TaskState{}, false
 }
@@ -159,12 +298,28 @@ func (m *fakeTaskManager) SetTaskEnabled(context.Context, string, bool) error { 
 func (m *fakeTaskManager) UpsertTaskFromDB(context.Context, config.TaskDefinition) (store.TaskState, error) {
 	return store.TaskState{}, nil
 }
+func (m *fakeTaskManager) ValidateTaskDefinition(def config.TaskDefinition) (config.TaskSpec, error) {
+	spec, err := def.ToTaskSpec()
+	if err != nil {
+		return spec, err
+	}
+	var cfg config.Config
+	cfg.Normalize()
+	spec.Normalize(cfg)
+	return spec, spec.ValidateBasic()
+}
+func (m *fakeTaskManager) TestRunTaskDefinition(context.Context, config.TaskDefinition) (store.RunRecord, error) {
+	return store.RunRecord{RunID: "dry-run-1", TriggerType: "dry_run", RunStatus: "success", CheckStatus: "pass"}, nil
+}
 func (m *fakeTaskManager) RemoveTaskByID(context.Context, string) error { return nil }
 
 type fakeRepository struct {
 	artifactsByRun map[string][]store.ArtifactRef
 	artifactsByID  map[string]store.ArtifactRef
 	runs           map[string]store.RunRecord
+	runItems       []store.RunListItem
+	defs           []config.TaskDefinition
+	dependencies   []config.TaskDependency
 }
 
 func (r *fakeRepository) Close() error                                           { return nil }
@@ -176,6 +331,15 @@ func (r *fakeRepository) ListRuns(context.Context, string, int, int, time.Durati
 }
 func (r *fakeRepository) CountRuns(context.Context, string, time.Duration) (int, error) {
 	return 0, nil
+}
+func (r *fakeRepository) ListRunItems(context.Context, string, int, int, time.Duration) ([]store.RunListItem, error) {
+	return r.runItems, nil
+}
+func (r *fakeRepository) ListRunsAcrossTasks(context.Context, store.RunQuery) ([]store.RunListItem, int, error) {
+	return r.runItems, len(r.runItems), nil
+}
+func (r *fakeRepository) ListConsecutiveFailures(context.Context, []string) (map[string]int, error) {
+	return map[string]int{}, nil
 }
 func (r *fakeRepository) ListRunStats(context.Context, string, time.Duration) ([]store.RunStat, error) {
 	return nil, nil
@@ -208,7 +372,7 @@ func (r *fakeRepository) ListAIAnalyses(context.Context, string, int) ([]store.A
 	return nil, nil
 }
 func (r *fakeRepository) ListTaskDefinitions(context.Context) ([]config.TaskDefinition, error) {
-	return nil, nil
+	return r.defs, nil
 }
 func (r *fakeRepository) GetTaskDefinition(context.Context, string) (*config.TaskDefinition, error) {
 	return nil, sql.ErrNoRows
@@ -228,9 +392,22 @@ func (r *fakeRepository) InsertPipeline(context.Context, config.Pipeline) error 
 func (r *fakeRepository) UpdatePipeline(context.Context, config.Pipeline) error { return nil }
 func (r *fakeRepository) DeletePipeline(context.Context, string) error          { return nil }
 func (r *fakeRepository) ListTaskDefinitionsByPipeline(context.Context, string) ([]config.TaskDefinition, error) {
-	return nil, nil
+	return r.defs, nil
 }
 func (r *fakeRepository) UpdateTaskPipeline(context.Context, string, *string) error { return nil }
+func (r *fakeRepository) ListTaskDependencies(context.Context) ([]config.TaskDependency, error) {
+	return r.dependencies, nil
+}
+func (r *fakeRepository) ListTaskDependenciesByPipeline(context.Context, string) ([]config.TaskDependency, error) {
+	return r.dependencies, nil
+}
+func (r *fakeRepository) ReplaceTaskDependencies(context.Context, string, []config.TaskDependency) error {
+	return nil
+}
+func (r *fakeRepository) UpsertTaskDependency(_ context.Context, dep config.TaskDependency) (config.TaskDependency, error) {
+	return dep, nil
+}
+func (r *fakeRepository) DeleteTaskDependency(context.Context, string) error { return nil }
 func (r *fakeRepository) GetMeta(context.Context, string) (string, error) {
 	return "", store.ErrMetaNotFound
 }
@@ -239,6 +416,12 @@ func (r *fakeRepository) LoadGlobalSettings(context.Context) (config.GlobalSetti
 	return config.GlobalSettings{MaxPayloadBytes: 4096}, nil
 }
 func (r *fakeRepository) SaveGlobalSettings(context.Context, config.GlobalSettings) error { return nil }
+func (r *fakeRepository) LoadPlatformConfig(context.Context) (config.PlatformConfigSummary, error) {
+	return config.PlatformConfigSummary{}, store.ErrMetaNotFound
+}
+func (r *fakeRepository) SavePlatformConfig(context.Context, config.PlatformConfigSummary) error {
+	return nil
+}
 
 type fakeArtifactStore struct {
 	bodies map[string]string
