@@ -416,9 +416,6 @@ func (cfg Config) Validate() error {
 	if cfg.State.DSN == "" {
 		return errors.New("state.dsn is required")
 	}
-	if cfg.ArtifactStore.Kind != "s3" {
-		return fmt.Errorf("unsupported artifact store kind %q", cfg.ArtifactStore.Kind)
-	}
 	return nil
 }
 

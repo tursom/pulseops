@@ -71,6 +71,13 @@ func TestNewMinIOArtifactStoreRejectsMissingCoreConfig(t *testing.T) {
 	t.Parallel()
 
 	if _, err := NewMinIOArtifactStore(config.ArtifactStoreConfig{
+		Kind:     "local",
+		Bucket:   "pulseops-artifacts",
+		Endpoint: "http://127.0.0.1:9000",
+	}); err == nil || !strings.Contains(err.Error(), `unsupported artifact store kind "local"`) {
+		t.Fatalf("expected unsupported kind error, got %v", err)
+	}
+	if _, err := NewMinIOArtifactStore(config.ArtifactStoreConfig{
 		Endpoint: "http://127.0.0.1:9000",
 	}); err == nil || !strings.Contains(err.Error(), "artifact_store.bucket is required") {
 		t.Fatalf("expected missing bucket error, got %v", err)

@@ -101,6 +101,10 @@ type MinIOArtifactStore struct {
 }
 
 func NewMinIOArtifactStore(cfg config.ArtifactStoreConfig) (*MinIOArtifactStore, error) {
+	kind := strings.TrimSpace(cfg.Kind)
+	if kind != "" && kind != "s3" {
+		return nil, fmt.Errorf("unsupported artifact store kind %q", cfg.Kind)
+	}
 	if strings.TrimSpace(cfg.Bucket) == "" {
 		return nil, fmt.Errorf("artifact_store.bucket is required")
 	}

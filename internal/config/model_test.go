@@ -47,7 +47,7 @@ func TestConfigNormalizeSetsPostgresAndArtifactDefaults(t *testing.T) {
 	}
 }
 
-func TestConfigValidateRejectsLegacySQLiteButAllowsMissingArtifactConfig(t *testing.T) {
+func TestConfigValidateRejectsLegacySQLiteButAllowsInvalidArtifactConfig(t *testing.T) {
 	t.Parallel()
 
 	cfg := Config{
@@ -63,9 +63,9 @@ func TestConfigValidateRejectsLegacySQLiteButAllowsMissingArtifactConfig(t *test
 
 	cfg.State.Backend = "postgres"
 	cfg.State.DSN = "postgres://pulseops:secret@127.0.0.1:5432/pulseops?sslmode=disable"
-	cfg.ArtifactStore.Kind = "s3"
+	cfg.ArtifactStore.Kind = "local"
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("expected missing artifact store config to be handled by degraded startup path, got %v", err)
+		t.Fatalf("expected invalid artifact store config to be handled by degraded startup path, got %v", err)
 	}
 }
 
