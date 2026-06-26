@@ -419,12 +419,6 @@ func (cfg Config) Validate() error {
 	if cfg.ArtifactStore.Kind != "s3" {
 		return fmt.Errorf("unsupported artifact store kind %q", cfg.ArtifactStore.Kind)
 	}
-	if cfg.ArtifactStore.Bucket == "" {
-		return errors.New("artifact_store.bucket is required")
-	}
-	if cfg.ArtifactStore.Endpoint == "" {
-		return errors.New("artifact_store.endpoint is required")
-	}
 	return nil
 }
 

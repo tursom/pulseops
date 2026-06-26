@@ -101,6 +101,12 @@ type MinIOArtifactStore struct {
 }
 
 func NewMinIOArtifactStore(cfg config.ArtifactStoreConfig) (*MinIOArtifactStore, error) {
+	if strings.TrimSpace(cfg.Bucket) == "" {
+		return nil, fmt.Errorf("artifact_store.bucket is required")
+	}
+	if strings.TrimSpace(cfg.Endpoint) == "" {
+		return nil, fmt.Errorf("artifact_store.endpoint is required")
+	}
 	endpoint, secure, err := resolveEndpoint(cfg)
 	if err != nil {
 		return nil, err

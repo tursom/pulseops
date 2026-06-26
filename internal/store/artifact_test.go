@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/minio/minio-go/v7"
+
+	"pulseops/internal/config"
 )
 
 func TestMinIOArtifactStorePutGeneratesMetadata(t *testing.T) {
@@ -17,7 +19,7 @@ func TestMinIOArtifactStorePutGeneratesMetadata(t *testing.T) {
 	client := &fakeObjectClient{}
 	st := &MinIOArtifactStore{
 		bucket:     "pulseops-artifacts",
-		basePath:  "prod",
+		basePath:   "prod",
 		kind:       "s3",
 		presignTTL: 15 * time.Minute,
 		client:     client,
@@ -62,6 +64,21 @@ func TestMinIOArtifactStorePresignGetUsesConfiguredTTL(t *testing.T) {
 	}
 	if client.lastPresignTTL != 15*time.Minute {
 		t.Fatalf("expected default ttl, got %s", client.lastPresignTTL)
+	}
+}
+
+func TestNewMinIOArtifactStoreRejectsMissingCoreConfig(t *testing.T) {
+	t.Parallel()
+
+	if _, err := NewMinIOArtifactStore(config.ArtifactStoreConfig{
+		Endpoint: "http://127.0.0.1:9000",
+	}); err == nil || !strings.Contains(err.Error(), "artifact_store.bucket is required") {
+		t.Fatalf("expected missing bucket error, got %v", err)
+	}
+	if _, err := NewMinIOArtifactStore(config.ArtifactStoreConfig{
+		Bucket: "pulseops-artifacts",
+	}); err == nil || !strings.Contains(err.Error(), "artifact_store.endpoint is required") {
+		t.Fatalf("expected missing endpoint error, got %v", err)
 	}
 }
 
