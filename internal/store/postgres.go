@@ -90,7 +90,7 @@ type RunRecord struct {
 	DurationMS   int64             `json:"duration_ms"`
 	ErrorMessage string            `json:"error_message,omitempty"`
 	Summary      map[string]any    `json:"summary,omitempty"`
-	Payload      []byte            `json:"payload,omitempty"`
+	Payload      json.RawMessage   `json:"payload,omitempty"`
 	ArtifactRefs []ArtifactRef     `json:"artifact_refs,omitempty"`
 	Findings     []Finding         `json:"findings,omitempty"`
 	Stdout       string            `json:"stdout,omitempty"`

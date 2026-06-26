@@ -128,6 +128,7 @@ pulseops/
 - [AI 集成设计和使用指南](doc/ai-integration.md)
 - [任务配置参考](doc/task-config-reference.md)
 - [平台设计文档](doc/platform-design.md)
+- [前端优化功能需求对齐稿](doc/frontend-redesign-requirements.md)
 
 ## 开发
 

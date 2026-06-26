@@ -146,6 +146,10 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		if err := hydrateRunPayloadFromArtifact(r.Context(), &record, artifactStore); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		writeJSON(w, http.StatusOK, record)
 	})
 	mux.HandleFunc("GET /api/tasks/{id}/runs/{runID}/ai", func(w http.ResponseWriter, r *http.Request) {
@@ -554,4 +558,42 @@ func marshalOrDefault(v any) []byte {
 		return []byte("{}")
 	}
 	return b
+}
+
+func hydrateRunPayloadFromArtifact(ctx context.Context, record *store.RunRecord, artifactStore store.ArtifactStore) error {
+	if record == nil || len(record.Payload) > 0 || artifactStore == nil {
+		return nil
+	}
+	for _, artifact := range record.ArtifactRefs {
+		if artifact.Kind != "payload" {
+			continue
+		}
+		key, err := store.ObjectKeyFromURI(artifact.URI)
+		if err != nil {
+			return err
+		}
+		reader, err := artifactStore.Get(ctx, key)
+		if err != nil {
+			return err
+		}
+		raw, readErr := io.ReadAll(reader)
+		closeErr := reader.Close()
+		if readErr != nil {
+			return readErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if json.Valid(raw) {
+			record.Payload = raw
+			return nil
+		}
+		encoded, err := json.Marshal(string(raw))
+		if err != nil {
+			return err
+		}
+		record.Payload = encoded
+		return nil
+	}
+	return nil
 }

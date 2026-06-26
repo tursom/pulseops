@@ -56,7 +56,7 @@ func TestPostgresStoreInsertRunPersistsRunFindingsAndArtifacts(t *testing.T) {
 			run_id, task_id, task_kind, trigger_type, run_status, check_status,
 			started_at, ended_at, duration_ms, error_message, summary_json, payload,
 			stdout, stderr, labels_json
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15, $16::jsonb)`)).
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15::jsonb)`)).
 		WithArgs(
 			record.RunID, record.TaskID, record.TaskKind, record.TriggerType, record.RunStatus, record.CheckStatus,
 			record.StartedAt, record.EndedAt, record.DurationMS, record.ErrorMessage, `{"sample_count":2}`, `{"sample_seed":42}`,
@@ -104,6 +104,14 @@ func TestPostgresStoreListsRunsAndLoadsRunDetail(t *testing.T) {
 			now, now.Add(time.Second), 1000, "", []byte(`{"sample_count":1}`), []byte(`{"sample_seed":1}`),
 			"", "", []byte(`{"env":"test"}`),
 		))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT artifact_id, kind, storage_kind, uri, content_type, size_bytes, sha256, preview_text
+		FROM artifacts
+		WHERE task_id = $1 AND run_id = $2
+		ORDER BY created_at ASC`)).
+		WithArgs("task-a", "run-1").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"artifact_id", "kind", "storage_kind", "uri", "content_type", "size_bytes", "sha256", "preview_text",
+		}))
 
 	runs, err := st.ListRuns(context.Background(), "task-a", 5, 0, 0)
 	if err != nil {

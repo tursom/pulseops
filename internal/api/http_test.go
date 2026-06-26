@@ -61,6 +61,90 @@ func TestArtifactEndpoints(t *testing.T) {
 	}
 }
 
+func TestRunDetailHydratesPayloadFromArtifact(t *testing.T) {
+	t.Parallel()
+
+	handler := Routes("", &fakeTaskManager{}, &fakeRepository{
+		runs: map[string]store.RunRecord{
+			"task-a/run-1": {
+				RunID:       "run-1",
+				TaskID:      "task-a",
+				TaskKind:    "http_check",
+				TriggerType: "manual",
+				RunStatus:   "success",
+				CheckStatus: "pass",
+				StartedAt:   time.Now(),
+				EndedAt:     time.Now(),
+				ArtifactRefs: []store.ArtifactRef{{
+					ArtifactID:  "artifact-1",
+					Kind:        "payload",
+					StorageKind: "s3",
+					URI:         "s3://pulseops-artifacts/prod/task-a/run-1/payload.json",
+					ContentType: "application/json",
+				}},
+			},
+		},
+	}, &fakeArtifactStore{
+		bodies: map[string]string{
+			"prod/task-a/run-1/payload.json": `{"body":{"status":"ok"}}`,
+		},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/task-a/runs/run-1", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"payload":{"body":{"status":"ok"}}`) {
+		t.Fatalf("expected hydrated payload object, got %s", rec.Body.String())
+	}
+}
+
+func TestRunDetailKeepsInlinePayload(t *testing.T) {
+	t.Parallel()
+
+	handler := Routes("", &fakeTaskManager{}, &fakeRepository{
+		runs: map[string]store.RunRecord{
+			"task-a/run-1": {
+				RunID:       "run-1",
+				TaskID:      "task-a",
+				TaskKind:    "http_check",
+				TriggerType: "manual",
+				RunStatus:   "success",
+				CheckStatus: "pass",
+				StartedAt:   time.Now(),
+				EndedAt:     time.Now(),
+				Payload:     []byte(`{"inline":true}`),
+				ArtifactRefs: []store.ArtifactRef{{
+					ArtifactID:  "artifact-1",
+					Kind:        "payload",
+					StorageKind: "s3",
+					URI:         "s3://pulseops-artifacts/prod/task-a/run-1/payload.json",
+					ContentType: "application/json",
+				}},
+			},
+		},
+	}, &fakeArtifactStore{
+		bodies: map[string]string{
+			"prod/task-a/run-1/payload.json": `{"inline":false}`,
+		},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/task-a/runs/run-1", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"payload":{"inline":true}`) {
+		t.Fatalf("expected inline payload to be preserved, got %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `"inline":false`) {
+		t.Fatalf("artifact payload should not override inline payload: %s", rec.Body.String())
+	}
+}
+
 type fakeTaskManager struct{}
 
 func (m *fakeTaskManager) ListTasks() []store.TaskState { return nil }
@@ -80,6 +164,7 @@ func (m *fakeTaskManager) RemoveTaskByID(context.Context, string) error { return
 type fakeRepository struct {
 	artifactsByRun map[string][]store.ArtifactRef
 	artifactsByID  map[string]store.ArtifactRef
+	runs           map[string]store.RunRecord
 }
 
 func (r *fakeRepository) Close() error                                           { return nil }
@@ -95,8 +180,12 @@ func (r *fakeRepository) CountRuns(context.Context, string, time.Duration) (int,
 func (r *fakeRepository) ListRunStats(context.Context, string, time.Duration) ([]store.RunStat, error) {
 	return nil, nil
 }
-func (r *fakeRepository) GetRun(context.Context, string, string) (store.RunRecord, error) {
-	return store.RunRecord{}, sql.ErrNoRows
+func (r *fakeRepository) GetRun(_ context.Context, taskID, runID string) (store.RunRecord, error) {
+	record, ok := r.runs[taskID+"/"+runID]
+	if !ok {
+		return store.RunRecord{}, sql.ErrNoRows
+	}
+	return record, nil
 }
 func (r *fakeRepository) ListArtifactsByRun(_ context.Context, taskID, runID string) ([]store.ArtifactRef, error) {
 	return r.artifactsByRun[taskID+"/"+runID], nil
@@ -124,32 +213,45 @@ func (r *fakeRepository) ListTaskDefinitions(context.Context) ([]config.TaskDefi
 func (r *fakeRepository) GetTaskDefinition(context.Context, string) (*config.TaskDefinition, error) {
 	return nil, sql.ErrNoRows
 }
-func (r *fakeRepository) InsertTaskDefinition(context.Context, config.TaskDefinition) error { return nil }
-func (r *fakeRepository) UpdateTaskDefinition(context.Context, config.TaskDefinition) error { return nil }
-func (r *fakeRepository) DeleteTaskDefinition(context.Context, string) error          { return nil }
-func (r *fakeRepository) ListPipelines(context.Context) ([]config.Pipeline, error)      { return nil, nil }
-func (r *fakeRepository) GetPipeline(context.Context, string) (*config.Pipeline, error) { return nil, sql.ErrNoRows }
-func (r *fakeRepository) InsertPipeline(context.Context, config.Pipeline) error         { return nil }
-func (r *fakeRepository) UpdatePipeline(context.Context, config.Pipeline) error         { return nil }
-func (r *fakeRepository) DeletePipeline(context.Context, string) error                   { return nil }
+func (r *fakeRepository) InsertTaskDefinition(context.Context, config.TaskDefinition) error {
+	return nil
+}
+func (r *fakeRepository) UpdateTaskDefinition(context.Context, config.TaskDefinition) error {
+	return nil
+}
+func (r *fakeRepository) DeleteTaskDefinition(context.Context, string) error       { return nil }
+func (r *fakeRepository) ListPipelines(context.Context) ([]config.Pipeline, error) { return nil, nil }
+func (r *fakeRepository) GetPipeline(context.Context, string) (*config.Pipeline, error) {
+	return nil, sql.ErrNoRows
+}
+func (r *fakeRepository) InsertPipeline(context.Context, config.Pipeline) error { return nil }
+func (r *fakeRepository) UpdatePipeline(context.Context, config.Pipeline) error { return nil }
+func (r *fakeRepository) DeletePipeline(context.Context, string) error          { return nil }
 func (r *fakeRepository) ListTaskDefinitionsByPipeline(context.Context, string) ([]config.TaskDefinition, error) {
 	return nil, nil
 }
-func (r *fakeRepository) UpdateTaskPipeline(context.Context, string, *string) error   { return nil }
-func (r *fakeRepository) GetMeta(context.Context, string) (string, error)             { return "", store.ErrMetaNotFound }
-func (r *fakeRepository) SetMeta(context.Context, string, string) error                { return nil }
+func (r *fakeRepository) UpdateTaskPipeline(context.Context, string, *string) error { return nil }
+func (r *fakeRepository) GetMeta(context.Context, string) (string, error) {
+	return "", store.ErrMetaNotFound
+}
+func (r *fakeRepository) SetMeta(context.Context, string, string) error { return nil }
 func (r *fakeRepository) LoadGlobalSettings(context.Context) (config.GlobalSettings, error) {
 	return config.GlobalSettings{MaxPayloadBytes: 4096}, nil
 }
 func (r *fakeRepository) SaveGlobalSettings(context.Context, config.GlobalSettings) error { return nil }
 
-type fakeArtifactStore struct{}
+type fakeArtifactStore struct {
+	bodies map[string]string
+}
 
 func (s *fakeArtifactStore) Kind() string { return "s3" }
 func (s *fakeArtifactStore) Put(context.Context, string, io.Reader, store.ArtifactMeta) (store.ArtifactRef, error) {
 	return store.ArtifactRef{}, nil
 }
-func (s *fakeArtifactStore) Get(context.Context, string) (io.ReadCloser, error) {
+func (s *fakeArtifactStore) Get(_ context.Context, key string) (io.ReadCloser, error) {
+	if s.bodies != nil {
+		return io.NopCloser(strings.NewReader(s.bodies[key])), nil
+	}
 	return io.NopCloser(strings.NewReader("")), nil
 }
 func (s *fakeArtifactStore) PresignGet(context.Context, string, time.Duration) (string, error) {
