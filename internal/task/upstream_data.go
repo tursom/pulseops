@@ -16,15 +16,24 @@ import (
 )
 
 type UpstreamDataParams struct {
-	SourceTaskID string        `json:"source_task_id"`
-	ExtractExprs []ExtractExpr `json:"extract_exprs"`
+	SourceTaskID string               `json:"source_task_id"`
+	DataSources  []UpstreamDataSource `json:"data_sources"`
+	CommonParams map[string]any       `json:"common_params"`
+	ExtractExprs []ExtractExpr        `json:"extract_exprs"`
+}
+
+type UpstreamDataSource struct {
+	Key    string         `json:"key"`
+	TaskID string         `json:"task_id"`
+	Params map[string]any `json:"params"`
 }
 
 type ExtractExpr struct {
-	Field   string `json:"field"`
-	Source  string `json:"source"`
-	JQExpr  string `json:"jq_expr"`
-	AggMode string `json:"agg_mode"`
+	Field     string `json:"field"`
+	SourceKey string `json:"source_key"`
+	Source    string `json:"source"`
+	JQExpr    string `json:"jq_expr"`
+	AggMode   string `json:"agg_mode"`
 }
 
 type UpstreamDataDriver struct {
@@ -47,6 +56,24 @@ func (d *UpstreamDataDriver) Validate(spec config.TaskSpec) error {
 	if len(params.ExtractExprs) == 0 {
 		return fmt.Errorf("data_process requires at least one extract_expr")
 	}
+	sourceKeys := map[string]string{}
+	for _, dep := range spec.DependencyRules() {
+		if dep.SourceKey != "" {
+			sourceKeys[dep.SourceKey] = dep.UpstreamTaskID
+		}
+	}
+	for i, source := range params.DataSources {
+		if source.Key == "" {
+			return fmt.Errorf("data_process data_sources[%d].key must not be empty", i)
+		}
+		if source.TaskID == "" {
+			return fmt.Errorf("data_process data_sources[%d].task_id must not be empty", i)
+		}
+		if _, exists := sourceKeys[source.Key]; exists {
+			return fmt.Errorf("data_process data_sources[%d].key %q duplicates dependency source_key", i, source.Key)
+		}
+		sourceKeys[source.Key] = source.TaskID
+	}
 	for i, expr := range params.ExtractExprs {
 		if expr.Field == "" {
 			return fmt.Errorf("data_process extract_expr[%d].field must not be empty", i)
@@ -61,6 +88,14 @@ func (d *UpstreamDataDriver) Validate(spec config.TaskSpec) error {
 		case expr.Source == "payload", expr.Source == "summary", expr.Source == "record", strings.HasPrefix(expr.Source, "artifact:"):
 		default:
 			return fmt.Errorf("data_process extract_expr[%d].source %q must be 'payload', 'summary', 'record', or 'artifact:<kind>'", i, expr.Source)
+		}
+		if expr.SourceKey == "" && params.SourceTaskID == "" && spec.WatchTaskID == "" && len(spec.DependencyRules()) > 1 {
+			return fmt.Errorf("data_process extract_expr[%d].source_key is required when multiple upstream dependencies are configured", i)
+		}
+		if expr.SourceKey != "" {
+			if _, ok := sourceKeys[expr.SourceKey]; !ok {
+				return fmt.Errorf("data_process extract_expr[%d].source_key %q is not configured", i, expr.SourceKey)
+			}
 		}
 	}
 	return nil
@@ -92,21 +127,23 @@ type upstreamDataRunner struct {
 
 func (r *upstreamDataRunner) Run(ctx context.Context, _ TriggerType) (Result, error) {
 	sourceRecord, ok := ctx.Value(ctxkey.CtxTriggerRun).(*store.RunRecord)
-	if !ok || sourceRecord == nil {
-		return Result{CheckStatus: "fail"}, fmt.Errorf("data_process requires a trigger run in context")
-	}
-
-	sourceTaskID := r.params.SourceTaskID
-	if sourceTaskID == "" {
-		sourceTaskID = r.spec.WatchTaskID
+	if !ok {
+		sourceRecord = nil
 	}
 
 	summary := map[string]any{}
 	var findings []store.Finding
-	var artifacts []store.ArtifactRef
+	artifactCache := map[string][]store.ArtifactRef{}
 
 	for _, expr := range r.params.ExtractExprs {
-		srcData, err := r.resolveSource(ctx, expr.Source, sourceTaskID, sourceRecord, &artifacts)
+		exprRecord, err := r.resolveSourceRecord(ctx, expr.SourceKey, sourceRecord)
+		if err != nil {
+			findings = append(findings, store.Finding{
+				Reason: fmt.Sprintf("resolve upstream %q for field %q: %v", expr.SourceKey, expr.Field, err),
+			})
+			continue
+		}
+		srcData, err := r.resolveSource(ctx, expr.Source, exprRecord, artifactCache)
 		if err != nil {
 			findings = append(findings, store.Finding{
 				Reason: fmt.Sprintf("resolve source %q for field %q: %v", expr.Source, expr.Field, err),
@@ -140,10 +177,12 @@ func (r *upstreamDataRunner) Run(ctx context.Context, _ TriggerType) (Result, er
 func (r *upstreamDataRunner) resolveSource(
 	ctx context.Context,
 	source string,
-	sourceTaskID string,
 	sourceRecord *store.RunRecord,
-	artifacts *[]store.ArtifactRef,
+	artifactCache map[string][]store.ArtifactRef,
 ) (any, error) {
+	if sourceRecord == nil {
+		return nil, fmt.Errorf("source run is unavailable")
+	}
 	switch {
 	case source == "payload":
 		if len(sourceRecord.Payload) == 0 {
@@ -173,12 +212,13 @@ func (r *upstreamDataRunner) resolveSource(
 		}, nil
 
 	case strings.HasPrefix(source, "artifact:"):
-		if err := r.ensureArtifacts(ctx, sourceTaskID, sourceRecord, artifacts); err != nil {
+		artifacts, err := r.ensureArtifacts(ctx, sourceRecord, artifactCache)
+		if err != nil {
 			return nil, err
 		}
 		kind := strings.TrimPrefix(source, "artifact:")
 		var matched []store.ArtifactRef
-		for _, ref := range *artifacts {
+		for _, ref := range artifacts {
 			if kind == "*" || ref.Kind == kind {
 				matched = append(matched, ref)
 			}
@@ -220,21 +260,68 @@ func (r *upstreamDataRunner) resolveSource(
 	}
 }
 
+func (r *upstreamDataRunner) resolveSourceRecord(ctx context.Context, sourceKey string, triggerRecord *store.RunRecord) (*store.RunRecord, error) {
+	sourceTaskID := r.sourceTaskIDForKey(sourceKey)
+	if triggerRecord != nil && (sourceTaskID == "" || triggerRecord.TaskID == sourceTaskID) {
+		return triggerRecord, nil
+	}
+	if sourceTaskID == "" {
+		return nil, fmt.Errorf("source_key %q is not configured and no trigger run is available", sourceKey)
+	}
+	runs, err := r.repo.ListRuns(ctx, sourceTaskID, 20, 0, 0)
+	if err != nil {
+		return nil, fmt.Errorf("list runs for source task %q: %w", sourceTaskID, err)
+	}
+	for i := range runs {
+		if runs[i].RunStatus == "success" {
+			return &runs[i], nil
+		}
+	}
+	return nil, fmt.Errorf("source task %q has no successful run", sourceTaskID)
+}
+
+func (r *upstreamDataRunner) sourceTaskIDForKey(sourceKey string) string {
+	if sourceKey == "" {
+		if r.params.SourceTaskID != "" {
+			return r.params.SourceTaskID
+		}
+		if r.spec.WatchTaskID != "" {
+			return r.spec.WatchTaskID
+		}
+		deps := r.spec.DependencyRules()
+		if len(deps) == 1 {
+			return deps[0].UpstreamTaskID
+		}
+		return ""
+	}
+	for _, source := range r.params.DataSources {
+		if source.Key == sourceKey {
+			return source.TaskID
+		}
+	}
+	for _, dep := range r.spec.DependencyRules() {
+		if dep.SourceKey == sourceKey {
+			return dep.UpstreamTaskID
+		}
+	}
+	return ""
+}
+
 func (r *upstreamDataRunner) ensureArtifacts(
 	ctx context.Context,
-	sourceTaskID string,
 	sourceRecord *store.RunRecord,
-	artifacts *[]store.ArtifactRef,
-) error {
-	if len(*artifacts) > 0 {
-		return nil
+	artifactCache map[string][]store.ArtifactRef,
+) ([]store.ArtifactRef, error) {
+	cacheKey := sourceRecord.TaskID + "/" + sourceRecord.RunID
+	if artifacts, ok := artifactCache[cacheKey]; ok {
+		return artifacts, nil
 	}
-	refs, err := r.repo.ListArtifactsByRun(ctx, sourceTaskID, sourceRecord.RunID)
+	refs, err := r.repo.ListArtifactsByRun(ctx, sourceRecord.TaskID, sourceRecord.RunID)
 	if err != nil {
-		return fmt.Errorf("list artifacts for task %q run %q: %w", sourceTaskID, sourceRecord.RunID, err)
+		return nil, fmt.Errorf("list artifacts for task %q run %q: %w", sourceRecord.TaskID, sourceRecord.RunID, err)
 	}
-	*artifacts = refs
-	return nil
+	artifactCache[cacheKey] = refs
+	return refs, nil
 }
 
 func (r *upstreamDataRunner) readArtifactContent(ctx context.Context, ref store.ArtifactRef) (any, error) {

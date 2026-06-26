@@ -235,8 +235,58 @@ func TestFetchSampleDataNoSuccessRunReturnsUnavailable(t *testing.T) {
 	}
 }
 
+func TestUpstreamDataRunnerReadsMultipleSourceKeys(t *testing.T) {
+	t.Parallel()
+
+	repo := &sampleRepository{runsByTask: map[string][]store.RunRecord{
+		"source-a": {{
+			RunID:     "run-a",
+			TaskID:    "source-a",
+			RunStatus: "success",
+			Summary:   map[string]any{"value": 2},
+		}},
+		"source-b": {{
+			RunID:     "run-b",
+			TaskID:    "source-b",
+			RunStatus: "success",
+			Summary:   map[string]any{"value": 3},
+		}},
+	}}
+	driver := NewUpstreamDataDriver(repo, nil, nil)
+	spec := config.TaskSpec{
+		ID:      "processor",
+		Kind:    "data_process",
+		Enabled: true,
+		Params: map[string]any{
+			"data_sources": []any{
+				map[string]any{"key": "left", "task_id": "source-a"},
+				map[string]any{"key": "right", "task_id": "source-b"},
+			},
+			"extract_exprs": []any{
+				map[string]any{"field": "left_value", "source_key": "left", "source": "summary", "jq_expr": ".value"},
+				map[string]any{"field": "right_value", "source_key": "right", "source": "summary", "jq_expr": ".value"},
+			},
+		},
+	}
+	if err := driver.Validate(spec); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	runner, err := driver.NewRunner(spec, RunnerDeps{})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+	result, err := runner.Run(context.Background(), TriggerManual)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.Summary["left_value"] != 2 || result.Summary["right_value"] != 3 {
+		t.Fatalf("unexpected summary: %#v", result.Summary)
+	}
+}
+
 type sampleRepository struct {
-	runs []store.RunRecord
+	runs       []store.RunRecord
+	runsByTask map[string][]store.RunRecord
 }
 
 func (r *sampleRepository) Close() error { return nil }
@@ -247,7 +297,10 @@ func (r *sampleRepository) DeleteTaskState(context.Context, string) error { retu
 func (r *sampleRepository) InsertRun(context.Context, store.RunRecord) error {
 	return nil
 }
-func (r *sampleRepository) ListRuns(context.Context, string, int, int, time.Duration) ([]store.RunRecord, error) {
+func (r *sampleRepository) ListRuns(_ context.Context, taskID string, _ int, _ int, _ time.Duration) ([]store.RunRecord, error) {
+	if r.runsByTask != nil {
+		return r.runsByTask[taskID], nil
+	}
 	return r.runs, nil
 }
 func (r *sampleRepository) CountRuns(context.Context, string, time.Duration) (int, error) {

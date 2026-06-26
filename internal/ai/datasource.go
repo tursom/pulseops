@@ -120,22 +120,39 @@ type upstreamOutputSource struct{}
 func (s *upstreamOutputSource) Name() string { return "upstream_output" }
 
 func (s *upstreamOutputSource) Fetch(ctx context.Context, spec DataSourceSpec, deps FetchDeps) (any, error) {
-	if deps.TriggerRun == nil {
-		return nil, fmt.Errorf("upstream_output requires a trigger run context (task must be triggered by an upstream task)")
+	taskID, _ := spec.Config["task_id"].(string)
+	sourceRecord := deps.TriggerRun
+	if taskID != "" && (sourceRecord == nil || sourceRecord.TaskID != taskID) {
+		if deps.DBRepository == nil {
+			return nil, fmt.Errorf("upstream_output task_id requires database access")
+		}
+		runs, err := deps.DBRepository.ListRuns(ctx, taskID, 20, 0, 0)
+		if err != nil {
+			return nil, fmt.Errorf("list upstream runs for %q: %w", taskID, err)
+		}
+		for i := range runs {
+			if runs[i].RunStatus == "success" {
+				sourceRecord = &runs[i]
+				break
+			}
+		}
+	}
+	if sourceRecord == nil {
+		return nil, fmt.Errorf("upstream_output requires a trigger run context or config.task_id")
 	}
 	result := map[string]any{
-		"run_id":       deps.TriggerRun.RunID,
-		"task_id":      deps.TriggerRun.TaskID,
-		"run_status":   deps.TriggerRun.RunStatus,
-		"check_status": deps.TriggerRun.CheckStatus,
-		"summary":      deps.TriggerRun.Summary,
+		"run_id":       sourceRecord.RunID,
+		"task_id":      sourceRecord.TaskID,
+		"run_status":   sourceRecord.RunStatus,
+		"check_status": sourceRecord.CheckStatus,
+		"summary":      sourceRecord.Summary,
 	}
-	if len(deps.TriggerRun.Payload) > 0 {
+	if len(sourceRecord.Payload) > 0 {
 		var payload any
-		if err := json.Unmarshal(deps.TriggerRun.Payload, &payload); err == nil {
+		if err := json.Unmarshal(sourceRecord.Payload, &payload); err == nil {
 			result["payload"] = payload
 		} else {
-			result["payload"] = string(deps.TriggerRun.Payload)
+			result["payload"] = string(sourceRecord.Payload)
 		}
 	}
 	return result, nil
