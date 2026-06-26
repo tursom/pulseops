@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -69,31 +70,31 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"task_id":            taskState.TaskID,
-			"name":               taskState.Name,
-			"kind":               taskState.Kind,
-			"enabled":            taskState.Enabled,
-			"status":             taskState.Status,
-			"labels":             taskState.Labels,
-			"last_run_at":        taskState.LastRunAt,
-			"next_run_at":        taskState.NextRunAt,
-			"last_run_status":    taskState.LastRunStatus,
-			"last_check_status":  taskState.LastCheckStatus,
-			"last_error":         taskState.LastError,
-			"last_duration_ms":   taskState.LastDurationMS,
-			"last_reload_error":  taskState.LastReloadError,
-			"last_sample_seed":   taskState.LastSampleSeed,
-			"last_sample_count":  taskState.LastSampleCount,
+			"task_id":             taskState.TaskID,
+			"name":                taskState.Name,
+			"kind":                taskState.Kind,
+			"enabled":             taskState.Enabled,
+			"status":              taskState.Status,
+			"labels":              taskState.Labels,
+			"last_run_at":         taskState.LastRunAt,
+			"next_run_at":         taskState.NextRunAt,
+			"last_run_status":     taskState.LastRunStatus,
+			"last_check_status":   taskState.LastCheckStatus,
+			"last_error":          taskState.LastError,
+			"last_duration_ms":    taskState.LastDurationMS,
+			"last_reload_error":   taskState.LastReloadError,
+			"last_sample_seed":    taskState.LastSampleSeed,
+			"last_sample_count":   taskState.LastSampleCount,
 			"last_mismatch_count": taskState.LastMismatchCount,
-			"source_path":        taskState.SourcePath,
-			"updated_at":         taskState.UpdatedAt,
-			"definition":         def,
+			"source_path":         taskState.SourcePath,
+			"updated_at":          taskState.UpdatedAt,
+			"definition":          def,
 		})
 	})
 	mux.HandleFunc("GET /api/tasks/{id}/sample", func(w http.ResponseWriter, r *http.Request) {
 		source := r.URL.Query().Get("source")
-		if source == "" || (source != "payload" && source != "summary" && source != "record") {
-			writeError(w, http.StatusBadRequest, `query param "source" required: payload, summary, or record`)
+		if source == "" || (source != "payload" && source != "summary" && source != "record" && !strings.HasPrefix(source, "artifact:")) {
+			writeError(w, http.StatusBadRequest, `query param "source" required: payload, summary, record, or artifact:<kind>`)
 			return
 		}
 		jqExpr := r.URL.Query().Get("jq")

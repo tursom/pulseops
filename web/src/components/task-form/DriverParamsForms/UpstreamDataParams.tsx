@@ -32,6 +32,14 @@ const aggModeOptions = [
   { value: 'max', label: '最大值 (max)' },
 ];
 
+function sampleDisplayData(sample: SampleResponse | null | undefined): unknown {
+  return sample?.display_data ?? sample?.data
+}
+
+function isVisualSampleSource(source: string | undefined): boolean {
+  return source === 'payload' || source === 'summary' || source === 'record' || source === 'artifact:payload'
+}
+
 const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
   const sourceTaskId = form ? Form.useWatch(['params', 'source_task_id'], form) as string : undefined;
   const trigger = form ? Form.useWatch('trigger', form) as string : undefined;
@@ -139,10 +147,10 @@ const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
                       background: '#f5f5f5', padding: 8, borderRadius: 4,
                       maxHeight: 200, overflow: 'auto', fontSize: 12, margin: 0,
                     }}>
-                      {JSON.stringify(previewData.summary.data, null, 2)}
+                      {JSON.stringify(sampleDisplayData(previewData.summary), null, 2)}
                     </pre>
                   ) : (
-                    <Text type="secondary">暂无 Summary 数据</Text>
+                    <Text type="secondary">{previewData.summary?.message || '暂无 Summary 数据'}</Text>
                   ),
                 },
                 {
@@ -153,10 +161,10 @@ const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
                       background: '#f5f5f5', padding: 8, borderRadius: 4,
                       maxHeight: 200, overflow: 'auto', fontSize: 12, margin: 0,
                     }}>
-                      {JSON.stringify(previewData.record.data, null, 2)}
+                      {JSON.stringify(sampleDisplayData(previewData.record), null, 2)}
                     </pre>
                   ) : (
-                    <Text type="secondary">暂无 Record 数据</Text>
+                    <Text type="secondary">{previewData.record?.message || '暂无 Record 数据'}</Text>
                   ),
                 },
                 {
@@ -167,10 +175,12 @@ const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
                       background: '#f5f5f5', padding: 8, borderRadius: 4,
                       maxHeight: 200, overflow: 'auto', fontSize: 12, margin: 0,
                     }}>
-                      {JSON.stringify(previewData.payload.data, null, 2)}
+                      {JSON.stringify(sampleDisplayData(previewData.payload), null, 2)}
                     </pre>
                   ) : (
-                    <Text type="secondary">暂无 Payload 数据（上游任务可能未保存 payload）</Text>
+                    <Text type="secondary">
+                      {previewData.payload?.message || '暂无 Payload 数据（上游任务可能未保存 payload）'}
+                    </Text>
                   ),
                 },
               ]}
@@ -230,7 +240,7 @@ const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
                 <Form.Item shouldUpdate noStyle>
                   {(fm) => {
                     const src = fm.getFieldValue(['params', 'extract_exprs', name, 'source']) as string | undefined;
-                    const isVisualSource = src && !src.startsWith('artifact:');
+                    const isVisualSource = isVisualSampleSource(src);
                     const fieldLabel = isVisualSource ? '字段选择' : 'JQ 表达式';
                     return (
                       <Form.Item
@@ -291,9 +301,9 @@ const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
         <Text type="secondary" style={{ fontSize: 12 }}>
           💡 <strong>字段选择器说明：</strong>
           <br />
-          · 选择 <strong>payload / summary / record</strong> 数据源后，展开树点击字段即可自动生成 jq 表达式
+          · 选择 <strong>payload / summary / record / artifact:payload</strong> 数据源后，展开树点击字段即可自动生成 jq 表达式
           <br />
-          · 选择 <strong>artifact:*</strong> 数据源时需手写 jq（产物结构不固定）
+          · 选择 <strong>artifact:stdout / artifact:stderr / artifact:*</strong> 数据源时需手写 jq（产物结构不固定）
           <br />
           · 点击「手写」切换到原始 jq 输入模式
           <br />

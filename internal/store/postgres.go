@@ -59,12 +59,16 @@ type Finding struct {
 }
 
 type SampleResponse struct {
-	Available bool   `json:"available"`
-	TaskID    string `json:"task_id,omitempty"`
-	RunID     string `json:"run_id,omitempty"`
-	Source    string `json:"source,omitempty"`
-	Data      any    `json:"data,omitempty"`
-	JQResult  any    `json:"jq_result,omitempty"`
+	Available   bool   `json:"available"`
+	TaskID      string `json:"task_id,omitempty"`
+	RunID       string `json:"run_id,omitempty"`
+	Source      string `json:"source,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	Message     string `json:"message,omitempty"`
+	Data        any    `json:"data,omitempty"`
+	DisplayData any    `json:"display_data,omitempty"`
+	JQPrefix    string `json:"jq_prefix,omitempty"`
+	JQResult    any    `json:"jq_result,omitempty"`
 }
 
 type RunStat struct {
@@ -416,7 +420,7 @@ func (s *PostgresStore) ListRunStats(ctx context.Context, taskID string, since t
 		`SELECT run_id, started_at, duration_ms, run_status FROM runs
 		 WHERE task_id = $1
 		 ORDER BY started_at DESC`,
-			taskID)
+		taskID)
 	if err != nil {
 		return nil, fmt.Errorf("list run stats: %w", err)
 	}

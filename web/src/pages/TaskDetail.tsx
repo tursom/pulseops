@@ -50,6 +50,14 @@ function shortRunID(id: string): string {
   return id.substring(0, 12)
 }
 
+function sampleDisplayData(sample: SampleResponse | null | undefined): unknown {
+  return sample?.display_data ?? sample?.data
+}
+
+function isSamplePreviewSource(source: string): boolean {
+  return !source.startsWith('artifact:') || source === 'artifact:payload'
+}
+
 const CHAR_LIMIT = 500
 
 const TIME_RANGE_OPTIONS = [
@@ -158,7 +166,7 @@ export default function TaskDetail() {
       setSamplesLoading(false)
       return
     }
-    const uniqueSources = [...new Set(exprs.map((e) => e.source).filter((s) => !s.startsWith('artifact:')))]
+    const uniqueSources = [...new Set(exprs.map((e) => e.source).filter(isSamplePreviewSource))]
     if (uniqueSources.length === 0) {
       setSamples({})
       setSamplesError(null)
@@ -199,7 +207,7 @@ export default function TaskDetail() {
     }
     setJqLoading(true)
     const promises = exprs
-      .filter((e) => e.source && !e.source.startsWith('artifact:'))
+      .filter((e) => e.source && isSamplePreviewSource(e.source))
       .map((expr) => {
         const key = `${expr.source}::${expr.jq_expr}`
         return fetchTaskSample(upstreamId, expr.source, expr.jq_expr).then(
@@ -604,9 +612,9 @@ export default function TaskDetail() {
           max: '最大值',
         }
         const uniqueSources = exprs
-          ? [...new Set(exprs.map((e) => e.source).filter((s) => !s.startsWith('artifact:')))]
+          ? [...new Set(exprs.map((e) => e.source).filter(isSamplePreviewSource))]
           : []
-        const hasArtifactSources = exprs?.some((e) => e.source?.startsWith('artifact:')) ?? false
+        const hasUnsupportedArtifactSources = exprs?.some((e) => e.source?.startsWith('artifact:') && e.source !== 'artifact:payload') ?? false
 
         if (!upstreamTaskId && (!exprs || exprs.length === 0)) return null
 
@@ -693,10 +701,10 @@ export default function TaskDetail() {
                               margin: 0,
                             }}
                           >
-                            {JSON.stringify(sample.data, null, 2)}
+                            {JSON.stringify(sampleDisplayData(sample), null, 2)}
                           </pre>
                         ) : (
-                          <Text type="secondary">暂无样本数据（上游任务尚无成功运行记录）</Text>
+                          <Text type="secondary">{sample?.message || '暂无样本数据（上游任务尚无成功运行记录）'}</Text>
                         ),
                       }
                     })}
@@ -705,7 +713,7 @@ export default function TaskDetail() {
               </Card>
             )}
 
-            {hasArtifactSources && (
+            {hasUnsupportedArtifactSources && (
               <Alert
                 type="info"
                 message="产物类型 (artifact:*) 的数据源暂不支持在线预览"

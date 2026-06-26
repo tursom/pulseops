@@ -398,7 +398,7 @@ func toFloat64Single(v any) (float64, bool) {
 }
 
 // FetchSampleData 从上游任务的最近成功运行中获取指定数据源的样本数据。
-// upstreamTaskID 是上游任务 ID（已由调用方解析）。返回 nil 表示没有成功运行。
+// upstreamTaskID 是上游任务 ID（已由调用方解析）。没有可用样本时返回 available=false 和原因提示。
 // 如果 jqExpr 非空，会对解析出的数据执行 JQ 求值，结果放在 JQResult 字段。
 func FetchSampleData(ctx context.Context, repo store.Repository, artifactStore store.ArtifactStore, upstreamTaskID, source string, jqExpr string) (*store.SampleResponse, error) {
 	runs, err := repo.ListRuns(ctx, upstreamTaskID, 20, 0, 0)
@@ -414,12 +414,34 @@ func FetchSampleData(ctx context.Context, repo store.Repository, artifactStore s
 		}
 	}
 	if successRecord == nil {
-		return &store.SampleResponse{Available: false}, nil
+		return &store.SampleResponse{
+			Available: false,
+			TaskID:    upstreamTaskID,
+			Source:    source,
+			Reason:    "no_success_run",
+			Message:   "上游任务尚无成功运行记录，请先触发一次运行。",
+		}, nil
 	}
 
-	data, err := resolveSampleSource(ctx, source, successRecord, artifactStore)
+	data, reason, message, err := resolveSampleSource(ctx, source, successRecord, artifactStore)
 	if err != nil {
 		return nil, err
+	}
+	if data == nil {
+		if reason == "" {
+			reason = "empty_source"
+		}
+		if message == "" {
+			message = "所选数据源无数据。"
+		}
+		return &store.SampleResponse{
+			Available: false,
+			TaskID:    upstreamTaskID,
+			RunID:     successRecord.RunID,
+			Source:    source,
+			Reason:    reason,
+			Message:   message,
+		}, nil
 	}
 
 	var jqResult any
@@ -428,50 +450,106 @@ func FetchSampleData(ctx context.Context, repo store.Repository, artifactStore s
 			jqResult = result
 		}
 	}
+	displayData, jqPrefix := resolveSampleDisplayData(source, data)
 
 	return &store.SampleResponse{
-		Available: true,
-		TaskID:    upstreamTaskID,
-		RunID:     successRecord.RunID,
-		Source:    source,
-		Data:      data,
-		JQResult:  jqResult,
+		Available:   true,
+		TaskID:      upstreamTaskID,
+		RunID:       successRecord.RunID,
+		Source:      source,
+		Data:        data,
+		DisplayData: displayData,
+		JQPrefix:    jqPrefix,
+		JQResult:    jqResult,
 	}, nil
 }
 
-func resolveSampleSource(ctx context.Context, source string, record *store.RunRecord, artifactStore store.ArtifactStore) (any, error) {
+func resolveSampleDisplayData(source string, data any) (any, string) {
+	if source != "payload" && source != "artifact:payload" {
+		return nil, ""
+	}
+	payload, ok := data.(map[string]any)
+	if !ok {
+		return nil, ""
+	}
+	body, ok := payload["body"].(string)
+	if !ok || strings.TrimSpace(body) == "" {
+		return nil, ""
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+		return nil, ""
+	}
+	return decoded, ".body | fromjson"
+}
+
+func resolveSampleSource(ctx context.Context, source string, record *store.RunRecord, artifactStore store.ArtifactStore) (any, string, string, error) {
 	switch {
 	case source == "payload":
 		if len(record.Payload) > 0 {
 			var v any
 			if err := json.Unmarshal(record.Payload, &v); err != nil {
-				return nil, fmt.Errorf("unmarshal payload: %w", err)
+				return nil, "", "", fmt.Errorf("unmarshal payload: %w", err)
 			}
-			return v, nil
+			return v, "", "", nil
 		}
 		// Payload was externalized to artifact store — try to read it back
 		for _, ref := range record.ArtifactRefs {
-			if ref.Kind == "payload" && artifactStore != nil {
-				rc, err := artifactStore.Get(ctx, ref.URI)
-				if err != nil {
-					return nil, fmt.Errorf("read payload artifact: %w", err)
+			if ref.Kind == "payload" {
+				content, reason, message, err := readSampleArtifactContent(ctx, artifactStore, ref)
+				if err != nil || content == nil {
+					return content, reason, message, err
 				}
-				defer rc.Close()
-				raw, err := io.ReadAll(rc)
-				if err != nil {
-					return nil, fmt.Errorf("read payload artifact body: %w", err)
-				}
-				var v any
-				if err := json.Unmarshal(raw, &v); err != nil {
-					return nil, fmt.Errorf("unmarshal artifact payload: %w", err)
-				}
-				return v, nil
+				return content, "", "", nil
 			}
 		}
-		return nil, nil
+		return nil, "payload_not_saved", "上游任务最近一次成功运行未保存 Payload。请将上游任务追踪级别设为 detail/debug 后重新运行。", nil
+
+	case strings.HasPrefix(source, "artifact:"):
+		kind := strings.TrimPrefix(source, "artifact:")
+		if kind == "" {
+			return nil, "", "", fmt.Errorf("unsupported sample source %q", source)
+		}
+		var matched []store.ArtifactRef
+		for _, ref := range record.ArtifactRefs {
+			if kind == "*" || ref.Kind == kind {
+				matched = append(matched, ref)
+			}
+		}
+		if len(matched) == 0 {
+			return nil, "artifact_not_found", "上游任务最近一次成功运行没有匹配的产物数据。", nil
+		}
+		if kind == "*" {
+			results := make([]map[string]any, 0, len(matched))
+			for _, ref := range matched {
+				content, reason, message, err := readSampleArtifactContent(ctx, artifactStore, ref)
+				if err != nil || content == nil {
+					return content, reason, message, err
+				}
+				results = append(results, map[string]any{
+					"kind":         ref.Kind,
+					"artifact_id":  ref.ArtifactID,
+					"content_type": ref.ContentType,
+					"content":      content,
+				})
+			}
+			return results, "", "", nil
+		}
+		if len(matched) == 1 {
+			return readSampleArtifactContent(ctx, artifactStore, matched[0])
+		}
+		results := make([]any, 0, len(matched))
+		for _, ref := range matched {
+			content, reason, message, err := readSampleArtifactContent(ctx, artifactStore, ref)
+			if err != nil || content == nil {
+				return content, reason, message, err
+			}
+			results = append(results, content)
+		}
+		return results, "", "", nil
 
 	case source == "summary":
-		return record.Summary, nil
+		return record.Summary, "", "", nil
 
 	case source == "record":
 		return map[string]any{
@@ -485,9 +563,36 @@ func resolveSampleSource(ctx context.Context, source string, record *store.RunRe
 			"ended_at":      record.EndedAt,
 			"duration_ms":   record.DurationMS,
 			"error_message": record.ErrorMessage,
-		}, nil
+		}, "", "", nil
 
 	default:
-		return nil, fmt.Errorf("unsupported sample source %q", source)
+		return nil, "", "", fmt.Errorf("unsupported sample source %q", source)
 	}
+}
+
+func readSampleArtifactContent(ctx context.Context, artifactStore store.ArtifactStore, ref store.ArtifactRef) (any, string, string, error) {
+	if artifactStore == nil {
+		return nil, "artifact_store_unavailable", "产物已外置存储，但当前服务未配置 artifact store。", nil
+	}
+	key, err := store.ObjectKeyFromURI(ref.URI)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("parse artifact uri: %w", err)
+	}
+	rc, err := artifactStore.Get(ctx, key)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("read artifact: %w", err)
+	}
+	defer rc.Close()
+	raw, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("read artifact body: %w", err)
+	}
+	if strings.Contains(ref.ContentType, "json") {
+		var v any
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return nil, "", "", fmt.Errorf("unmarshal artifact json: %w", err)
+		}
+		return v, "", "", nil
+	}
+	return string(raw), "", "", nil
 }

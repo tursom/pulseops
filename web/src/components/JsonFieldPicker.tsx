@@ -13,8 +13,26 @@ interface JsonFieldPickerProps {
   onChange?: (expr: string) => void
 }
 
+function getDisplayData(data: unknown, displayData: unknown): unknown {
+  return displayData ?? data
+}
+
+function stripJQPrefix(expr: string | undefined, prefix: string): string | undefined {
+  if (!expr || !prefix) return expr
+  if (expr === prefix) return ''
+  const marker = `${prefix} | `
+  if (expr.startsWith(marker)) return expr.slice(marker.length)
+  return expr
+}
+
+function withJQPrefix(path: string, prefix: string): string {
+  if (!prefix) return path
+  if (!path) return prefix
+  return `${prefix} | ${path}`
+}
+
 function resolveValue(data: unknown, path: string): unknown {
-  if (!data || !path) return undefined
+  if (data === undefined || !path) return undefined
   // Convert jq path to dot-path: .data.items[0].name → data.items.0.name
   const dotPath = path
     .replace(/^\./, '')
@@ -127,10 +145,12 @@ function jsonToTreeNodes(data: unknown, ctx: BuildContext): DataNode[] {
 
 export default function JsonFieldPicker({ sourceTaskId, source, value, onChange }: JsonFieldPickerProps) {
   const [mode, setMode] = useState<'visual' | 'raw'>('visual')
-  const [sample, setSample] = useState<unknown>(null)
+  const [sample, setSample] = useState<unknown>(undefined)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [noData, setNoData] = useState(false)
+  const [noDataMessage, setNoDataMessage] = useState<string | null>(null)
+  const [jqPrefix, setJQPrefix] = useState('')
   const loadIdRef = useRef(0)
 
   const fetchSample = useCallback(async () => {
@@ -139,46 +159,57 @@ export default function JsonFieldPicker({ sourceTaskId, source, value, onChange 
     setLoading(true)
     setError(null)
     setNoData(false)
+    setNoDataMessage(null)
+    setJQPrefix('')
     try {
       const resp = await fetchTaskSample(sourceTaskId, source)
       if (loadId !== loadIdRef.current) return
-      if (resp.available && resp.data) {
-        setSample(resp.data)
+      const displayData = getDisplayData(resp.data, resp.display_data)
+      if (resp.available && displayData !== undefined) {
+        setSample(displayData)
+        setJQPrefix(resp.jq_prefix || '')
       } else {
         setNoData(true)
-        setSample(null)
+        setNoDataMessage(resp.message || null)
+        setSample(undefined)
+        setJQPrefix('')
       }
     } catch (err) {
       if (loadId !== loadIdRef.current) return
       setError(err instanceof Error ? err.message : '加载样本数据失败')
-      setSample(null)
+      setSample(undefined)
+      setJQPrefix('')
     } finally {
       if (loadId === loadIdRef.current) setLoading(false)
     }
   }, [sourceTaskId, source])
 
   useEffect(() => {
-    setSample(null)
+    setSample(undefined)
     setError(null)
     setNoData(false)
+    setNoDataMessage(null)
+    setJQPrefix('')
     fetchSample()
   }, [fetchSample])
 
+  const visualValue = useMemo(() => stripJQPrefix(value, jqPrefix), [value, jqPrefix])
+
   const treeData = useMemo(() => {
-    if (!sample) return []
+    if (sample === undefined) return []
     return jsonToTreeNodes(sample, { path: '' })
   }, [sample])
 
   const previewValue = useMemo(() => {
-    if (!value || !sample) return undefined
-    return resolveValue(sample, value)
-  }, [value, sample])
+    if (!visualValue || sample === undefined) return undefined
+    return resolveValue(sample, visualValue)
+  }, [visualValue, sample])
 
   const handleSelect = useCallback((keys: React.Key[]) => {
     if (keys.length > 0 && onChange) {
-      onChange(String(keys[0]))
+      onChange(withJQPrefix(String(keys[0]), jqPrefix))
     }
-  }, [onChange])
+  }, [onChange, jqPrefix])
 
   const handleRefresh = () => fetchSample()
 
@@ -228,10 +259,10 @@ export default function JsonFieldPicker({ sourceTaskId, source, value, onChange 
         />
       ) : noData ? (
         <Alert type="info" message="暂无样本数据"
-          description="上游任务尚无成功运行记录，请先触发一次运行。"
+          description={noDataMessage || '上游任务尚无成功运行记录，请先触发一次运行。'}
           showIcon
         />
-      ) : !sample ? (
+      ) : sample === undefined ? (
         <Empty description="所选数据源无数据" />
       ) : (
         <>
@@ -239,7 +270,7 @@ export default function JsonFieldPicker({ sourceTaskId, source, value, onChange 
             <Tree
               treeData={treeData}
               onSelect={handleSelect}
-              selectedKeys={value ? [value] : []}
+              selectedKeys={visualValue ? [visualValue] : []}
               defaultExpandAll={false}
               showLine={{ showLeafIcon: false }}
               style={{ fontSize: 13 }}

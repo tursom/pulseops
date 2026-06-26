@@ -191,6 +191,10 @@ export interface SampleResponse {
   task_id?: string
   run_id?: string
   source?: string
+  reason?: string
+  message?: string
   data?: unknown
+  display_data?: unknown
+  jq_prefix?: string
   jq_result?: unknown
 }

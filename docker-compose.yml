@@ -9,4 +9,4 @@ services:
     volumes:
       - ./configs:/app/configs:ro
       - ./logs:/app/logs
-    restart: always
+    restart: unless-stopped
