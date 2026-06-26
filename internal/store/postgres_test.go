@@ -7,6 +7,8 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+
+	"pulseops/internal/config"
 )
 
 func TestPostgresStoreInsertRunPersistsRunFindingsAndArtifacts(t *testing.T) {
@@ -250,6 +252,44 @@ func TestPostgresStoreListRunsWithTimeFilter(t *testing.T) {
 	}
 	if len(runs) != 0 {
 		t.Fatalf("expected 0 runs, got %d", len(runs))
+	}
+	assertNoMockError(t, mock)
+}
+
+func TestPostgresStoreUpsertTaskDependencyUpdatesByID(t *testing.T) {
+	t.Parallel()
+
+	st, mock := newMockStore(t)
+	now := time.Now().UTC()
+	dep := config.TaskDependency{
+		ID:               "dep-1",
+		UpstreamTaskID:   "source-a",
+		DownstreamTaskID: "task-a",
+		Condition:        "run_status == success",
+		SourceKey:        "source_a",
+		Params:           map[string]any{"timeout_ms": 1200},
+	}
+
+	mock.ExpectQuery(regexp.QuoteMeta(`UPDATE task_dependencies
+			SET upstream_task_id = $2,
+			    downstream_task_id = $3,
+			    condition = $4,
+			    source_key = $5,
+			    params_json = $6::jsonb,
+			    updated_at = NOW()
+			WHERE id = $1
+			RETURNING id, upstream_task_id, downstream_task_id, condition, source_key, params_json, created_at, updated_at`)).
+		WithArgs("dep-1", "source-a", "task-a", "run_status == success", "source_a", `{"timeout_ms":1200}`).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "upstream_task_id", "downstream_task_id", "condition", "source_key", "params_json", "created_at", "updated_at",
+		}).AddRow("dep-1", "source-a", "task-a", "run_status == success", "source_a", []byte(`{"timeout_ms":1200}`), now, now))
+
+	saved, err := st.UpsertTaskDependency(context.Background(), dep)
+	if err != nil {
+		t.Fatalf("upsert dependency: %v", err)
+	}
+	if saved.SourceKey != "source_a" || saved.Params["timeout_ms"] != float64(1200) {
+		t.Fatalf("unexpected saved dependency: %#v", saved)
 	}
 	assertNoMockError(t, mock)
 }

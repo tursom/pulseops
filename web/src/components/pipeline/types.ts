@@ -13,6 +13,8 @@ export interface TaskNodeData extends Record<string, unknown> {
 
 export interface DependencyEdgeData extends Record<string, unknown> {
   condition?: string
+  sourceKey?: string
+  params?: Record<string, unknown>
   dependencyId?: string
   legacy?: boolean
   valid?: boolean

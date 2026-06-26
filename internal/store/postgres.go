@@ -1292,12 +1292,38 @@ func (s *PostgresStore) UpsertTaskDependency(ctx context.Context, dependency con
 	if dependency.DownstreamTaskID == "" {
 		return config.TaskDependency{}, fmt.Errorf("downstream_task_id is required")
 	}
-	if dependency.ID == "" {
-		dependency.ID = uuid.NewString()
-	}
 	paramsJSON, err := marshalJSONBytes(dependency.Params)
 	if err != nil {
 		return config.TaskDependency{}, err
+	}
+	if dependency.ID != "" {
+		err = s.db.QueryRowContext(ctx, `
+			UPDATE task_dependencies
+			SET upstream_task_id = $2,
+			    downstream_task_id = $3,
+			    condition = $4,
+			    source_key = $5,
+			    params_json = $6::jsonb,
+			    updated_at = NOW()
+			WHERE id = $1
+			RETURNING id, upstream_task_id, downstream_task_id, condition, source_key, params_json, created_at, updated_at
+		`, dependency.ID, dependency.UpstreamTaskID, dependency.DownstreamTaskID, dependency.Condition, dependency.SourceKey, string(paramsJSON)).
+			Scan(
+				&dependency.ID, &dependency.UpstreamTaskID, &dependency.DownstreamTaskID,
+				&dependency.Condition, &dependency.SourceKey, &dependency.ParamsJSON,
+				&dependency.CreatedAt, &dependency.UpdatedAt,
+			)
+		if err == nil {
+			if len(dependency.ParamsJSON) > 0 {
+				_ = json.Unmarshal(dependency.ParamsJSON, &dependency.Params)
+			}
+			return dependency, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return config.TaskDependency{}, fmt.Errorf("update task dependency: %w", err)
+		}
+	} else {
+		dependency.ID = uuid.NewString()
 	}
 	err = s.db.QueryRowContext(ctx, `
 		INSERT INTO task_dependencies (

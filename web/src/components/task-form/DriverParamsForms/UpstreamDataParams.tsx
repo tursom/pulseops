@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Form, Input, Select, Button, Space, Tooltip, Typography, Spin, Collapse, Tag } from 'antd';
 import type { FormInstance } from 'antd';
 import { MinusCircleOutlined, PlusOutlined, QuestionCircleOutlined } from '@ant-design/icons';
@@ -40,13 +40,26 @@ function isVisualSampleSource(source: string | undefined): boolean {
   return source === 'payload' || source === 'summary' || source === 'record' || source === 'artifact:payload'
 }
 
-const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
+const UpstreamDataParams = ({ form }: { form?: FormInstance }) => {
   const sourceTaskId = form ? Form.useWatch(['params', 'source_task_id'], form) as string : undefined;
   const trigger = form ? Form.useWatch('trigger', form) as string : undefined;
   const watchTaskId = form ? Form.useWatch('watch_task_id', form) as string : undefined;
-  const dependencies = form ? Form.useWatch('dependencies', form) as Array<{ upstream_task_id?: string }> | undefined : undefined;
-  const dependencyTaskId = dependencies?.find((dep) => dep.upstream_task_id)?.upstream_task_id;
-  const resolvedTaskId = sourceTaskId || dependencyTaskId || (trigger === 'on_run' ? watchTaskId : null) || null;
+  const dependencies = form ? Form.useWatch('dependencies', form) as Array<{ upstream_task_id?: string; source_key?: string }> | undefined : undefined;
+  const dataSources = form ? Form.useWatch(['params', 'data_sources'], form) as Array<{ key?: string; task_id?: string }> | undefined : undefined;
+  const extractExprs = form ? Form.useWatch(['params', 'extract_exprs'], form) as Array<{ source_key?: string; source?: string }> | undefined : undefined;
+  const defaultDependencyTaskId = dependencies?.find((dep) => dep.upstream_task_id)?.upstream_task_id;
+  const defaultSourceKey = extractExprs?.find((expr) => expr.source_key)?.source_key || '';
+  const selectedDataSourceTaskId = dataSources?.find((source) => source.key === defaultSourceKey)?.task_id;
+  const selectedDependencyTaskId = dependencies?.find((dep) => dep.source_key === defaultSourceKey)?.upstream_task_id;
+  const resolvedTaskId = selectedDataSourceTaskId || selectedDependencyTaskId || sourceTaskId || defaultDependencyTaskId || (trigger === 'on_run' ? watchTaskId : null) || null;
+  const sourceKeyOptions = [
+    ...(dependencies || [])
+      .filter((dep) => dep.source_key && dep.upstream_task_id)
+      .map((dep) => ({ value: dep.source_key!, label: `${dep.source_key} (${dep.upstream_task_id})` })),
+    ...(dataSources || [])
+      .filter((source) => source.key && source.task_id)
+      .map((source) => ({ value: source.key!, label: `${source.key} (${source.task_id})` })),
+  ]
 
   const [taskDefs, setTaskDefs] = useState<TaskDefinition[]>([]);
   const [taskDefsLoading, setTaskDefsLoading] = useState(false);
@@ -94,7 +107,7 @@ const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
   }, [])
 
   useEffect(() => {
-    const taskId = sourceTaskId || dependencyTaskId || (trigger === 'on_run' ? watchTaskId : null) || null
+    const taskId = resolvedTaskId
     if (!taskId) {
       setPreviewData({})
       setPreviewLoading(false)
@@ -102,14 +115,14 @@ const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
       return
     }
     fetchPreview(taskId)
-  }, [sourceTaskId, dependencyTaskId, watchTaskId, trigger, fetchPreview])
+  }, [resolvedTaskId, fetchPreview])
 
   return (
     <>
       <Form.Item
         name={['params', 'source_task_id']}
         label="源任务"
-        extra="留空则使用依赖触发（watch_task）的上游任务作为数据源"
+        extra="单上游快捷入口；多上游场景建议用下方数据源 Key 或依赖边的 source_key"
       >
         <Select
           allowClear
@@ -123,6 +136,87 @@ const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
           showSearch
           optionFilterProp="label"
         />
+      </Form.Item>
+
+      <Form.List name={['params', 'data_sources']}>
+        {(fields, { add, remove }) => (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ marginBottom: 8 }}>
+              <Text strong>额外数据源</Text>
+              <Text type="secondary" style={{ marginLeft: 8 }}>
+                用 key 绑定上游任务，提取表达式可按 source_key 选择
+              </Text>
+            </div>
+            {fields.map(({ key, name, ...restField }) => (
+              <Space key={key} align="baseline" style={{ display: 'flex', marginBottom: 8, flexWrap: 'wrap' }}>
+                <Form.Item
+                  {...restField}
+                  name={[name, 'key']}
+                  label="Key"
+                  rules={[{ required: true, message: '请输入数据源 Key' }]}
+                >
+                  <Input placeholder="如 upstream_a" style={{ width: 150 }} />
+                </Form.Item>
+                <Form.Item
+                  {...restField}
+                  name={[name, 'task_id']}
+                  label="上游任务"
+                  rules={[{ required: true, message: '请选择上游任务' }]}
+                >
+                  <Select
+                    loading={taskDefsLoading}
+                    notFoundContent={taskDefsLoading ? <Spin size="small" /> : '没有启用的任务'}
+                    placeholder="选择上游任务"
+                    options={taskDefs.map((d) => ({
+                      value: d.task_id,
+                      label: `${d.name} (${d.task_id})`,
+                    }))}
+                    showSearch
+                    optionFilterProp="label"
+                    style={{ width: 260 }}
+                  />
+                </Form.Item>
+                <MinusCircleOutlined onClick={() => remove(name)} style={{ color: '#ff4d4f' }} />
+              </Space>
+            ))}
+            <Button
+              type="dashed"
+              onClick={() => add({ key: `source_${fields.length + 1}` })}
+              block
+              icon={<PlusOutlined />}
+            >
+              添加额外数据源
+            </Button>
+          </div>
+        )}
+      </Form.List>
+
+      <Form.Item
+        name={['params', 'common_params']}
+        label="公共参数"
+        extra="多个上游复用的授权、Header 模板、超时等；请输入 JSON 对象"
+        getValueFromEvent={(event) => {
+          const raw = event.target.value.trim()
+          if (!raw) return undefined
+          try {
+            return JSON.parse(raw)
+          } catch {
+            return event.target.value
+          }
+        }}
+        getValueProps={(value) => ({
+          value: value && typeof value === 'object' ? JSON.stringify(value, null, 2) : value,
+        })}
+        rules={[
+          {
+            validator(_, value) {
+              if (!value || (typeof value === 'object' && !Array.isArray(value))) return Promise.resolve()
+              return Promise.reject(new Error('公共参数必须是 JSON 对象'))
+            },
+          },
+        ]}
+      >
+        <Input.TextArea rows={4} placeholder='例如 {"headers":{"Authorization":"Bearer {{token}}"}}' />
       </Form.Item>
 
       {resolvedTaskId && (
@@ -236,6 +330,20 @@ const UpstreamDataParams: React.FC<{ form?: FormInstance }> = ({ form }) => {
                     }))}
                     optionFilterProp="label"
                     showSearch
+                  />
+                </Form.Item>
+
+                <Form.Item
+                  {...restField}
+                  name={[name, 'source_key']}
+                  label="上游 Key"
+                  tooltip="多上游时必须指定；单上游可留空"
+                >
+                  <Select
+                    allowClear
+                    placeholder="默认上游"
+                    style={{ width: 180 }}
+                    options={sourceKeyOptions}
                   />
                 </Form.Item>
 

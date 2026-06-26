@@ -75,6 +75,14 @@ const TIME_RANGE_OPTIONS = [
   { label: '全部', value: '' },
 ]
 
+interface DataProcessExtractExpr {
+  field: string
+  source_key?: string
+  source: string
+  jq_expr: string
+  agg_mode?: string
+}
+
 function sampleDisplayData(sample: SampleResponse | null | undefined): unknown {
   return sample?.display_data ?? sample?.data
 }
@@ -158,13 +166,28 @@ export default function TaskDetail() {
     [tableRuns],
   )
   const latestAI = analyses[0]
+  const dataSourceTaskByKey = useMemo(() => {
+    const result = new Map<string, string>()
+    const params = def?.params || {}
+    const sourceTaskID = params.source_task_id as string | undefined
+    if (sourceTaskID) result.set('', sourceTaskID)
+    if (def?.watch_task_id) result.set('', def.watch_task_id)
+    for (const dep of def?.dependencies || []) {
+      if (!result.has('')) result.set('', dep.upstream_task_id)
+      if (dep.source_key) result.set(dep.source_key, dep.upstream_task_id)
+    }
+    const dataSources = params.data_sources as Array<{ key?: string; task_id?: string }> | undefined
+    for (const source of dataSources || []) {
+      if (source.key && source.task_id) result.set(source.key, source.task_id)
+    }
+    return result
+  }, [def])
 
   useEffect(() => {
     if (!def) return
     const params = def.params || {}
-    const upstreamId = (params.source_task_id as string) || def.watch_task_id || def.dependencies?.[0]?.upstream_task_id || ''
-    const exprs = params.extract_exprs as Array<{ source: string; jq_expr?: string }> | undefined
-    if (def.kind !== 'data_process' || !upstreamId || !exprs?.length) {
+    const exprs = params.extract_exprs as DataProcessExtractExpr[] | undefined
+    if (def.kind !== 'data_process' || !exprs?.length) {
       setSamples({})
       setJqResults({})
       setSamplesLoading(false)
@@ -172,9 +195,17 @@ export default function TaskDetail() {
       return
     }
 
-    const uniqueSources = [...new Set(exprs.map((expr) => expr.source).filter(isSamplePreviewSource))]
-    setSamplesLoading(uniqueSources.length > 0)
-    Promise.allSettled(uniqueSources.map((source) => fetchTaskSample(upstreamId, source).then((result) => [source, result] as const)))
+    const sampleTargets = new Map<string, { taskID: string; source: string; sourceKey: string }>()
+    for (const expr of exprs) {
+      if (!isSamplePreviewSource(expr.source)) continue
+      const sourceKey = expr.source_key || ''
+      const taskID = dataSourceTaskByKey.get(sourceKey)
+      if (taskID) sampleTargets.set(`${sourceKey}::${expr.source}`, { taskID, source: expr.source, sourceKey })
+    }
+    setSamplesLoading(sampleTargets.size > 0)
+    Promise.allSettled(Array.from(sampleTargets.values()).map((target) =>
+      fetchTaskSample(target.taskID, target.source).then((result) => [`${target.sourceKey}::${target.source}`, result] as const),
+    ))
       .then((results) => {
         const next: Record<string, SampleResponse | null> = {}
         for (const result of results) {
@@ -190,8 +221,11 @@ export default function TaskDetail() {
     const jqExprs = exprs.filter((expr) => expr.source && expr.jq_expr && isSamplePreviewSource(expr.source))
     setJqLoading(jqExprs.length > 0)
     Promise.allSettled(jqExprs.map((expr) => {
-      const key = `${expr.source}::${expr.jq_expr}`
-      return fetchTaskSample(upstreamId, expr.source, expr.jq_expr).then((result) => [key, result.jq_result] as const)
+      const sourceKey = expr.source_key || ''
+      const taskID = dataSourceTaskByKey.get(sourceKey)
+      if (!taskID) return Promise.resolve([`${sourceKey}::${expr.source}::${expr.jq_expr}`, undefined] as const)
+      const key = `${sourceKey}::${expr.source}::${expr.jq_expr}`
+      return fetchTaskSample(taskID, expr.source, expr.jq_expr).then((result) => [key, result.jq_result] as const)
     }))
       .then((results) => {
         const next: Record<string, unknown> = {}
@@ -204,7 +238,7 @@ export default function TaskDetail() {
         setJqResults(next)
       })
       .finally(() => setJqLoading(false))
-  }, [def])
+  }, [dataSourceTaskByKey, def])
 
   const handleRun = async () => {
     if (!id) return
@@ -324,8 +358,8 @@ export default function TaskDetail() {
     'artifact:stdout': 'Artifact Stdout',
     'artifact:stderr': 'Artifact Stderr',
   }
-  const extractExprs = def?.params?.extract_exprs as Array<{ field: string; source: string; jq_expr: string; agg_mode?: string }> | undefined
-  const dataSourceTaskId = ((def?.params || {}).source_task_id as string) || def?.watch_task_id || def?.dependencies?.[0]?.upstream_task_id || ''
+  const extractExprs = def?.params?.extract_exprs as DataProcessExtractExpr[] | undefined
+  const dataSourceTaskId = dataSourceTaskByKey.get('') || ''
 
   return (
     <div className="page-shell">
@@ -543,6 +577,7 @@ export default function TaskDetail() {
               {dataSourceTaskId ? <Link to={`/tasks/${dataSourceTaskId}`}>{dataSourceTaskId}</Link> : <Text type="secondary">未设置</Text>}
             </Descriptions.Item>
             <Descriptions.Item label="表达式数量">{extractExprs.length}</Descriptions.Item>
+            <Descriptions.Item label="数据源数量">{dataSourceTaskByKey.size}</Descriptions.Item>
           </Descriptions>
           <Table
             className="dense-table"
@@ -551,12 +586,17 @@ export default function TaskDetail() {
             size="small"
             columns={[
               { title: '输出字段', dataIndex: 'field', render: (value: string) => <Text code>{value}</Text> },
+              {
+                title: '上游 Key',
+                dataIndex: 'source_key',
+                render: (value: string | undefined) => value ? <Tag>{value}</Tag> : <Text type="secondary">默认</Text>,
+              },
               { title: '数据源', dataIndex: 'source', render: (value: string) => <Tag>{sourceLabels[value] || value}</Tag> },
               { title: 'JQ / 字段选择', dataIndex: 'jq_expr', render: (value: string) => <Text code>{value}</Text> },
               {
                 title: '样本值',
-                render: (_, record: { source: string; jq_expr: string }) => {
-                  const key = `${record.source}::${record.jq_expr}`
+                render: (_, record: DataProcessExtractExpr) => {
+                  const key = `${record.source_key || ''}::${record.source}::${record.jq_expr}`
                   const value = jqResults[key]
                   if (jqLoading && !(key in jqResults)) return <Text type="secondary">加载中</Text>
                   if (value === undefined || value === null) return <Text type="secondary">—</Text>
@@ -571,15 +611,18 @@ export default function TaskDetail() {
               <Spin />
             ) : Object.keys(samples).length > 0 ? (
               <Space direction="vertical" style={{ width: '100%' }}>
-                {Object.entries(samples).map(([source, sample]) => (
-                  <Card key={source} size="small" title={<Tag>{sourceLabels[source] || source}</Tag>}>
+                {Object.entries(samples).map(([sourceKeyAndSource, sample]) => {
+                  const [sourceKey, source] = sourceKeyAndSource.split('::')
+                  return (
+                  <Card key={sourceKeyAndSource} size="small" title={<Space><Tag>{sourceLabels[source] || source}</Tag>{sourceKey && <Tag>{sourceKey}</Tag>}</Space>}>
                     {sample?.available ? (
                       <pre className="code-block">{safeJson(sampleDisplayData(sample))}</pre>
                     ) : (
                       <Text type="secondary">{sample?.message || '暂无样本数据'}</Text>
                     )}
                   </Card>
-                ))}
+                  )
+                })}
               </Space>
             ) : (
               <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可预览样本" />

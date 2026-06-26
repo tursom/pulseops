@@ -4,7 +4,7 @@ import type {
   RunRecord,
   AIAnalysisRecord,
   ArtifactRef,
-  ArtifactDetail,
+  ArtifactDetailResponse,
   HealthResponse,
   ActionResponse,
   APIError,
@@ -145,8 +145,8 @@ export async function fetchRunArtifacts(id: string, runID: string): Promise<Arti
 }
 
 // GET /api/artifacts/{artifactID}
-export async function fetchArtifactDetail(artifactID: string): Promise<ArtifactDetail> {
-  return request<ArtifactDetail>(`/api/artifacts/${encodeURIComponent(artifactID)}`)
+export async function fetchArtifactDetail(artifactID: string): Promise<ArtifactDetailResponse> {
+  return request<ArtifactDetailResponse>(`/api/artifacts/${encodeURIComponent(artifactID)}`)
 }
 
 // GET /api/artifacts/{artifactID}/content

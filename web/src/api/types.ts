@@ -87,8 +87,9 @@ export interface ArtifactRef {
   preview_text: string
 }
 
-// Upload URL response (added by Go handler — artifact + presigned URL)
-export interface ArtifactDetail extends ArtifactRef {
+// Go handler returns artifact metadata wrapped with a presigned URL.
+export interface ArtifactDetailResponse {
+  artifact: ArtifactRef
   download_url?: string
 }
 

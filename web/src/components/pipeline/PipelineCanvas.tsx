@@ -10,7 +10,7 @@ import {
 } from '@xyflow/react'
 import type { Connection, Edge } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { Modal, Select, Card, Empty, message, Space, Button, Drawer, Descriptions, Tag, Typography, Segmented } from 'antd'
+import { Modal, Select, Card, Empty, message, Space, Button, Drawer, Descriptions, Tag, Typography, Segmented, Input } from 'antd'
 import { useNavigate } from 'react-router-dom'
 
 import { deleteTaskDependency, fetchPipelineTasks, fetchTaskGraph, updateTaskDefinition, upsertTaskDependency } from '../../api/client'
@@ -18,7 +18,7 @@ import type { TaskDefinition, TaskGraph, TaskGraphEdge } from '../../api/types'
 import TaskNode from './TaskNode'
 import DependencyEdge from './DependencyEdge'
 import type { TaskNodeType, DependencyEdgeType } from './types'
-import { KIND_COLORS, KIND_LABELS, runStatusColor, RUN_STATUS_LABELS } from '../../utils/pulseops'
+import { KIND_COLORS, KIND_LABELS, runStatusColor, RUN_STATUS_LABELS, safeJson } from '../../utils/pulseops'
 
 const { Text } = Typography
 
@@ -64,6 +64,8 @@ function buildGraph(graphData: TaskGraph): GraphData {
       target: edge.downstream_task_id,
       data: {
         condition: edge.condition || undefined,
+        sourceKey: edge.source_key,
+        params: edge.params,
         dependencyId: edge.id,
         legacy: edge.legacy,
         valid: edge.valid,
@@ -172,6 +174,8 @@ export default function PipelineCanvas({ pipelineId }: Props) {
   const [depEditorSource, setDepEditorSource] = useState('')
   const [depEditorTarget, setDepEditorTarget] = useState('')
   const [depEditorCondition, setDepEditorCondition] = useState('')
+  const [depEditorSourceKey, setDepEditorSourceKey] = useState('')
+  const [depEditorParams, setDepEditorParams] = useState('{}')
 
   const loadData = useCallback(async () => {
     try {
@@ -234,6 +238,8 @@ export default function PipelineCanvas({ pipelineId }: Props) {
     if (!sourceDef || !targetDef) return
 
     let condition = ''
+    let sourceKey = ''
+    let params = '{}'
 
     Modal.confirm({
       title: '创建依赖',
@@ -253,14 +259,29 @@ export default function PipelineCanvas({ pipelineId }: Props) {
               { value: 'run_status == success', label: '上游运行成功时触发' },
             ]}
           />
+          <Input
+            placeholder="数据源 Key，例如 upstream_a"
+            style={{ marginTop: 12 }}
+            onChange={(event) => { sourceKey = event.target.value }}
+          />
+          <Input.TextArea
+            rows={4}
+            placeholder='边参数 JSON，例如 {"headers":{"X-Env":"prod"}}'
+            style={{ marginTop: 12 }}
+            defaultValue="{}"
+            onChange={(event) => { params = event.target.value }}
+          />
         </div>
       ),
       onOk: async () => {
         try {
+          const parsedParams = parseDependencyParams(params)
           await upsertTaskDependency({
             upstream_task_id: sourceId,
             downstream_task_id: targetId,
             condition,
+            source_key: sourceKey.trim(),
+            params: parsedParams,
           })
           message.success('依赖已创建')
           loadData()
@@ -271,17 +292,21 @@ export default function PipelineCanvas({ pipelineId }: Props) {
     })
   }, [loadData])
 
-  const onEdgeClick = useCallback((_event: React.MouseEvent, edge: Edge) => {
+  const openDependencyEditor = useCallback((edge: DependencyEdgeType) => {
     const graphEdge = graphEdgesRef.current.find((item) => item.id === edge.id)
     if (!graphEdge) return
+    setSelectedEdge(edge)
+    setSelectedNode(null)
     setDepEditorSource(edge.source)
     setDepEditorTarget(edge.target)
     setDepEditorCondition(graphEdge.condition || '')
+    setDepEditorSourceKey(graphEdge.source_key || '')
+    setDepEditorParams(safeJson(graphEdge.params || {}))
     setDepEditorOpen(true)
   }, [])
 
   const handleSaveDependency = useCallback(async () => {
-    const graphEdge = graphEdgesRef.current.find((item) => item.upstream_task_id === depEditorSource && item.downstream_task_id === depEditorTarget)
+    const graphEdge = graphEdgesRef.current.find((item) => item.id === selectedEdge?.id)
     if (!graphEdge) return
     try {
       if (graphEdge.legacy) {
@@ -292,11 +317,14 @@ export default function PipelineCanvas({ pipelineId }: Props) {
           watch_condition: depEditorCondition,
         })
       } else {
+        const parsedParams = parseDependencyParams(depEditorParams)
         await upsertTaskDependency({
           id: graphEdge.id,
           upstream_task_id: depEditorSource,
           downstream_task_id: depEditorTarget,
           condition: depEditorCondition,
+          source_key: depEditorSourceKey.trim(),
+          params: parsedParams,
         })
       }
       message.success('依赖已更新')
@@ -305,14 +333,14 @@ export default function PipelineCanvas({ pipelineId }: Props) {
       message.error(err instanceof Error ? err.message : '更新失败')
     }
     setDepEditorOpen(false)
-  }, [depEditorSource, depEditorTarget, depEditorCondition, loadData])
+  }, [selectedEdge?.id, depEditorTarget, depEditorCondition, depEditorSourceKey, depEditorParams, loadData])
 
   const handleDeleteDependency = useCallback(async () => {
-    const graphEdge = graphEdgesRef.current.find((item) => item.upstream_task_id === depEditorSource && item.downstream_task_id === depEditorTarget)
+    const graphEdge = graphEdgesRef.current.find((item) => item.id === selectedEdge?.id)
     if (!graphEdge) return
     Modal.confirm({
       title: '删除依赖？',
-      content: <p>移除到 <strong>{depEditorSource}</strong> 的依赖链接？</p>,
+      content: <p>移除 <strong>{graphEdge.upstream_task_id}</strong> 到 <strong>{graphEdge.downstream_task_id}</strong> 的依赖链接？</p>,
       okText: '删除',
       okButtonProps: { danger: true },
       onOk: async () => {
@@ -338,7 +366,7 @@ export default function PipelineCanvas({ pipelineId }: Props) {
       },
     })
     setDepEditorOpen(false)
-  }, [depEditorSource, depEditorTarget, loadData])
+  }, [selectedEdge?.id, loadData])
 
   const onEdgesDelete = useCallback(async (deletedEdges: Edge[]) => {
     for (const edge of deletedEdges) {
@@ -507,8 +535,7 @@ export default function PipelineCanvas({ pipelineId }: Props) {
           setSelectedNode(node as TaskNodeType)
           setSelectedEdge(null)
         }}
-        onEdgeClick={(event, edge) => {
-          onEdgeClick(event, edge)
+        onEdgeClick={(_event, edge) => {
           setSelectedEdge(edge as DependencyEdgeType)
           setSelectedNode(null)
         }}
@@ -585,11 +612,25 @@ export default function PipelineCanvas({ pipelineId }: Props) {
             <Descriptions.Item label="上游">{selectedEdge.source}</Descriptions.Item>
             <Descriptions.Item label="下游">{selectedEdge.target}</Descriptions.Item>
             <Descriptions.Item label="触发条件">{selectedEdge.data?.condition || '总是触发'}</Descriptions.Item>
+            <Descriptions.Item label="数据源 Key">{selectedEdge.data?.sourceKey || <Text type="secondary">未设置</Text>}</Descriptions.Item>
+            <Descriptions.Item label="边参数">
+              {selectedEdge.data?.params ? <Text code>{safeJson(selectedEdge.data.params)}</Text> : <Text type="secondary">无</Text>}
+            </Descriptions.Item>
             <Descriptions.Item label="来源">{selectedEdge.data?.legacy ? '旧 watch_task_id 字段' : '依赖表'}</Descriptions.Item>
             <Descriptions.Item label="状态">
               {selectedEdge.data?.valid === false
                 ? <Tag color="red">{selectedEdge.data.error || '无效'}</Tag>
                 : <Tag color="green">有效</Tag>}
+            </Descriptions.Item>
+            <Descriptions.Item label="操作">
+              <Space wrap>
+                <Button size="small" onClick={() => openDependencyEditor(selectedEdge)}>
+                  编辑依赖
+                </Button>
+                <Button size="small" danger onClick={handleDeleteDependency}>
+                  删除依赖
+                </Button>
+              </Space>
             </Descriptions.Item>
           </Descriptions>
         )}
@@ -626,8 +667,32 @@ export default function PipelineCanvas({ pipelineId }: Props) {
               { value: 'run_status == success', label: '上游运行成功时触发' },
             ]}
           />
+          <p style={{ margin: '12px 0 6px' }}><strong>数据源 Key:</strong></p>
+          <Input
+            placeholder="例如 upstream_a"
+            value={depEditorSourceKey}
+            disabled={selectedEdge?.data?.legacy}
+            onChange={(event) => setDepEditorSourceKey(event.target.value)}
+          />
+          <p style={{ margin: '12px 0 6px' }}><strong>边参数 JSON:</strong></p>
+          <Input.TextArea
+            rows={5}
+            value={depEditorParams}
+            disabled={selectedEdge?.data?.legacy}
+            onChange={(event) => setDepEditorParams(event.target.value)}
+          />
         </div>
       </Modal>
     </>
   )
+}
+
+function parseDependencyParams(raw: string): Record<string, unknown> {
+  const trimmed = raw.trim()
+  if (!trimmed) return {}
+  const parsed = JSON.parse(trimmed)
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('边参数必须是 JSON 对象')
+  }
+  return parsed as Record<string, unknown>
 }
