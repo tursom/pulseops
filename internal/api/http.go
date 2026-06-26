@@ -1061,7 +1061,7 @@ func sortTaskViews(views []taskView) {
 
 func buildDashboardSummary(views []taskView, recentRuns []store.RunListItem) dashboardSummary {
 	counts := dashboardCounts{Total: len(views)}
-	var anomalies []taskView
+	anomalies := make([]taskView, 0)
 	for _, view := range views {
 		if view.Enabled {
 			counts.Enabled++
@@ -1087,6 +1087,9 @@ func buildDashboardSummary(views []taskView, recentRuns []store.RunListItem) das
 	}
 	if len(anomalies) > 12 {
 		anomalies = anomalies[:12]
+	}
+	if recentRuns == nil {
+		recentRuns = []store.RunListItem{}
 	}
 	return dashboardSummary{
 		Counts:       counts,

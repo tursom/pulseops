@@ -65,7 +65,13 @@ export async function fetchTask(id: string): Promise<TaskView> {
 
 export async function fetchDashboardSummary(since = '24h'): Promise<DashboardSummary> {
   const params = new URLSearchParams({ since })
-  return request<DashboardSummary>(`/api/dashboard/summary?${params.toString()}`)
+  const data = await request<DashboardSummary>(`/api/dashboard/summary?${params.toString()}`)
+  return {
+    ...data,
+    anomalies: Array.isArray(data.anomalies) ? data.anomalies : [],
+    recent_runs: Array.isArray(data.recent_runs) ? data.recent_runs : [],
+    label_groups: Array.isArray(data.label_groups) ? data.label_groups : [],
+  }
 }
 
 // GET /api/tasks/{id}/runs

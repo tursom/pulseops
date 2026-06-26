@@ -214,6 +214,25 @@ func TestDashboardSummaryReturnsAggregates(t *testing.T) {
 	}
 }
 
+func TestDashboardSummaryReturnsEmptyLists(t *testing.T) {
+	t.Parallel()
+
+	handler := Routes("", &emptyTaskManager{}, &fakeRepository{}, &fakeArtifactStore{}, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/summary", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, field := range []string{`"anomalies":[]`, `"recent_runs":[]`, `"label_groups":[]`} {
+		if !strings.Contains(body, field) {
+			t.Fatalf("expected dashboard summary field %s to be an empty list, got %s", field, body)
+		}
+	}
+}
+
 func TestTaskGraphReturnsDependencyEdges(t *testing.T) {
 	t.Parallel()
 
@@ -271,6 +290,14 @@ func testPlatform() config.PlatformConfigSummary {
 }
 
 type fakeTaskManager struct{}
+
+type emptyTaskManager struct {
+	fakeTaskManager
+}
+
+func (m *emptyTaskManager) ListTasks() []store.TaskState {
+	return nil
+}
 
 func (m *fakeTaskManager) ListTasks() []store.TaskState {
 	now := time.Now()
