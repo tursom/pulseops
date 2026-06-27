@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -820,11 +821,138 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	w.Header().Set("Pragma", "no-cache")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	_ = json.NewEncoder(w).Encode(normalizeJSONCollections(value))
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+var jsonMarshalerType = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
+
+func normalizeJSONCollections(value any) any {
+	if value == nil {
+		return value
+	}
+	normalized := normalizeJSONValue(reflect.ValueOf(value))
+	if !normalized.IsValid() {
+		return value
+	}
+	return normalized.Interface()
+}
+
+func normalizeJSONValue(value reflect.Value) reflect.Value {
+	if !value.IsValid() {
+		return value
+	}
+	if value.Type().Implements(jsonMarshalerType) {
+		return value
+	}
+
+	switch value.Kind() {
+	case reflect.Interface:
+		if value.IsNil() {
+			return value
+		}
+		normalized := normalizeJSONValue(value.Elem())
+		if normalized.IsValid() && normalized.Type().AssignableTo(value.Type()) {
+			return normalized
+		}
+		return normalized
+	case reflect.Pointer:
+		if value.IsNil() {
+			return value
+		}
+		normalized := normalizeJSONValue(value.Elem())
+		next := reflect.New(value.Type().Elem())
+		if setNormalizedValue(next.Elem(), normalized) {
+			return next
+		}
+		return value
+	case reflect.Struct:
+		return normalizeJSONStruct(value)
+	case reflect.Map:
+		return normalizeJSONMap(value)
+	case reflect.Slice:
+		return normalizeJSONSlice(value)
+	case reflect.Array:
+		return normalizeJSONArray(value)
+	default:
+		return value
+	}
+}
+
+func normalizeJSONStruct(value reflect.Value) reflect.Value {
+	next := reflect.New(value.Type()).Elem()
+	next.Set(value)
+	for i := 0; i < value.NumField(); i++ {
+		fieldInfo := value.Type().Field(i)
+		if fieldInfo.PkgPath != "" {
+			continue
+		}
+		setNormalizedValue(next.Field(i), normalizeJSONValue(value.Field(i)))
+	}
+	return next
+}
+
+func normalizeJSONMap(value reflect.Value) reflect.Value {
+	if value.IsNil() {
+		return reflect.MakeMapWithSize(value.Type(), 0)
+	}
+	next := reflect.MakeMapWithSize(value.Type(), value.Len())
+	iter := value.MapRange()
+	for iter.Next() {
+		normalized := normalizeJSONValue(iter.Value())
+		if !normalized.IsValid() {
+			next.SetMapIndex(iter.Key(), iter.Value())
+			continue
+		}
+		if normalized.Type().AssignableTo(value.Type().Elem()) {
+			next.SetMapIndex(iter.Key(), normalized)
+		} else if normalized.Type().ConvertibleTo(value.Type().Elem()) {
+			next.SetMapIndex(iter.Key(), normalized.Convert(value.Type().Elem()))
+		} else {
+			next.SetMapIndex(iter.Key(), iter.Value())
+		}
+	}
+	return next
+}
+
+func normalizeJSONSlice(value reflect.Value) reflect.Value {
+	if value.Type().Elem().Kind() == reflect.Uint8 {
+		return value
+	}
+	if value.IsNil() {
+		return reflect.MakeSlice(value.Type(), 0, 0)
+	}
+	next := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+	for i := 0; i < value.Len(); i++ {
+		setNormalizedValue(next.Index(i), normalizeJSONValue(value.Index(i)))
+	}
+	return next
+}
+
+func normalizeJSONArray(value reflect.Value) reflect.Value {
+	next := reflect.New(value.Type()).Elem()
+	for i := 0; i < value.Len(); i++ {
+		setNormalizedValue(next.Index(i), normalizeJSONValue(value.Index(i)))
+	}
+	return next
+}
+
+func setNormalizedValue(dst, src reflect.Value) bool {
+	if !dst.CanSet() || !src.IsValid() {
+		return false
+	}
+	if src.Type().AssignableTo(dst.Type()) {
+		dst.Set(src)
+		return true
+	}
+	if src.Type().ConvertibleTo(dst.Type()) {
+		dst.Set(src.Convert(dst.Type()))
+		return true
+	}
+	return false
 }
 
 func buildTaskViews(ctx context.Context, manager TaskManager, repository store.Repository, taskID string) ([]taskView, error) {

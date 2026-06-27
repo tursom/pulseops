@@ -26,7 +26,7 @@ export default function AIAnalyzeParams(_props: { form?: FormInstance }) {
           options={[
             { value: 'diagnose', label: '诊断分析' },
             { value: 'trend', label: '趋势分析' },
-            { value: 'validate', label: '数据校验' },
+            { value: 'evaluate', label: '数据校验' },
           ]}
         />
       </Form.Item>
@@ -54,6 +54,7 @@ export default function AIAnalyzeParams(_props: { form?: FormInstance }) {
                   <Form.Item
                     {...restField}
                     name={[name, 'alias']}
+                    rules={[{ required: true, message: '请输入别名' }]}
                     style={{ marginBottom: 0 }}
                   >
                     <Input placeholder="别名（如 upstream）" style={{ width: 160 }} />
@@ -110,6 +111,21 @@ export default function AIAnalyzeParams(_props: { form?: FormInstance }) {
                     }}
                   </Form.Item>
 
+                  <Form.Item
+                    {...restField}
+                    name={[name, 'on_error']}
+                    initialValue="fail"
+                    style={{ marginBottom: 0 }}
+                  >
+                    <Select
+                      style={{ width: 100 }}
+                      options={[
+                        { value: 'fail', label: '失败' },
+                        { value: 'skip', label: '跳过' },
+                      ]}
+                    />
+                  </Form.Item>
+
                   <MinusCircleOutlined onClick={() => remove(name)} />
                 </Space>
               ))}
@@ -126,7 +142,7 @@ export default function AIAnalyzeParams(_props: { form?: FormInstance }) {
 
       {/* 提示词 */}
       <Form.Item
-        name={['params', 'prompt']}
+        name={['params', 'prompt', 'text']}
         label={
           <Space size={4}>
             <span>提示词模板</span>
@@ -143,8 +159,46 @@ export default function AIAnalyzeParams(_props: { form?: FormInstance }) {
       </Form.Item>
 
       {/* 输出配置 */}
-      <Form.Item name={['params', 'outputs']} label="输出配置">
-        <Select mode="tags" placeholder="输出字段名" />
+      <Form.Item label="输出配置">
+        <Form.List name={['params', 'outputs']}>
+          {(fields, { add, remove }) => (
+            <>
+              {fields.map(({ key, name, ...restField }) => (
+                <Space key={key} align="baseline" style={{ display: 'flex', marginBottom: 8 }}>
+                  <Form.Item
+                    {...restField}
+                    name={[name, 'type']}
+                    initialValue="summary"
+                    rules={[{ required: true, message: '请选择输出类型' }]}
+                    style={{ marginBottom: 0 }}
+                  >
+                    <Select
+                      style={{ width: 120 }}
+                      options={[
+                        { value: 'summary', label: 'Summary' },
+                        { value: 'findings', label: 'Findings' },
+                        { value: 'artifact', label: 'Artifact' },
+                      ]}
+                    />
+                  </Form.Item>
+                  <Form.Item
+                    {...restField}
+                    name={[name, 'config', 'field']}
+                    style={{ marginBottom: 0 }}
+                  >
+                    <Input placeholder="字段名，如 ai_analysis" style={{ width: 200 }} />
+                  </Form.Item>
+                  <MinusCircleOutlined onClick={() => remove(name)} />
+                </Space>
+              ))}
+              <Form.Item style={{ marginBottom: 0 }}>
+                <Button type="dashed" onClick={() => add({ type: 'summary', config: { field: 'ai_analysis' } })} block icon={<PlusOutlined />}>
+                  添加输出
+                </Button>
+              </Form.Item>
+            </>
+          )}
+        </Form.List>
       </Form.Item>
     </>
   )

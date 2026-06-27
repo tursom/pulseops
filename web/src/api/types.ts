@@ -125,6 +125,7 @@ export interface AIAnalysisRecord {
 // === API error response ===
 export interface APIError {
   error: string
+  errors?: string[]
 }
 
 // === Health check response ===

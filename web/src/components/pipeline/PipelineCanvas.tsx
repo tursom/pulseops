@@ -24,6 +24,7 @@ const { Text } = Typography
 
 const NODE_TYPES = { taskNode: TaskNode }
 const EDGE_TYPES = { dependencyEdge: DependencyEdge }
+const DEFAULT_DOWNSTREAM_KIND = 'data_process'
 
 const COLUMN_GAP = 300
 const ROW_GAP = 80
@@ -415,6 +416,17 @@ export default function PipelineCanvas({ pipelineId }: Props) {
       .filter((item): item is TaskDefinition => Boolean(item))
     : []
 
+  const buildDownstreamCreateUrl = (taskID: string, taskName: string) => {
+    const params = new URLSearchParams({
+      kind: DEFAULT_DOWNSTREAM_KIND,
+      upstream_task_id: taskID,
+      upstream_name: taskName,
+      pipeline: pipelineId,
+      from: `/pipelines/${pipelineId}`,
+    })
+    return `/task-defs/new?${params.toString()}`
+  }
+
   if (loading) {
     return (
       <div
@@ -601,7 +613,7 @@ export default function PipelineCanvas({ pipelineId }: Props) {
               <Button onClick={() => navigate(`/task-defs/${selectedNode.data.taskId}/edit?from=/pipelines/${pipelineId}`)}>
                 编辑配置
               </Button>
-              <Button onClick={() => navigate(`/task-defs/new?upstream_task_id=${selectedNode.data.taskId}&upstream_name=${encodeURIComponent(selectedNode.data.name)}&pipeline=${pipelineId}&from=/pipelines/${pipelineId}`)}>
+              <Button onClick={() => navigate(buildDownstreamCreateUrl(selectedNode.data.taskId, selectedNode.data.name))}>
                 创建下游
               </Button>
             </Space>

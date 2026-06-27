@@ -16,7 +16,7 @@ export default function ScriptExecParams() {
         <Select mode="tags" placeholder="命令行参数" />
       </Form.Item>
 
-      <Form.Item name={['params', 'work_dir']} label="工作目录">
+      <Form.Item name={['params', 'workdir']} label="工作目录">
         <Input placeholder="/opt/app" />
       </Form.Item>
 

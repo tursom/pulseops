@@ -5,6 +5,7 @@ import { MinusCircleOutlined, PlusOutlined, QuestionCircleOutlined } from '@ant-
 import JsonFieldPicker from '../../JsonFieldPicker';
 import { fetchTaskDefinitions, fetchTaskSample } from '../../../api/client';
 import type { TaskDefinition, SampleResponse } from '../../../api/types';
+import { useWatchedFormValue } from '../useWatchedFormValue';
 
 const { Text } = Typography;
 
@@ -41,13 +42,14 @@ function isVisualSampleSource(source: string | undefined): boolean {
 }
 
 const UpstreamDataParams = ({ form }: { form?: FormInstance }) => {
-  const sourceTaskId = form ? Form.useWatch(['params', 'source_task_id'], form) as string : undefined;
-  const trigger = form ? Form.useWatch('trigger', form) as string : undefined;
-  const watchTaskId = form ? Form.useWatch('watch_task_id', form) as string : undefined;
-  const dependencies = form ? Form.useWatch('dependencies', form) as Array<{ upstream_task_id?: string; source_key?: string }> | undefined : undefined;
-  const dataSources = form ? Form.useWatch(['params', 'data_sources'], form) as Array<{ key?: string; task_id?: string }> | undefined : undefined;
-  const extractExprs = form ? Form.useWatch(['params', 'extract_exprs'], form) as Array<{ source_key?: string; source?: string }> | undefined : undefined;
+  const sourceTaskId = useWatchedFormValue<string>(form, ['params', 'source_task_id']);
+  const trigger = useWatchedFormValue<string>(form, 'trigger');
+  const watchTaskId = useWatchedFormValue<string>(form, 'watch_task_id');
+  const dependencies = useWatchedFormValue<Array<{ upstream_task_id?: string; source_key?: string }>>(form, 'dependencies') || [];
+  const dataSources = useWatchedFormValue<Array<{ key?: string; task_id?: string }>>(form, ['params', 'data_sources']) || [];
+  const extractExprs = useWatchedFormValue<Array<{ source_key?: string; source?: string }>>(form, ['params', 'extract_exprs']) || [];
   const defaultDependencyTaskId = dependencies?.find((dep) => dep.upstream_task_id)?.upstream_task_id;
+  const singleLockedDependency = dependencies?.length === 1 ? dependencies[0] : undefined;
   const defaultSourceKey = extractExprs?.find((expr) => expr.source_key)?.source_key || '';
   const selectedDataSourceTaskId = dataSources?.find((source) => source.key === defaultSourceKey)?.task_id;
   const selectedDependencyTaskId = dependencies?.find((dep) => dep.source_key === defaultSourceKey)?.upstream_task_id;
@@ -119,24 +121,32 @@ const UpstreamDataParams = ({ form }: { form?: FormInstance }) => {
 
   return (
     <>
-      <Form.Item
-        name={['params', 'source_task_id']}
-        label="源任务"
-        extra="单上游快捷入口；多上游场景建议用下方数据源 Key 或依赖边的 source_key"
-      >
-        <Select
-          allowClear
-          loading={taskDefsLoading}
-          notFoundContent={taskDefsLoading ? <Spin size="small" /> : '没有启用的任务'}
-          placeholder="留空默认使用 watch_task"
-          options={taskDefs.map((d) => ({
-            value: d.task_id,
-            label: `${d.name} (${d.task_id})`,
-          }))}
-          showSearch
-          optionFilterProp="label"
-        />
-      </Form.Item>
+      {singleLockedDependency?.upstream_task_id ? (
+        <Form.Item label="源任务">
+          <Tag>{singleLockedDependency.source_key || 'upstream'}</Tag>
+          <Text>{singleLockedDependency.upstream_task_id}</Text>
+          <Text type="secondary" style={{ marginLeft: 8 }}>已由上游依赖带入</Text>
+        </Form.Item>
+      ) : (
+        <Form.Item
+          name={['params', 'source_task_id']}
+          label="源任务"
+          extra="单上游快捷入口；多上游场景建议用下方数据源 Key 或依赖边的 source_key"
+        >
+          <Select
+            allowClear
+            loading={taskDefsLoading}
+            notFoundContent={taskDefsLoading ? <Spin size="small" /> : '没有启用的任务'}
+            placeholder="留空默认使用 watch_task"
+            options={taskDefs.map((d) => ({
+              value: d.task_id,
+              label: `${d.name} (${d.task_id})`,
+            }))}
+            showSearch
+            optionFilterProp="label"
+          />
+        </Form.Item>
+      )}
 
       <Form.List name={['params', 'data_sources']}>
         {(fields, { add, remove }) => (

@@ -12,16 +12,157 @@ import type {
   SampleResponse,
   PaginatedRuns,
   RunStat,
+  AlertPolicy,
   TaskView,
   DashboardSummary,
   RunListItem,
   TaskGraph,
+  TaskGraphEdge,
+  TaskGraphNode,
   TaskDependency,
   BatchTaskResponse,
+  BatchTaskResult,
   SettingsResponse,
   TaskValidationResponse,
   PlatformConfigSummary,
+  TracePolicy,
 } from './types'
+
+export class PulseOpsAPIError extends Error {
+  readonly errors: string[]
+  readonly body: unknown
+
+  constructor(message: string, errors: string[] = [], body?: unknown) {
+    super(message)
+    this.name = 'PulseOpsAPIError'
+    this.errors = errors
+    this.body = body
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function listOrEmpty<T>(value: T[] | null | undefined): T[] {
+  return Array.isArray(value) ? value : []
+}
+
+function stringRecordOrEmpty(value: unknown): Record<string, string> {
+  return isRecord(value) ? value as Record<string, string> : {}
+}
+
+function recordOrEmpty(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {}
+}
+
+function normalizeTracePolicy(trace: TracePolicy | null | undefined): TracePolicy | undefined {
+  if (!trace) return undefined
+  return {
+    ...trace,
+    mask_fields: listOrEmpty(trace.mask_fields),
+  }
+}
+
+function normalizeAlertPolicy(alert: AlertPolicy | null | undefined): AlertPolicy | undefined {
+  if (!alert) return undefined
+  return {
+    ...alert,
+    channels: listOrEmpty(alert.channels),
+  }
+}
+
+function normalizeTaskDefinition(def: TaskDefinition): TaskDefinition {
+  return {
+    ...def,
+    labels: stringRecordOrEmpty(def.labels),
+    params: recordOrEmpty(def.params),
+    dependencies: listOrEmpty(def.dependencies),
+    trace: normalizeTracePolicy(def.trace),
+    alert: normalizeAlertPolicy(def.alert),
+  }
+}
+
+function normalizeTaskView(task: TaskView): TaskView {
+  return {
+    ...task,
+    labels: stringRecordOrEmpty(task.labels),
+    dependencies: listOrEmpty(task.dependencies),
+    definition: task.definition ? normalizeTaskDefinition(task.definition) : undefined,
+  }
+}
+
+function normalizeRunRecord(run: RunRecord): RunRecord {
+  return {
+    ...run,
+    labels: stringRecordOrEmpty(run.labels),
+    artifact_refs: listOrEmpty(run.artifact_refs),
+    findings: listOrEmpty(run.findings),
+  }
+}
+
+function normalizeRunListItem(run: RunListItem): RunListItem {
+  return {
+    ...run,
+    labels: stringRecordOrEmpty(run.labels),
+  }
+}
+
+function normalizeTaskGraphNode(node: TaskGraphNode): TaskGraphNode {
+  return {
+    ...node,
+    labels: stringRecordOrEmpty(node.labels),
+  }
+}
+
+function normalizeTaskGraphEdge(edge: TaskGraphEdge): TaskGraphEdge {
+  return {
+    ...edge,
+    params: edge.params == null ? undefined : recordOrEmpty(edge.params),
+  }
+}
+
+function normalizeBatchTaskResult(result: BatchTaskResult): BatchTaskResult {
+  return {
+    ...result,
+    run: result.run ? normalizeRunRecord(result.run) : undefined,
+  }
+}
+
+function normalizePaginatedRuns(data: PaginatedRuns | null): PaginatedRuns {
+  return {
+    records: listOrEmpty(data?.records).map(normalizeRunListItem),
+    total: typeof data?.total === 'number' ? data.total : 0,
+  }
+}
+
+function normalizeValidationResponse(data: TaskValidationResponse | null): TaskValidationResponse {
+  return {
+    valid: Boolean(data?.valid),
+    ...data,
+    errors: listOrEmpty(data?.errors),
+  }
+}
+
+function normalizeSettingsResponse(data: SettingsResponse | null): SettingsResponse {
+  const settings = data?.settings || { sinks: [], max_payload_bytes: 0, default_retain_days: 0 }
+  return {
+    ...data,
+    applied: Boolean(data?.applied),
+    settings: {
+      ...settings,
+      sinks: listOrEmpty(settings.sinks),
+    },
+    warnings: listOrEmpty(data?.warnings),
+  }
+}
+
+function normalizePlatformConfig(data: PlatformConfigSummary): PlatformConfigSummary {
+  return {
+    ...data,
+    warnings: listOrEmpty(data.warnings),
+  }
+}
 
 // Generic fetch wrapper
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -32,7 +173,10 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   })
   if (!res.ok) {
     const body = await res.json().catch((): APIError => ({ error: res.statusText }))
-    throw new Error(body.error || `HTTP ${res.status}`)
+    const errorBody = isRecord(body) ? body : {}
+    const errors = listOrEmpty(errorBody.errors as string[] | null | undefined)
+    const errorMessage = typeof errorBody.error === 'string' ? errorBody.error : ''
+    throw new PulseOpsAPIError(errorMessage || errors.join('；') || `HTTP ${res.status}`, errors, body)
   }
   return res.json()
 }
@@ -43,34 +187,44 @@ export async function fetchHealth(): Promise<HealthResponse> {
 }
 
 export async function fetchPlatformConfig(): Promise<PlatformConfigSummary> {
-  return request<PlatformConfigSummary>('/api/platform-config')
+  const data = await request<PlatformConfigSummary>('/api/platform-config')
+  return normalizePlatformConfig(data)
 }
 
 export async function updatePlatformConfig(config: PlatformConfigSummary): Promise<PlatformConfigSummary> {
-  return request<PlatformConfigSummary>('/api/platform-config', {
+  const data = await request<PlatformConfigSummary>('/api/platform-config', {
     method: 'PUT',
     body: JSON.stringify(config),
   })
+  return normalizePlatformConfig(data)
 }
 
 // GET /api/tasks
 export async function fetchTasks(): Promise<TaskView[]> {
-  return request<TaskView[]>('/api/tasks')
+  const data = await request<TaskView[] | null>('/api/tasks')
+  return listOrEmpty(data).map(normalizeTaskView)
 }
 
 // GET /api/tasks/{id}
 export async function fetchTask(id: string): Promise<TaskView> {
-  return request<TaskView>(`/api/tasks/${encodeURIComponent(id)}`)
+  const data = await request<TaskView>(`/api/tasks/${encodeURIComponent(id)}`)
+  return normalizeTaskView(data)
 }
 
 export async function fetchDashboardSummary(since = '24h'): Promise<DashboardSummary> {
   const params = new URLSearchParams({ since })
-  const data = await request<DashboardSummary>(`/api/dashboard/summary?${params.toString()}`)
+  const data = await request<DashboardSummary | null>(`/api/dashboard/summary?${params.toString()}`)
+  const counts = data?.counts || { total: 0, enabled: 0, failed: 0, check_failed: 0, load_failed: 0, stale: 0, disabled: 0 }
+  const health = data?.health || { status: 'unknown', label: '未知', detail: '后端未返回工作台健康信息' }
   return {
     ...data,
-    anomalies: Array.isArray(data.anomalies) ? data.anomalies : [],
-    recent_runs: Array.isArray(data.recent_runs) ? data.recent_runs : [],
-    label_groups: Array.isArray(data.label_groups) ? data.label_groups : [],
+    counts,
+    health,
+    anomalies: listOrEmpty(data?.anomalies).map(normalizeTaskView),
+    recent_runs: listOrEmpty(data?.recent_runs).map(normalizeRunListItem),
+    label_groups: listOrEmpty(data?.label_groups),
+    generated_at: data?.generated_at || '',
+    refresh_after: data?.refresh_after || '',
   }
 }
 
@@ -92,7 +246,8 @@ export async function fetchTaskRunsPaginated(
   if (offset !== undefined && offset > 0) params.set('offset', String(offset))
   if (since) params.set('since', since)
   const qs = params.toString()
-  return request<PaginatedRuns>(`/api/tasks/${encodeURIComponent(id)}/runs${qs ? `?${qs}` : ''}`)
+  const data = await request<PaginatedRuns | null>(`/api/tasks/${encodeURIComponent(id)}/runs${qs ? `?${qs}` : ''}`)
+  return normalizePaginatedRuns(data)
 }
 
 export async function fetchRuns(paramsInput: {
@@ -114,7 +269,8 @@ export async function fetchRuns(paramsInput: {
     if (value) params.set(`label.${key}`, value)
   }
   const qs = params.toString()
-  return request<PaginatedRuns>(`/api/runs${qs ? `?${qs}` : ''}`)
+  const data = await request<PaginatedRuns | null>(`/api/runs${qs ? `?${qs}` : ''}`)
+  return normalizePaginatedRuns(data)
 }
 
 // GET /api/tasks/{id}/runs/stats
@@ -122,12 +278,14 @@ export async function fetchTaskRunStats(id: string, since?: string): Promise<Run
   const params = new URLSearchParams()
   if (since) params.set('since', since)
   const qs = params.toString()
-  return request<RunStat[]>(`/api/tasks/${encodeURIComponent(id)}/runs/stats${qs ? `?${qs}` : ''}`)
+  const data = await request<RunStat[] | null>(`/api/tasks/${encodeURIComponent(id)}/runs/stats${qs ? `?${qs}` : ''}`)
+  return listOrEmpty(data)
 }
 
 // GET /api/tasks/{id}/runs/{runID}
 export async function fetchTaskRun(id: string, runID: string): Promise<RunRecord> {
-  return request<RunRecord>(`/api/tasks/${encodeURIComponent(id)}/runs/${encodeURIComponent(runID)}`)
+  const data = await request<RunRecord>(`/api/tasks/${encodeURIComponent(id)}/runs/${encodeURIComponent(runID)}`)
+  return normalizeRunRecord(data)
 }
 
 // GET /api/tasks/{id}/runs/{runID}/ai
@@ -142,12 +300,14 @@ export async function fetchTaskAIAnalyses(id: string, limit?: number): Promise<A
     params.set('limit', String(limit))
   }
   const qs = params.toString()
-  return request<AIAnalysisRecord[]>(`/api/tasks/${encodeURIComponent(id)}/ai${qs ? `?${qs}` : ''}`)
+  const data = await request<AIAnalysisRecord[] | null>(`/api/tasks/${encodeURIComponent(id)}/ai${qs ? `?${qs}` : ''}`)
+  return listOrEmpty(data)
 }
 
 // GET /api/tasks/{id}/runs/{runID}/artifacts
 export async function fetchRunArtifacts(id: string, runID: string): Promise<ArtifactRef[]> {
-  return request<ArtifactRef[]>(`/api/tasks/${encodeURIComponent(id)}/runs/${encodeURIComponent(runID)}/artifacts`)
+  const data = await request<ArtifactRef[] | null>(`/api/tasks/${encodeURIComponent(id)}/runs/${encodeURIComponent(runID)}/artifacts`)
+  return listOrEmpty(data)
 }
 
 // GET /api/artifacts/{artifactID}
@@ -170,19 +330,26 @@ export async function fetchArtifactContent(artifactID: string): Promise<string> 
 
 // POST /api/tasks/{id}/run
 export async function triggerTaskRun(id: string): Promise<RunRecord> {
-  return request<RunRecord>(`/api/tasks/${encodeURIComponent(id)}/run`, { method: 'POST' })
+  const data = await request<RunRecord>(`/api/tasks/${encodeURIComponent(id)}/run`, { method: 'POST' })
+  return normalizeRunRecord(data)
 }
 
 export async function batchTaskAction(action: 'run' | 'enable' | 'disable' | 'reload', taskIds: string[]): Promise<BatchTaskResponse> {
-  return request<BatchTaskResponse>('/api/tasks/batch', {
+  const data = await request<BatchTaskResponse | null>('/api/tasks/batch', {
     method: 'POST',
     body: JSON.stringify({ action, task_ids: taskIds }),
   })
+  return {
+    ...data,
+    action: data?.action || action,
+    results: listOrEmpty(data?.results).map(normalizeBatchTaskResult),
+  }
 }
 
 // POST /api/tasks/{id}/runs/{runID}/rerun
 export async function retriggerTaskRun(id: string, runID: string): Promise<RunRecord> {
-  return request<RunRecord>(`/api/tasks/${encodeURIComponent(id)}/runs/${encodeURIComponent(runID)}/rerun`, { method: 'POST' })
+  const data = await request<RunRecord>(`/api/tasks/${encodeURIComponent(id)}/runs/${encodeURIComponent(runID)}/rerun`, { method: 'POST' })
+  return normalizeRunRecord(data)
 }
 
 // POST /api/tasks/{id}/reload
@@ -202,28 +369,32 @@ export async function disableTask(id: string): Promise<ActionResponse> {
 
 // GET /api/task-defs
 export async function fetchTaskDefinitions(): Promise<TaskDefinition[]> {
-  return request<TaskDefinition[]>('/api/task-defs')
+  const data = await request<TaskDefinition[] | null>('/api/task-defs')
+  return listOrEmpty(data).map(normalizeTaskDefinition)
 }
 
 // GET /api/task-defs/{id}
 export async function fetchTaskDefinition(id: string): Promise<TaskDefinition> {
-  return request<TaskDefinition>(`/api/task-defs/${encodeURIComponent(id)}`)
+  const data = await request<TaskDefinition>(`/api/task-defs/${encodeURIComponent(id)}`)
+  return normalizeTaskDefinition(data)
 }
 
 // POST /api/task-defs
 export async function createTaskDefinition(def: TaskDefinition): Promise<TaskDefinition> {
-  return request<TaskDefinition>('/api/task-defs', {
+  const data = await request<TaskDefinition>('/api/task-defs', {
     method: 'POST',
     body: JSON.stringify(def),
   })
+  return normalizeTaskDefinition(data)
 }
 
 // PUT /api/task-defs/{id}
 export async function updateTaskDefinition(id: string, def: TaskDefinition): Promise<TaskDefinition> {
-  return request<TaskDefinition>(`/api/task-defs/${encodeURIComponent(id)}`, {
+  const data = await request<TaskDefinition>(`/api/task-defs/${encodeURIComponent(id)}`, {
     method: 'PUT',
     body: JSON.stringify(def),
   })
+  return normalizeTaskDefinition(data)
 }
 
 // DELETE /api/task-defs/{id}
@@ -234,28 +405,32 @@ export async function deleteTaskDefinition(id: string): Promise<{ status: string
 }
 
 export async function validateTaskDefinition(def: TaskDefinition): Promise<TaskValidationResponse> {
-  return request<TaskValidationResponse>('/api/task-defs/validate', {
+  const data = await request<TaskValidationResponse>('/api/task-defs/validate', {
     method: 'POST',
     body: JSON.stringify(def),
   })
+  return normalizeValidationResponse(data)
 }
 
 export async function dryRunTaskDefinition(def: TaskDefinition): Promise<TaskValidationResponse> {
-  return request<TaskValidationResponse>('/api/task-defs/dry-run', {
+  const data = await request<TaskValidationResponse>('/api/task-defs/dry-run', {
     method: 'POST',
     body: JSON.stringify(def),
   })
+  return normalizeValidationResponse(data)
 }
 
 export async function testRunTaskDefinition(def: TaskDefinition): Promise<RunRecord> {
-  return request<RunRecord>('/api/task-defs/test-run', {
+  const data = await request<RunRecord>('/api/task-defs/test-run', {
     method: 'POST',
     body: JSON.stringify(def),
   })
+  return normalizeRunRecord(data)
 }
 
 export async function fetchPipelines(): Promise<Pipeline[]> {
-  return request<Pipeline[]>('/api/pipelines')
+  const data = await request<Pipeline[] | null>('/api/pipelines')
+  return listOrEmpty(data)
 }
 
 export async function fetchPipeline(id: string): Promise<Pipeline> {
@@ -283,7 +458,8 @@ export async function deletePipeline(id: string): Promise<{ status: string }> {
 }
 
 export async function fetchPipelineTasks(pipelineId: string): Promise<TaskDefinition[]> {
-  return request<TaskDefinition[]>(`/api/pipelines/${encodeURIComponent(pipelineId)}/tasks`)
+  const data = await request<TaskDefinition[] | null>(`/api/pipelines/${encodeURIComponent(pipelineId)}/tasks`)
+  return listOrEmpty(data).map(normalizeTaskDefinition)
 }
 
 export async function assignTaskToPipeline(pipelineId: string, taskId: string): Promise<{ status: string }> {
@@ -302,7 +478,12 @@ export async function fetchTaskGraph(pipelineId?: string): Promise<TaskGraph> {
   const params = new URLSearchParams()
   if (pipelineId) params.set('pipeline_id', pipelineId)
   const qs = params.toString()
-  return request<TaskGraph>(`/api/task-graph${qs ? `?${qs}` : ''}`)
+  const data = await request<TaskGraph | null>(`/api/task-graph${qs ? `?${qs}` : ''}`)
+  return {
+    ...data,
+    nodes: listOrEmpty(data?.nodes).map(normalizeTaskGraphNode),
+    edges: listOrEmpty(data?.edges).map(normalizeTaskGraphEdge),
+  }
 }
 
 export async function upsertTaskDependency(dep: Partial<TaskDependency> & Pick<TaskDependency, 'upstream_task_id' | 'downstream_task_id'>): Promise<TaskDependency> {
@@ -319,14 +500,16 @@ export async function deleteTaskDependency(id: string): Promise<{ status: string
 }
 
 export async function fetchSettings(): Promise<SettingsResponse> {
-  return request<SettingsResponse>('/api/settings')
+  const data = await request<SettingsResponse>('/api/settings')
+  return normalizeSettingsResponse(data)
 }
 
 export async function updateSettings(settings: GlobalSettings): Promise<SettingsResponse> {
-  return request<SettingsResponse>('/api/settings', {
+  const data = await request<SettingsResponse>('/api/settings', {
     method: 'PUT',
     body: JSON.stringify(settings),
   })
+  return normalizeSettingsResponse(data)
 }
 
 export async function fetchTaskSample(taskId: string, source: string, jq?: string): Promise<SampleResponse> {

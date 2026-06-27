@@ -50,6 +50,8 @@ const KIND_LABELS: Record<string, string> = {
   data_process: '数据处理',
 }
 
+const DOWNSTREAM_KIND_OPTIONS = ['data_process', 'ai_analyze']
+
 const STATUS_DOT_COLORS: Record<string, string> = {
   running: '#52c41a',
   loaded: '#1890ff',
@@ -124,9 +126,16 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
       default:
         if (key.startsWith('add-downstream:')) {
           const downstreamKind = key.split(':')[1]
-          navigate(
-            `/task-defs/new?kind=${downstreamKind}&upstream_task_id=${taskId}&upstream_name=${encodeURIComponent(name)}&pipeline=${encodeURIComponent(pipelineId || '')}&from=/pipelines/${encodeURIComponent(pipelineId || '')}`
-          )
+          const params = new URLSearchParams({
+            kind: downstreamKind,
+            upstream_task_id: taskId,
+            upstream_name: name,
+          })
+          if (pipelineId) {
+            params.set('pipeline', pipelineId)
+            params.set('from', `/pipelines/${pipelineId}`)
+          }
+          navigate(`/task-defs/new?${params.toString()}`)
         }
         break
     }
@@ -141,9 +150,9 @@ function TaskNode({ data }: NodeProps<TaskNodeType>) {
       key: 'add-downstream',
       label: '创建下游任务',
       icon: <PlusCircleOutlined />,
-      children: Object.entries(KIND_LABELS).map(([kindValue, label]) => ({
+      children: DOWNSTREAM_KIND_OPTIONS.map((kindValue) => ({
         key: `add-downstream:${kindValue}`,
-        label: `创建${label}`,
+        label: `创建${KIND_LABELS[kindValue]}`,
       })),
     },
     { type: 'divider' as const },

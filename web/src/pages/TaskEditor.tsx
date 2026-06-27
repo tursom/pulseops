@@ -10,6 +10,13 @@ import {
 } from '../api/client'
 import type { TaskDefinition, Pipeline } from '../api/types'
 import TaskForm from '../components/task-form/TaskForm'
+import {
+  buildTopologyDependency,
+  buildTopologyParams,
+  buildTopologyTaskName,
+  DEPENDENCY_CAPABLE_KINDS,
+  isDependencyCapableKind,
+} from '../utils/taskCreationDefaults'
 
 const { Title } = Typography
 
@@ -39,6 +46,17 @@ function prepareInitialValues(
     if (params.env && typeof params.env === 'object') {
       params.env = recordToFormList(params.env as Record<string, string>)
     }
+    if (params.prompt && typeof params.prompt === 'string') {
+      params.prompt = { text: params.prompt }
+    }
+    if (Array.isArray(params.outputs)) {
+      params.outputs = params.outputs.map((item) => {
+        if (typeof item === 'string') {
+          return { type: 'summary', config: { field: item } }
+        }
+        return item
+      })
+    }
     const source = params.source as Record<string, unknown> | undefined
     if (source?.headers && typeof source.headers === 'object') {
       source.headers = recordToFormList(source.headers as Record<string, string>)
@@ -57,8 +75,11 @@ export default function TaskEditor() {
   const upstreamTaskId = searchParams.get('upstream_task_id')
   const upstreamName = searchParams.get('upstream_name')
   const initialKind = searchParams.get('kind')
-  const returnUrl = from || (pipelineId ? `/pipelines/${pipelineId}` : '/pipelines')
+  const returnUrl = from || (pipelineId ? `/pipelines/${pipelineId}` : '/tasks')
   const isEdit = Boolean(id)
+  const isTopologySource = Boolean(returnUrl.startsWith('/pipelines'))
+  const isTopologyCreate = !isEdit && isTopologySource
+  const isTopologyDownstreamCreate = !isEdit && isTopologySource && Boolean(upstreamTaskId)
 
   const [initialValues, setInitialValues] = useState<
     Record<string, unknown> | undefined
@@ -95,22 +116,24 @@ export default function TaskEditor() {
     if (isEdit) {
       loadTaskDef()
     } else {
-      const initial: Record<string, unknown> = { task_id: generateTaskId(), enabled: true, trigger: 'scheduled' }
-
-      if (initialKind) {
-        initial.kind = initialKind
+      const taskID = generateTaskId()
+      const effectiveInitialKind = upstreamTaskId && !initialKind ? 'data_process' : initialKind
+      const hasDependencyKind = isDependencyCapableKind(effectiveInitialKind)
+      const hasDependencyDefault = Boolean(upstreamTaskId && hasDependencyKind)
+      const initial: Record<string, unknown> = {
+        task_id: taskID,
+        enabled: true,
+        trigger: hasDependencyKind ? 'on_run' : isTopologySource ? 'manual' : 'scheduled',
       }
-      if (upstreamTaskId) {
-        initial.trigger = 'on_run'
-        initial.watch_task_id = upstreamTaskId
-        // Auto-add upstream_output data source for AI analysis tasks
-        if (initialKind === 'ai_analyze') {
-          initial.params = {
-            data_sources: [
-              { type: 'upstream_output', alias: 'upstream', on_error: 'fail' },
-            ],
-          }
-        }
+
+      if (effectiveInitialKind) {
+        initial.kind = effectiveInitialKind
+      }
+      if (upstreamTaskId && effectiveInitialKind && hasDependencyDefault) {
+        initial.name = buildTopologyTaskName(effectiveInitialKind, { upstreamTaskId, upstreamName: upstreamName || undefined })
+        initial.dependencies = [buildTopologyDependency(taskID, upstreamTaskId)]
+        initial.params = buildTopologyParams(effectiveInitialKind, { upstreamTaskId, upstreamName: upstreamName || undefined })
+        initial.labels = [{ key: 'source', value: 'topology' }]
       }
       if (pipelineId) {
         initial.pipeline_id = pipelineId
@@ -119,7 +142,7 @@ export default function TaskEditor() {
       setInitialValues(initial)
       setLoading(false)
     }
-  }, [isEdit, loadTaskDef, pipelineId, upstreamTaskId, initialKind])
+  }, [isEdit, loadTaskDef, pipelineId, upstreamTaskId, upstreamName, initialKind, isTopologySource])
 
   useEffect(() => {
     fetchPipelines()
@@ -135,13 +158,22 @@ export default function TaskEditor() {
         def.pipeline_id = null
       }
       if (isEdit && id) {
-        await updateTaskDefinition(id, def)
+        const saved = await updateTaskDefinition(id, def)
         message.success('任务已更新')
+        if (isTopologySource) {
+          navigate(returnUrl)
+        } else {
+          navigate(`/tasks/${encodeURIComponent(saved.task_id || id)}`)
+        }
       } else {
-        await createTaskDefinition(def)
+        const saved = await createTaskDefinition(def)
         message.success('任务已创建')
+        if (isTopologySource) {
+          navigate(returnUrl)
+        } else {
+          navigate(`/tasks/${encodeURIComponent(saved.task_id || def.task_id)}`)
+        }
       }
-      navigate(returnUrl)
     } catch (err) {
       message.error(err instanceof Error ? err.message : '操作失败')
     }
@@ -193,25 +225,45 @@ export default function TaskEditor() {
       <div className="page-header">
         <div>
           <Title level={2} className="page-title">{pageTitle}</Title>
-          <span className="page-subtitle">默认使用向导填写；需要底层字段时展开高级 JSON 预览。</span>
+          <span className="page-subtitle">
+            {isTopologyDownstreamCreate
+              ? '已根据依赖拓扑带入任务组、上游依赖和推荐配置。'
+              : '默认使用向导填写；需要底层字段时展开高级 JSON 预览。'}
+          </span>
         </div>
       </div>
 
       <Card className="ops-card" title="所属任务组" style={{ marginBottom: 16 }}>
-        <Select
-          allowClear
-          placeholder="选择所属任务组（可选）"
-          value={selectedPipelineId}
-          onChange={(val) => setSelectedPipelineId(val)}
-          options={pipelines.map((p) => ({ value: p.id, label: p.name }))}
-          style={{ width: '100%' }}
-        />
+        {isTopologySource && selectedPipelineId ? (
+          <Alert
+            type="info"
+            showIcon
+            message={pipelines.find((p) => p.id === selectedPipelineId)?.name || selectedPipelineId}
+            description="从依赖拓扑进入时，任务会固定创建到当前任务组。"
+          />
+        ) : (
+          <Select
+            allowClear
+            placeholder="选择所属任务组（可选）"
+            value={selectedPipelineId}
+            onChange={(val) => setSelectedPipelineId(val)}
+            options={pipelines.map((p) => ({ value: p.id, label: p.name }))}
+            style={{ width: '100%' }}
+          />
+        )}
       </Card>
 
       {initialValues && (
         <TaskForm
           initialValues={initialValues}
           mode={isEdit ? 'edit' : 'create'}
+          creationContext={isTopologyCreate ? {
+            source: 'topology',
+            lockedPipelineId: pipelineId || undefined,
+            lockedUpstreamTaskId: isTopologyDownstreamCreate ? upstreamTaskId || undefined : undefined,
+            lockedUpstreamName: isTopologyDownstreamCreate ? upstreamName || undefined : undefined,
+            recommendedKinds: isTopologyDownstreamCreate ? DEPENDENCY_CAPABLE_KINDS : undefined,
+          } : undefined}
           onSubmit={handleSubmit}
         />
       )}

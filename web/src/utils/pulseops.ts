@@ -68,6 +68,14 @@ export interface LabelAggregate {
   abnormal: number
 }
 
+function listOrEmpty<T>(value: T[] | null | undefined): T[] {
+  return Array.isArray(value) ? value : []
+}
+
+function stringRecordOrEmpty(value: Record<string, string> | null | undefined): Record<string, string> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+}
+
 export function emptyTaskState(def: TaskDefinition): TaskState {
   return {
     task_id: def.task_id,
@@ -75,7 +83,7 @@ export function emptyTaskState(def: TaskDefinition): TaskState {
     kind: def.kind,
     enabled: def.enabled,
     status: 'unloaded',
-    labels: def.labels || {},
+    labels: stringRecordOrEmpty(def.labels),
     last_run_at: null,
     next_run_at: null,
     last_run_status: '',
@@ -91,16 +99,21 @@ export function emptyTaskState(def: TaskDefinition): TaskState {
   }
 }
 
-export function mergeTaskViews(defs: TaskDefinition[], states: APITaskView[] | TaskState[]): TaskView[] {
-  if (states.some((state) => 'config_status' in state)) {
-    return (states as APITaskView[]).map((state) => decorateTaskView(state)).sort(compareTaskViews)
+export function mergeTaskViews(
+  defs: TaskDefinition[] | null | undefined,
+  states: APITaskView[] | TaskState[] | null | undefined,
+): TaskView[] {
+  const safeDefs = listOrEmpty(defs)
+  const safeStates = listOrEmpty(states)
+  if (safeStates.some((state) => 'config_status' in state)) {
+    return (safeStates as APITaskView[]).map((state) => decorateTaskView(state)).sort(compareTaskViews)
   }
-  const stateMap = new Map(states.map((state) => [state.task_id, state]))
-  const defMap = new Map(defs.map((def) => [def.task_id, def]))
+  const stateMap = new Map((safeStates as TaskState[]).map((state) => [state.task_id, state]))
+  const defMap = new Map(safeDefs.map((def) => [def.task_id, def]))
 
-  const views = defs.map((def) => toTaskView(stateMap.get(def.task_id) || emptyTaskState(def), def))
+  const views = safeDefs.map((def) => toTaskView(stateMap.get(def.task_id) || emptyTaskState(def), def))
 
-  for (const state of states) {
+  for (const state of safeStates as TaskState[]) {
     if (!defMap.has(state.task_id)) {
       views.push(toTaskView(state))
     }
@@ -113,7 +126,7 @@ export function toTaskView(state: TaskState, definition?: TaskDefinition): TaskV
   const apiView = state as APITaskView
   const view: TaskView = {
     ...state,
-    labels: state.labels || definition?.labels || {},
+    labels: stringRecordOrEmpty(state.labels || definition?.labels),
     definition,
     runtime: apiView.runtime || {
       status: state.status,
@@ -132,7 +145,7 @@ export function toTaskView(state: TaskState, definition?: TaskDefinition): TaskV
       pipeline_id: definition?.pipeline_id || undefined,
       watch_condition: definition?.watch_condition,
     },
-    dependencies: apiView.dependencies || definition?.dependencies || [],
+    dependencies: listOrEmpty(apiView.dependencies || definition?.dependencies),
     config_status: apiView.config_status || (
       state.last_reload_error
         ? 'load_error'
@@ -204,21 +217,22 @@ function compareTaskViews(a: TaskView, b: TaskView): number {
   return latestTime(b) - latestTime(a)
 }
 
-export function summarizeTasks(tasks: TaskView[]): TaskSummary {
+export function summarizeTasks(tasks: TaskView[] | null | undefined): TaskSummary {
+  const safeTasks = listOrEmpty(tasks)
   return {
-    total: tasks.length,
-    enabled: tasks.filter((task) => task.enabled).length,
-    failed: tasks.filter((task) => task.last_run_status === 'failed' || task.last_run_status === 'timeout').length,
-    checkFailed: tasks.filter((task) => task.last_check_status === 'fail').length,
-    loadFailed: tasks.filter((task) => Boolean(task.last_reload_error)).length,
-    stale: tasks.filter((task) => task.enabled && isStaleTask(task)).length,
-    disabled: tasks.filter((task) => !task.enabled || task.status === 'disabled').length,
+    total: safeTasks.length,
+    enabled: safeTasks.filter((task) => task.enabled).length,
+    failed: safeTasks.filter((task) => task.last_run_status === 'failed' || task.last_run_status === 'timeout').length,
+    checkFailed: safeTasks.filter((task) => task.last_check_status === 'fail').length,
+    loadFailed: safeTasks.filter((task) => Boolean(task.last_reload_error)).length,
+    stale: safeTasks.filter((task) => task.enabled && isStaleTask(task)).length,
+    disabled: safeTasks.filter((task) => !task.enabled || task.status === 'disabled').length,
   }
 }
 
-export function aggregateLabels(tasks: TaskView[], keys = ['env', 'service', 'kind']): LabelAggregate[] {
+export function aggregateLabels(tasks: TaskView[] | null | undefined, keys = ['env', 'service', 'kind']): LabelAggregate[] {
   const map = new Map<string, LabelAggregate>()
-  for (const task of tasks) {
+  for (const task of listOrEmpty(tasks)) {
     for (const key of keys) {
       const value = key === 'kind' ? task.kind : task.labels?.[key]
       if (!value) continue
@@ -323,14 +337,14 @@ export function safeJson(value: unknown): string {
   }
 }
 
-export function collectDownstream(defs: TaskDefinition[], taskId: string): TaskDefinition[] {
-  return defs.filter((def) => (
+export function collectDownstream(defs: TaskDefinition[] | null | undefined, taskId: string): TaskDefinition[] {
+  return listOrEmpty(defs).filter((def) => (
     (def.trigger === 'on_run' && def.watch_task_id === taskId) ||
     (def.dependencies || []).some((dep) => dep.upstream_task_id === taskId)
   ))
 }
 
-export function collectUpstream(defs: TaskDefinition[], task: TaskDefinition | undefined): TaskDefinition[] {
+export function collectUpstream(defs: TaskDefinition[] | null | undefined, task: TaskDefinition | undefined): TaskDefinition[] {
   if (!task) return []
   const upstreamIds = new Set<string>()
   if (task.watch_task_id) upstreamIds.add(task.watch_task_id)
@@ -338,7 +352,7 @@ export function collectUpstream(defs: TaskDefinition[], task: TaskDefinition | u
     if (dep.upstream_task_id) upstreamIds.add(dep.upstream_task_id)
   }
   if (upstreamIds.size === 0) return []
-  return defs.filter((def) => upstreamIds.has(def.task_id))
+  return listOrEmpty(defs).filter((def) => upstreamIds.has(def.task_id))
 }
 
 export function statusColorForTask(task: TaskView | TaskState): string {

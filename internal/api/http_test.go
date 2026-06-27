@@ -233,6 +233,29 @@ func TestDashboardSummaryReturnsEmptyLists(t *testing.T) {
 	}
 }
 
+func TestWriteJSONNormalizesNilCollections(t *testing.T) {
+	t.Parallel()
+
+	type nestedPayload struct {
+		Items []string          `json:"items"`
+		Meta  map[string]string `json:"meta"`
+	}
+
+	rec := httptest.NewRecorder()
+	writeJSON(rec, http.StatusOK, map[string]any{
+		"items":  []string(nil),
+		"meta":   map[string]string(nil),
+		"nested": nestedPayload{},
+	})
+
+	body := rec.Body.String()
+	for _, field := range []string{`"items":[]`, `"meta":{}`, `"nested":{"items":[],"meta":{}}`} {
+		if !strings.Contains(body, field) {
+			t.Fatalf("expected normalized field %s, got %s", field, body)
+		}
+	}
+}
+
 func TestTaskGraphReturnsDependencyEdges(t *testing.T) {
 	t.Parallel()
 
