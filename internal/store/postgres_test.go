@@ -9,6 +9,7 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
 	"pulseops/internal/config"
+	"pulseops/internal/pluginmodel"
 )
 
 func TestPostgresStoreInsertRunPersistsRunFindingsAndArtifacts(t *testing.T) {
@@ -79,6 +80,145 @@ func TestPostgresStoreInsertRunPersistsRunFindingsAndArtifacts(t *testing.T) {
 
 	if err := st.InsertRun(context.Background(), record); err != nil {
 		t.Fatalf("insert run: %v", err)
+	}
+	assertNoMockError(t, mock)
+}
+
+func TestPostgresStorePluginGenerationRefs(t *testing.T) {
+	t.Parallel()
+
+	st, mock := newMockStore(t)
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO plugin_generation_refs(generation_id, ref_count, updated_at)
+		VALUES ($1, 1, NOW())
+		ON CONFLICT(generation_id) DO UPDATE
+		SET ref_count = plugin_generation_refs.ref_count + 1,
+		    updated_at = NOW()`)).
+		WithArgs("plugin-gen-1").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE plugin_generation_refs
+		SET ref_count = GREATEST(ref_count - 1, 0),
+		    last_released_at = CASE WHEN ref_count <= 1 THEN NOW() ELSE last_released_at END,
+		    updated_at = NOW()
+		WHERE generation_id = $1`)).
+		WithArgs("plugin-gen-1").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	if err := st.AcquirePluginGeneration(context.Background(), "plugin-gen-1"); err != nil {
+		t.Fatalf("acquire generation: %v", err)
+	}
+	if err := st.ReleasePluginGeneration(context.Background(), "plugin-gen-1"); err != nil {
+		t.Fatalf("release generation: %v", err)
+	}
+	assertNoMockError(t, mock)
+}
+
+func TestPostgresStorePluginReleaseProtected(t *testing.T) {
+	t.Parallel()
+
+	st, mock := newMockStore(t)
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS (
+			SELECT 1
+			FROM plugin_generations g
+			JOIN plugin_generation_refs r ON r.generation_id = g.generation_id
+			WHERE g.active_versions_json ->> $1 = $2
+			  AND (r.ref_count > 0 OR r.last_released_at IS NULL OR r.last_released_at > $3)
+		)`)).
+		WithArgs("external-driver", "1.0.0", sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+
+	protected, err := st.PluginReleaseProtected(context.Background(), "external-driver", "1.0.0", 10*time.Minute)
+	if err != nil {
+		t.Fatalf("release protected: %v", err)
+	}
+	if !protected {
+		t.Fatal("expected release to be protected")
+	}
+	assertNoMockError(t, mock)
+}
+
+func TestPostgresStoreCommitPluginGenerationUsesCASTransaction(t *testing.T) {
+	t.Parallel()
+
+	st, mock := newMockStore(t)
+	now := time.Now().UTC()
+	commit := pluginmodel.GenerationCommit{
+		PackageID:             "external-driver",
+		PackageStatus:         "enabled",
+		SetActiveVersion:      true,
+		ExpectedActiveVersion: "1.0.0",
+		ActiveVersion:         "1.1.0",
+		ActiveReleaseVersion:  "1.1.0",
+		DrainingVersion:       "1.0.0",
+		Generation: pluginmodel.GenerationRecord{
+			ID:             "plugin-gen-2",
+			Status:         "active",
+			ActiveVersions: map[string]string{"external-driver": "1.1.0"},
+			Capabilities:   []pluginmodel.Capability{{ID: "external-driver:task_driver:external_check"}},
+			CreatedAt:      now,
+		},
+		Event: pluginmodel.EventRecord{
+			PluginID: "external-driver",
+			Version:  "1.1.0",
+			Action:   "activate",
+			Status:   "ok",
+		},
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(`WITH changed AS (
+			INSERT INTO plugin_active_versions(plugin_id, version, generation_id, updated_at)
+			VALUES ($1, $3, $4, NOW())
+			ON CONFLICT(plugin_id) DO UPDATE SET
+				version = EXCLUDED.version,
+				generation_id = EXCLUDED.generation_id,
+				updated_at = EXCLUDED.updated_at
+			WHERE plugin_active_versions.version = $2
+			RETURNING 1
+		)
+		SELECT COUNT(*) FROM changed`)).
+		WithArgs("external-driver", "1.0.0", "1.1.0", "plugin-gen-2").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE plugin_packages
+			SET status = $2, last_error = $3, updated_at = NOW()
+			WHERE id = $1`)).
+		WithArgs("external-driver", "enabled", "").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE plugin_releases
+			SET status = 'draining', validation_error = '', updated_at = NOW()
+			WHERE plugin_id = $1 AND version = $2`)).
+		WithArgs("external-driver", "1.0.0").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE plugin_releases
+			SET status = 'active', validation_error = '', activated_at = NOW(), updated_at = NOW()
+			WHERE plugin_id = $1 AND version = $2`)).
+		WithArgs("external-driver", "1.1.0").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO plugin_generations (
+				generation_id, status, active_versions_json, capabilities_json, created_at, retired_at
+			) VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6)
+			ON CONFLICT(generation_id) DO NOTHING`)).
+		WithArgs(
+			"plugin-gen-2",
+			"active",
+			`{"external-driver":"1.1.0"}`,
+			`[{"id":"external-driver:task_driver:external_check","type":"","name":"","plugin_id":"","plugin_name":"","plugin_version":"","status":"","enabled":false,"official":false,"bundled":false}]`,
+			now,
+			nil,
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO plugin_generation_refs(generation_id, ref_count, last_released_at, updated_at)
+		VALUES ($1, 0, NOW(), NOW())
+		ON CONFLICT(generation_id) DO NOTHING`)).
+		WithArgs("plugin-gen-2").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO plugin_events(plugin_id, version, action, status, message, generation_id, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)`)).
+		WithArgs("external-driver", "1.1.0", "activate", "ok", "", "plugin-gen-2", sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	if err := st.CommitPluginGeneration(context.Background(), commit); err != nil {
+		t.Fatalf("commit plugin generation: %v", err)
 	}
 	assertNoMockError(t, mock)
 }

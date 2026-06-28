@@ -99,3 +99,31 @@ default_timeout = "30s"
 max_tokens = 4096
 # 温度参数 (0-2)，越低输出越确定，推荐诊断场景使用 0.1
 temperature = 0.1
+
+# -----------------------------------------------------------------
+# [plugins] 插件系统配置
+# -----------------------------------------------------------------
+[plugins]
+# 是否扫描外部插件目录；官方 bundled 插件始终随平台登记到 catalog
+enabled = true
+# 外部插件安装目录，结构为 plugins/<plugin-id>/releases/<version>/
+dir = "plugins"
+# true 时插件 catalog 初始化失败会阻断启动；默认 false 时平台 degraded 启动
+strict = false
+# 外部插件运行时开关；关闭后对应 process/http/gRPC 能力不会通过校验
+allow_process = true
+allow_http = true
+allow_grpc = true
+# 外部插件调用默认超时和响应大小上限
+default_timeout = "30s"
+max_output_bytes = 1048576
+# 单个插件 capability 允许同时执行的最大调用数
+max_concurrent_calls = 32
+# release/generation refcount 归零后的最小保留时间，GC 之前会检查
+generation_retention = "10m"
+# 插件 manifest 允许声明的权限；外部插件扫描、validate、activate 都会校验
+allowed_permissions = ["runs:read", "runs:write", "artifacts:read", "artifacts:write", "tasks:read", "tasks:write", "settings:read", "network:outbound", "grpc:call", "process:exec", "ai:read", "ai:write"]
+# 可选：配置后会校验 pulseops.plugin.sig（HMAC-SHA256 release checksum）
+signature_key = ""
+# process 插件允许继承的环境变量
+env_allowlist = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"]

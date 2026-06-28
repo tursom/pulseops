@@ -3,12 +3,16 @@ package task
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"pulseops/internal/config"
+	"pulseops/internal/pluginmodel"
 	"pulseops/internal/store"
 )
 
@@ -280,6 +284,54 @@ func TestUpstreamDataRunnerReadsMultipleSourceKeys(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	if result.Summary["left_value"] != 2 || result.Summary["right_value"] != 3 {
+		t.Fatalf("unexpected summary: %#v", result.Summary)
+	}
+}
+
+func TestUpstreamDataRunnerReadsPluginDataSourceAlias(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":   true,
+			"data": map[string]any{"inventory": map[string]any{"count": 7}},
+		})
+	}))
+	defer server.Close()
+
+	driver := NewUpstreamDataDriver(&sampleRepository{}, nil, nil)
+	driver.SyncPluginDataSources([]pluginmodel.Capability{{
+		Type:     pluginmodel.CapabilityDataSource,
+		PluginID: "@test/source",
+		Name:     "inventory_source",
+		Runtime:  "http",
+		Endpoint: server.URL,
+	}}, config.PluginsConfig{})
+	spec := config.TaskSpec{
+		ID:      "processor",
+		Kind:    "data_process",
+		Enabled: true,
+		Params: map[string]any{
+			"data_sources": []any{
+				map[string]any{"type": "inventory_source", "alias": "inventory"},
+			},
+			"extract_exprs": []any{
+				map[string]any{"field": "inventory_count", "source_key": "inventory", "source": "data", "jq_expr": ".inventory.count"},
+			},
+		},
+	}
+	if err := driver.Validate(spec); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	runner, err := driver.NewRunner(spec, RunnerDeps{HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+	result, err := runner.Run(context.Background(), TriggerManual)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.Summary["inventory_count"] != float64(7) {
 		t.Fatalf("unexpected summary: %#v", result.Summary)
 	}
 }

@@ -7,11 +7,14 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"github.com/itchyny/gojq"
 
 	"pulseops/internal/config"
 	"pulseops/internal/ctxkey"
+	"pulseops/internal/datasource"
+	"pulseops/internal/pluginmodel"
 	"pulseops/internal/store"
 )
 
@@ -23,9 +26,37 @@ type UpstreamDataParams struct {
 }
 
 type UpstreamDataSource struct {
-	Key    string         `json:"key"`
-	TaskID string         `json:"task_id"`
-	Params map[string]any `json:"params"`
+	Key     string         `json:"key"`
+	TaskID  string         `json:"task_id"`
+	Params  map[string]any `json:"params"`
+	Type    string         `json:"type"`
+	Alias   string         `json:"alias"`
+	Config  map[string]any `json:"config"`
+	OnError string         `json:"on_error"`
+}
+
+func (s UpstreamDataSource) referenceKey() string {
+	if s.Alias != "" {
+		return s.Alias
+	}
+	if s.Key != "" {
+		return s.Key
+	}
+	return s.Type
+}
+
+func mergedDataSourceConfig(common map[string]any, source UpstreamDataSource) map[string]any {
+	out := make(map[string]any, len(common)+len(source.Params)+len(source.Config))
+	for key, value := range common {
+		out[key] = value
+	}
+	for key, value := range source.Params {
+		out[key] = value
+	}
+	for key, value := range source.Config {
+		out[key] = value
+	}
+	return out
 }
 
 type ExtractExpr struct {
@@ -37,13 +68,28 @@ type ExtractExpr struct {
 }
 
 type UpstreamDataDriver struct {
-	repo     store.Repository
-	artStore store.ArtifactStore
-	logger   *slog.Logger
+	repo          store.Repository
+	artStore      store.ArtifactStore
+	logger        *slog.Logger
+	dataSourcesMu sync.RWMutex
+	dataSources   *datasource.Registry
 }
 
 func NewUpstreamDataDriver(repo store.Repository, artStore store.ArtifactStore, logger *slog.Logger) *UpstreamDataDriver {
-	return &UpstreamDataDriver{repo: repo, artStore: artStore, logger: logger}
+	return &UpstreamDataDriver{repo: repo, artStore: artStore, logger: logger, dataSources: datasource.NewRegistry()}
+}
+
+func (d *UpstreamDataDriver) SyncPluginDataSources(caps []pluginmodel.Capability, cfg config.PluginsConfig) {
+	registry := datasource.NewRegistry()
+	for _, cap := range caps {
+		if cap.Type != pluginmodel.CapabilityDataSource {
+			continue
+		}
+		registry.Register(cap.Name, datasource.NewPluginSource(cap, cfg))
+	}
+	d.dataSourcesMu.Lock()
+	d.dataSources = registry
+	d.dataSourcesMu.Unlock()
 }
 
 func (d *UpstreamDataDriver) Kind() string { return "data_process" }
@@ -57,12 +103,40 @@ func (d *UpstreamDataDriver) Validate(spec config.TaskSpec) error {
 		return fmt.Errorf("data_process requires at least one extract_expr")
 	}
 	sourceKeys := map[string]string{}
+	pluginSourceKeys := map[string]struct{}{}
 	for _, dep := range spec.DependencyRules() {
 		if dep.SourceKey != "" {
 			sourceKeys[dep.SourceKey] = dep.UpstreamTaskID
 		}
 	}
+	registry := d.dataSourceRegistry()
 	for i, source := range params.DataSources {
+		if source.Type != "" {
+			key := source.referenceKey()
+			if key == "" {
+				return fmt.Errorf("data_process data_sources[%d].alias must not be empty", i)
+			}
+			if _, exists := sourceKeys[key]; exists {
+				return fmt.Errorf("data_process data_sources[%d].alias %q duplicates another source_key", i, key)
+			}
+			dataSource, ok := registry.Get(source.Type)
+			if !ok {
+				return fmt.Errorf("data_process data_sources[%d].type %q is not available", i, source.Type)
+			}
+			if validator, ok := dataSource.(datasource.Validator); ok {
+				if err := validator.ValidateSpec(datasource.Spec{
+					Type:    source.Type,
+					Config:  mergedDataSourceConfig(params.CommonParams, source),
+					Alias:   key,
+					OnError: source.OnError,
+				}); err != nil {
+					return fmt.Errorf("validate data_process data_sources[%d] %q: %w", i, source.Type, err)
+				}
+			}
+			sourceKeys[key] = ""
+			pluginSourceKeys[key] = struct{}{}
+			continue
+		}
 		if source.Key == "" {
 			return fmt.Errorf("data_process data_sources[%d].key must not be empty", i)
 		}
@@ -84,10 +158,12 @@ func (d *UpstreamDataDriver) Validate(spec config.TaskSpec) error {
 		if expr.JQExpr == "" {
 			return fmt.Errorf("data_process extract_expr[%d].jq_expr must not be empty", i)
 		}
+		_, pluginSource := pluginSourceKeys[expr.SourceKey]
 		switch {
+		case pluginSource && (expr.Source == "data" || expr.Source == "payload"):
 		case expr.Source == "payload", expr.Source == "summary", expr.Source == "record", strings.HasPrefix(expr.Source, "artifact:"):
 		default:
-			return fmt.Errorf("data_process extract_expr[%d].source %q must be 'payload', 'summary', 'record', or 'artifact:<kind>'", i, expr.Source)
+			return fmt.Errorf("data_process extract_expr[%d].source %q must be 'payload', 'summary', 'record', 'data', or 'artifact:<kind>'", i, expr.Source)
 		}
 		if expr.SourceKey == "" && params.SourceTaskID == "" && spec.WatchTaskID == "" && len(spec.DependencyRules()) > 1 {
 			return fmt.Errorf("data_process extract_expr[%d].source_key is required when multiple upstream dependencies are configured", i)
@@ -107,25 +183,36 @@ func (d *UpstreamDataDriver) NewRunner(spec config.TaskSpec, deps RunnerDeps) (R
 		return nil, fmt.Errorf("decode data_process params: %w", err)
 	}
 	return &upstreamDataRunner{
-		spec:     spec,
-		params:   params,
-		repo:     d.repo,
-		artStore: d.artStore,
-		logger:   d.logger,
-		deps:     deps,
+		spec:               spec,
+		params:             params,
+		repo:               d.repo,
+		artStore:           d.artStore,
+		logger:             d.logger,
+		deps:               deps,
+		dataSourceRegistry: d.dataSourceRegistry,
 	}, nil
 }
 
-type upstreamDataRunner struct {
-	spec     config.TaskSpec
-	params   UpstreamDataParams
-	repo     store.Repository
-	artStore store.ArtifactStore
-	logger   *slog.Logger
-	deps     RunnerDeps
+func (d *UpstreamDataDriver) dataSourceRegistry() *datasource.Registry {
+	d.dataSourcesMu.RLock()
+	defer d.dataSourcesMu.RUnlock()
+	if d.dataSources == nil {
+		return datasource.NewRegistry()
+	}
+	return d.dataSources
 }
 
-func (r *upstreamDataRunner) Run(ctx context.Context, _ TriggerType) (Result, error) {
+type upstreamDataRunner struct {
+	spec               config.TaskSpec
+	params             UpstreamDataParams
+	repo               store.Repository
+	artStore           store.ArtifactStore
+	logger             *slog.Logger
+	deps               RunnerDeps
+	dataSourceRegistry func() *datasource.Registry
+}
+
+func (r *upstreamDataRunner) Run(ctx context.Context, trigger TriggerType) (Result, error) {
 	sourceRecord, ok := ctx.Value(ctxkey.CtxTriggerRun).(*store.RunRecord)
 	if !ok {
 		sourceRecord = nil
@@ -134,8 +221,27 @@ func (r *upstreamDataRunner) Run(ctx context.Context, _ TriggerType) (Result, er
 	summary := map[string]any{}
 	var findings []store.Finding
 	artifactCache := map[string][]store.ArtifactRef{}
+	pluginSources, pluginFindings, err := r.fetchPluginDataSources(ctx, trigger)
+	if err != nil {
+		return Result{CheckStatus: "fail", Findings: pluginFindings}, err
+	}
+	findings = append(findings, pluginFindings...)
 
 	for _, expr := range r.params.ExtractExprs {
+		if data, ok := pluginSources[expr.SourceKey]; ok {
+			result, jqErr := r.applyJQ(expr.JQExpr, data)
+			if jqErr != nil {
+				findings = append(findings, store.Finding{
+					Reason: fmt.Sprintf("jq expr %q for field %q: %v", expr.JQExpr, expr.Field, jqErr),
+				})
+				continue
+			}
+			if expr.AggMode != "" {
+				result = r.aggregate(expr.AggMode, result)
+			}
+			summary[expr.Field] = result
+			continue
+		}
 		exprRecord, err := r.resolveSourceRecord(ctx, expr.SourceKey, sourceRecord)
 		if err != nil {
 			findings = append(findings, store.Finding{
@@ -172,6 +278,50 @@ func (r *upstreamDataRunner) Run(ctx context.Context, _ TriggerType) (Result, er
 		Payload:     summary,
 		Findings:    findings,
 	}, nil
+}
+
+func (r *upstreamDataRunner) fetchPluginDataSources(ctx context.Context, trigger TriggerType) (map[string]any, []store.Finding, error) {
+	registry := r.dataSourceRegistry()
+	runID, _ := ctx.Value(ctxkey.CtxRunID).(string)
+	deps := datasource.FetchDeps{
+		HTTPClient:    r.deps.HTTPClient,
+		CurrentRunID:  runID,
+		CurrentTaskID: r.spec.ID,
+		TriggerType:   string(trigger),
+	}
+	results := map[string]any{}
+	var findings []store.Finding
+	for _, spec := range r.params.DataSources {
+		if spec.Type == "" {
+			continue
+		}
+		key := spec.referenceKey()
+		source, ok := registry.Get(spec.Type)
+		if !ok {
+			err := fmt.Errorf("data source type %q is not available", spec.Type)
+			if spec.OnError == "skip" {
+				findings = append(findings, store.Finding{Reason: err.Error()})
+				continue
+			}
+			return results, findings, err
+		}
+		data, err := source.Fetch(ctx, datasource.Spec{
+			Type:    spec.Type,
+			Config:  mergedDataSourceConfig(r.params.CommonParams, spec),
+			Alias:   key,
+			OnError: spec.OnError,
+		}, deps)
+		if err != nil {
+			wrapped := fmt.Errorf("fetch data source %q: %w", spec.Type, err)
+			if spec.OnError == "skip" {
+				findings = append(findings, store.Finding{Reason: wrapped.Error()})
+				continue
+			}
+			return results, findings, wrapped
+		}
+		results[key] = data
+	}
+	return results, findings, nil
 }
 
 func (r *upstreamDataRunner) resolveSource(

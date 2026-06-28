@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"pulseops/internal/config"
+	"pulseops/internal/pluginmodel"
 	"pulseops/internal/store"
 	"pulseops/internal/task"
 )
@@ -446,6 +449,69 @@ func TestDriverValidateUnknownType(t *testing.T) {
 			t.Fatalf("expected unknown type error, got: %v", err)
 		}
 	})
+}
+
+func TestDriverSyncPluginDataSource(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":   true,
+			"data": map[string]any{"value": "from-plugin"},
+		})
+	}))
+	defer server.Close()
+
+	d := NewDriver(nil, nil, slog.Default())
+	d.SyncPluginDataSources([]pluginmodel.Capability{{
+		Type:     pluginmodel.CapabilityDataSource,
+		PluginID: "@test/source",
+		Name:     "plugin_inventory",
+		Runtime:  "http",
+		Endpoint: server.URL,
+	}}, config.PluginsConfig{})
+
+	spec := config.TaskSpec{
+		ID:   "test",
+		Kind: "ai_analyze",
+		Params: map[string]any{
+			"data_sources": []any{map[string]any{
+				"type":  "plugin_inventory",
+				"alias": "inventory",
+			}},
+			"prompt": map[string]any{"text": "{{ .DataSources.inventory.value }}"},
+		},
+	}
+	if err := d.Validate(spec); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	r, err := d.NewRunner(spec, task.RunnerDeps{HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+	prompt, err := r.(*runner).renderPrompt(context.Background(), task.TriggerManual)
+	if err != nil {
+		t.Fatalf("render prompt: %v", err)
+	}
+	if prompt != "from-plugin" {
+		t.Fatalf("unexpected prompt: %s", prompt)
+	}
+}
+
+func TestDriverRejectsManifestCABIEntrypointEscape(t *testing.T) {
+	t.Parallel()
+
+	driver := NewDriver(nil, nil, nil)
+	_, err := driver.loadManifestCABIDataSource(pluginmodel.Capability{
+		Name:        "native_source",
+		Type:        pluginmodel.CapabilityAIDataSource,
+		Runtime:     "c_abi",
+		Entrypoint:  "../native.so",
+		ReleasePath: t.TempDir(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "release path") {
+		t.Fatalf("expected release path error, got: %v", err)
+	}
 }
 
 func TestDataSourceOnError(t *testing.T) {

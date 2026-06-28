@@ -47,6 +47,7 @@ type Config struct {
 	ArtifactStore ArtifactStoreConfig `toml:"artifact_store"`
 	Trace         TraceConfig         `toml:"trace"`
 	AI            AIConfig            `toml:"ai"`
+	Plugins       PluginsConfig       `toml:"plugins"`
 }
 
 type AIConfig struct {
@@ -58,6 +59,81 @@ type AIConfig struct {
 	MaxTokens      int      `toml:"max_tokens"`
 	Temperature    float64  `toml:"temperature"`
 	PluginDir      string   `toml:"plugin_dir" json:"plugin_dir"`
+}
+
+type PluginsConfig struct {
+	Enabled             *bool    `toml:"enabled" json:"-"`
+	Dir                 string   `toml:"dir" json:"dir"`
+	Strict              bool     `toml:"strict" json:"strict"`
+	AllowProcess        *bool    `toml:"allow_process" json:"-"`
+	AllowHTTP           *bool    `toml:"allow_http" json:"-"`
+	AllowGRPC           *bool    `toml:"allow_grpc" json:"-"`
+	DefaultTimeout      Duration `toml:"default_timeout" json:"default_timeout"`
+	MaxOutputBytes      int      `toml:"max_output_bytes" json:"max_output_bytes"`
+	MaxConcurrentCalls  int      `toml:"max_concurrent_calls" json:"max_concurrent_calls"`
+	GenerationRetention Duration `toml:"generation_retention" json:"generation_retention"`
+	AllowedPermissions  []string `toml:"allowed_permissions" json:"allowed_permissions"`
+	EnvAllowlist        []string `toml:"env_allowlist" json:"env_allowlist"`
+	SignatureKey        string   `toml:"signature_key" json:"-"`
+}
+
+var defaultPluginPermissions = []string{
+	"runs:read",
+	"runs:write",
+	"artifacts:read",
+	"artifacts:write",
+	"tasks:read",
+	"tasks:write",
+	"settings:read",
+	"network:outbound",
+	"grpc:call",
+	"process:exec",
+	"ai:read",
+	"ai:write",
+}
+
+func DefaultPluginPermissions() []string {
+	return append([]string(nil), defaultPluginPermissions...)
+}
+
+func (c PluginsConfig) IsEnabled() bool {
+	return boolDefault(c.Enabled, true)
+}
+
+func (c PluginsConfig) ProcessAllowed() bool {
+	return boolDefault(c.AllowProcess, true)
+}
+
+func (c PluginsConfig) HTTPAllowed() bool {
+	return boolDefault(c.AllowHTTP, true)
+}
+
+func (c PluginsConfig) GRPCAllowed() bool {
+	return boolDefault(c.AllowGRPC, true)
+}
+
+func (c PluginsConfig) PermissionAllowed(permission string) bool {
+	permission = strings.TrimSpace(permission)
+	if permission == "" {
+		return true
+	}
+	allowed := c.AllowedPermissions
+	if allowed == nil {
+		allowed = defaultPluginPermissions
+	}
+	for _, item := range allowed {
+		if strings.TrimSpace(item) == permission {
+			return true
+		}
+	}
+	return false
+}
+
+func boolDefault(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }
 
 type ServerConfig struct {
@@ -125,6 +201,7 @@ type PlatformConfigSummary struct {
 	State         StateConfigSummary    `json:"state"`
 	ArtifactStore ArtifactConfigSummary `json:"artifact_store"`
 	AI            AIConfigSummary       `json:"ai"`
+	Plugins       PluginsConfigSummary  `json:"plugins"`
 }
 
 type ServerConfigSummary struct {
@@ -165,6 +242,23 @@ type AIConfigSummary struct {
 	PluginDir   string  `json:"plugin_dir"`
 	Status      string  `json:"status"`
 	Error       string  `json:"error,omitempty"`
+}
+
+type PluginsConfigSummary struct {
+	Enabled             bool     `json:"enabled"`
+	Dir                 string   `json:"dir"`
+	Strict              bool     `json:"strict"`
+	AllowProcess        bool     `json:"allow_process"`
+	AllowHTTP           bool     `json:"allow_http"`
+	AllowGRPC           bool     `json:"allow_grpc"`
+	DefaultTimeout      string   `json:"default_timeout"`
+	MaxOutputBytes      int      `json:"max_output_bytes"`
+	MaxConcurrentCalls  int      `json:"max_concurrent_calls"`
+	GenerationRetention string   `json:"generation_retention"`
+	AllowedPermissions  []string `json:"allowed_permissions"`
+	EnvAllowlist        []string `json:"env_allowlist"`
+	Status              string   `json:"status"`
+	Error               string   `json:"error,omitempty"`
 }
 
 func ParseGlobalSettings(sinksRaw, maxBytesRaw, retainDaysRaw string) GlobalSettings {
@@ -404,6 +498,28 @@ func (cfg *Config) Normalize() {
 		}
 		cfg.AI.PluginDir = ResolvePath(cfg.BaseDir, cfg.AI.PluginDir)
 	}
+	if cfg.Plugins.Dir == "" {
+		cfg.Plugins.Dir = "plugins"
+	}
+	if cfg.Plugins.DefaultTimeout.Duration == 0 {
+		cfg.Plugins.DefaultTimeout.Duration = 30 * time.Second
+	}
+	if cfg.Plugins.MaxOutputBytes == 0 {
+		cfg.Plugins.MaxOutputBytes = 1024 * 1024
+	}
+	if cfg.Plugins.MaxConcurrentCalls == 0 {
+		cfg.Plugins.MaxConcurrentCalls = 32
+	}
+	if cfg.Plugins.GenerationRetention.Duration == 0 {
+		cfg.Plugins.GenerationRetention.Duration = 10 * time.Minute
+	}
+	if cfg.Plugins.AllowedPermissions == nil {
+		cfg.Plugins.AllowedPermissions = DefaultPluginPermissions()
+	}
+	if cfg.Plugins.EnvAllowlist == nil {
+		cfg.Plugins.EnvAllowlist = []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"}
+	}
+	cfg.Plugins.Dir = ResolvePath(cfg.BaseDir, cfg.Plugins.Dir)
 }
 
 func (cfg Config) Validate() error {

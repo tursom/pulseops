@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"pulseops/internal/config"
+	"pulseops/internal/pluginmodel"
 	"pulseops/internal/store"
 )
 
@@ -24,6 +25,7 @@ type Sink interface {
 type Manager struct {
 	logger          *slog.Logger
 	sinks           map[string]Sink
+	pluginSinks     map[string]Sink
 	artifactStore   store.ArtifactStore
 	maxPayloadBytes int
 	mu              sync.RWMutex
@@ -36,6 +38,7 @@ func NewManager(logger *slog.Logger, artifactStore store.ArtifactStore, maxPaylo
 	return &Manager{
 		logger:          logger,
 		sinks:           map[string]Sink{},
+		pluginSinks:     map[string]Sink{},
 		artifactStore:   artifactStore,
 		maxPayloadBytes: maxPayloadBytes,
 	}
@@ -48,6 +51,21 @@ func (m *Manager) Register(sink Sink) {
 	m.mu.Lock()
 	m.sinks[sink.Name()] = sink
 	m.mu.Unlock()
+}
+
+func (m *Manager) SyncPluginSinks(caps []pluginmodel.Capability, cfg config.PluginsConfig, httpClient *http.Client) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pluginSinks = map[string]Sink{}
+	for _, cap := range caps {
+		if cap.Type != pluginmodel.CapabilityTraceSink {
+			continue
+		}
+		if cap.Runtime != "process" && cap.Runtime != "http" && cap.Runtime != "http_plugin" {
+			continue
+		}
+		m.pluginSinks[cap.ID] = NewPluginSink(cap, cfg, httpClient)
+	}
 }
 
 func (m *Manager) SetMaxPayloadBytes(maxPayloadBytes int) {
@@ -121,6 +139,11 @@ func (m *Manager) Dispatch(ctx context.Context, policy config.TracePolicy, recor
 	for _, sink := range m.sinks {
 		if err := sink.Write(ctx, record); err != nil {
 			m.logger.ErrorContext(ctx, "write trace sink failed", "sink", sink.Name(), "task_id", record.TaskID, "err", err)
+		}
+	}
+	for _, sink := range m.pluginSinks {
+		if err := sink.Write(ctx, record); err != nil {
+			m.logger.ErrorContext(ctx, "write plugin trace sink failed", "sink", sink.Name(), "task_id", record.TaskID, "err", err)
 		}
 	}
 }

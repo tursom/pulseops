@@ -11,9 +11,12 @@ import (
 )
 
 type FetchDeps struct {
-	TriggerRun   *store.RunRecord
-	DBRepository store.Repository
-	HTTPClient   *http.Client
+	TriggerRun    *store.RunRecord
+	DBRepository  store.Repository
+	HTTPClient    *http.Client
+	CurrentRunID  string
+	CurrentTaskID string
+	TriggerType   string
 }
 
 type DataSource interface {
@@ -32,6 +35,10 @@ func NewDataSourceRegistry() *DataSourceRegistry {
 	return r
 }
 
+func NewEmptyDataSourceRegistry() *DataSourceRegistry {
+	return &DataSourceRegistry{sources: map[string]DataSource{}}
+}
+
 func (r *DataSourceRegistry) Register(name string, source DataSource) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -43,6 +50,16 @@ func (r *DataSourceRegistry) Get(name string) (DataSource, bool) {
 	defer r.mu.RUnlock()
 	s, ok := r.sources[name]
 	return s, ok
+}
+
+func (r *DataSourceRegistry) Snapshot() map[string]DataSource {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]DataSource, len(r.sources))
+	for name, source := range r.sources {
+		out[name] = source
+	}
+	return out
 }
 
 func (r *DataSourceRegistry) registerBuiltins() {

@@ -26,6 +26,10 @@ import type {
   TaskValidationResponse,
   PlatformConfigSummary,
   TracePolicy,
+  PluginCatalog,
+  PluginCapability,
+  PluginRelease,
+  PluginView,
 } from './types'
 
 export class PulseOpsAPIError extends Error {
@@ -161,6 +165,47 @@ function normalizePlatformConfig(data: PlatformConfigSummary): PlatformConfigSum
   return {
     ...data,
     warnings: listOrEmpty(data.warnings),
+    plugins: {
+      ...(data.plugins || {
+        enabled: false,
+        dir: '',
+        strict: false,
+        allow_process: false,
+        allow_http: false,
+        allow_grpc: false,
+        default_timeout: '',
+        max_output_bytes: 0,
+        max_concurrent_calls: 0,
+        generation_retention: '',
+        allowed_permissions: [],
+        env_allowlist: [],
+        status: '',
+      }),
+      allowed_permissions: listOrEmpty(data.plugins?.allowed_permissions),
+      env_allowlist: listOrEmpty(data.plugins?.env_allowlist),
+    },
+  }
+}
+
+function normalizePluginView(plugin: PluginView): PluginView {
+  return {
+    ...plugin,
+    capabilities: listOrEmpty(plugin.capabilities),
+    permissions: listOrEmpty(plugin.permissions),
+    releases: listOrEmpty(plugin.releases),
+  }
+}
+
+function normalizePluginCatalog(data: PluginCatalog | null): PluginCatalog {
+  const stats = data?.stats || { total: 0, enabled: 0, disabled: 0, errors: 0, capabilities: 0 }
+  return {
+    ...data,
+    generated_at: data?.generated_at || '',
+    plugin_dir: data?.plugin_dir || '',
+    status: data?.status || 'unknown',
+    stats,
+    plugins: listOrEmpty(data?.plugins).map(normalizePluginView),
+    errors: listOrEmpty(data?.errors),
   }
 }
 
@@ -510,6 +555,85 @@ export async function updateSettings(settings: GlobalSettings): Promise<Settings
     body: JSON.stringify(settings),
   })
   return normalizeSettingsResponse(data)
+}
+
+export async function fetchPluginCatalog(): Promise<PluginCatalog> {
+  const data = await request<PluginCatalog | null>('/api/plugins')
+  return normalizePluginCatalog(data)
+}
+
+export async function fetchPlugin(id: string): Promise<PluginView> {
+  const data = await request<PluginView>(`/api/plugins/${encodeURIComponent(id)}`)
+  return normalizePluginView(data)
+}
+
+export async function fetchPluginReleases(id: string): Promise<PluginRelease[]> {
+  const data = await request<PluginRelease[] | null>(`/api/plugins/${encodeURIComponent(id)}/releases`)
+  return listOrEmpty(data)
+}
+
+export async function fetchPluginCapabilities(type?: string, kind?: string): Promise<PluginCapability[]> {
+  const params = new URLSearchParams()
+  if (type) params.set('type', type)
+  if (kind) params.set('kind', kind)
+  const qs = params.toString()
+  const data = await request<PluginCapability[] | null>(`/api/plugin-capabilities${qs ? `?${qs}` : ''}`)
+  return listOrEmpty(data)
+}
+
+export async function reloadPlugins(): Promise<PluginCatalog> {
+  const data = await request<PluginCatalog | null>('/api/plugins/reload', { method: 'POST' })
+  return normalizePluginCatalog(data)
+}
+
+export async function gcPlugins(): Promise<PluginCatalog> {
+  const data = await request<PluginCatalog | null>('/api/plugins/gc', { method: 'POST' })
+  return normalizePluginCatalog(data)
+}
+
+export async function importPluginArchive(file: Blob): Promise<PluginRelease> {
+  return request<PluginRelease>('/api/plugins/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/gzip' },
+    body: file,
+  })
+}
+
+export async function exportPluginRelease(id: string, version: string): Promise<Blob> {
+  const res = await fetch(`/api/plugins/${encodeURIComponent(id)}/releases/${encodeURIComponent(version)}/export`, {
+    cache: 'no-store',
+  })
+  if (!res.ok) {
+    const body = await res.json().catch((): APIError => ({ error: res.statusText }))
+    const errorBody = isRecord(body) ? body : {}
+    const errorMessage = typeof errorBody.error === 'string' ? errorBody.error : ''
+    throw new PulseOpsAPIError(errorMessage || `HTTP ${res.status}`, listOrEmpty(errorBody.errors as string[] | null | undefined), body)
+  }
+  return res.blob()
+}
+
+export async function validatePluginRelease(id: string, version: string): Promise<PluginRelease> {
+  return request<PluginRelease>(`/api/plugins/${encodeURIComponent(id)}/releases/${encodeURIComponent(version)}/validate`, { method: 'POST' })
+}
+
+export async function activatePluginRelease(id: string, version: string): Promise<PluginCatalog> {
+  const data = await request<PluginCatalog | null>(`/api/plugins/${encodeURIComponent(id)}/releases/${encodeURIComponent(version)}/activate`, { method: 'POST' })
+  return normalizePluginCatalog(data)
+}
+
+export async function disablePlugin(id: string): Promise<PluginCatalog> {
+  const data = await request<PluginCatalog | null>(`/api/plugins/${encodeURIComponent(id)}/disable`, { method: 'POST' })
+  return normalizePluginCatalog(data)
+}
+
+export async function enablePlugin(id: string): Promise<PluginCatalog> {
+  const data = await request<PluginCatalog | null>(`/api/plugins/${encodeURIComponent(id)}/enable`, { method: 'POST' })
+  return normalizePluginCatalog(data)
+}
+
+export async function rollbackPlugin(id: string): Promise<PluginCatalog> {
+  const data = await request<PluginCatalog | null>(`/api/plugins/${encodeURIComponent(id)}/rollback`, { method: 'POST' })
+  return normalizePluginCatalog(data)
 }
 
 export async function fetchTaskSample(taskId: string, source: string, jq?: string): Promise<SampleResponse> {

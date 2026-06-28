@@ -25,9 +25,10 @@ import {
   SettingOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
-import type { RunRecord, TaskDefinition, TaskValidationResponse } from '../../api/types'
+import type { PluginCapability, RunRecord, TaskDefinition, TaskValidationResponse } from '../../api/types'
 import {
   dryRunTaskDefinition,
+  fetchPluginCapabilities,
   fetchTaskDefinitions,
   PulseOpsAPIError,
   testRunTaskDefinition,
@@ -47,7 +48,7 @@ import { useWatchedFormValue } from './useWatchedFormValue'
 
 const { Text } = Typography
 
-const KIND_OPTIONS = [
+const DEFAULT_KIND_OPTIONS = [
   { value: 'http_check', label: 'HTTP 检查', desc: 'URL、方法、状态码、Header、Body' },
   { value: 'tcp_check', label: 'TCP 检查', desc: 'host:port 连通性' },
   { value: 'script_exec', label: '脚本执行', desc: '命令、参数、工作目录、环境变量' },
@@ -68,6 +69,14 @@ const KIND_LABELS: Record<string, string> = {
 }
 
 const AI_BUILTIN_ALIASES = new Set(['run_context', 'run_history', 'previous_analysis', 'http_call'])
+
+type KindOption = { value: string; label: string; desc: string }
+type TemplateOption = KindOption & {
+  templateId: string
+  pluginName?: string
+  defaults?: Record<string, unknown>
+  params?: Record<string, unknown>
+}
 
 type StepKey = 'template' | 'basic' | 'trigger' | 'params' | 'data_sources' | 'observability' | 'preview'
 
@@ -91,8 +100,33 @@ function formListToRecord(arr: KeyValueItem[] | undefined): Record<string, strin
   )
 }
 
+function recordToFormList(record: Record<string, unknown> | undefined): KeyValueItem[] | undefined {
+  if (!record) return undefined
+  return Object.entries(record).map(([key, value]) => ({ key, value: String(value ?? '') }))
+}
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function buildTemplateOptions(templateCaps: PluginCapability[], kindOptions: KindOption[]): TemplateOption[] {
+  const kinds = new Map(kindOptions.map((item) => [item.value, item]))
+  const templates = templateCaps
+    .filter((cap) => cap.enabled && cap.kind)
+    .map((cap) => {
+      const fallback = kinds.get(cap.kind || cap.name)
+      return {
+        value: cap.kind || cap.name,
+        templateId: cap.name,
+        label: cap.title || fallback?.label || cap.kind || cap.name,
+        desc: cap.description || fallback?.desc || `${cap.plugin_name} · ${cap.plugin_version}`,
+        pluginName: cap.plugin_name,
+        defaults: isPlainRecord(cap.defaults) ? cap.defaults : undefined,
+        params: isPlainRecord(cap.params) ? cap.params : undefined,
+      }
+    })
+  if (templates.length > 0) return templates
+  return kindOptions.map((item) => ({ ...item, templateId: item.value }))
 }
 
 function cloneRecord(value: Record<string, unknown>): Record<string, unknown> {
@@ -305,6 +339,10 @@ export default function TaskForm({ initialValues, mode, creationContext, onSubmi
   const [testRun, setTestRun] = useState<RunRecord | null>(null)
   const [validationResult, setValidationResult] = useState<TaskValidationResponse | null>(null)
   const [validationSource, setValidationSource] = useState<'validate' | 'dry-run' | null>(null)
+  const [kindOptions, setKindOptions] = useState<KindOption[]>(DEFAULT_KIND_OPTIONS)
+  const [templateOptions, setTemplateOptions] = useState<TemplateOption[]>(
+    DEFAULT_KIND_OPTIONS.map((item) => ({ ...item, templateId: item.value })),
+  )
 
   const kind = useWatchedFormValue<string>(form, 'kind', initialValues?.kind as string | undefined)
   const trigger = useWatchedFormValue<string>(form, 'trigger', initialValues?.trigger as string | undefined)
@@ -314,7 +352,7 @@ export default function TaskForm({ initialValues, mode, creationContext, onSubmi
     : initialValues
   const capability = TASK_CAPABILITIES[kind || ''] || { dependency: false, dataSources: false }
   const lockTopologyUpstream = Boolean(creationContext?.lockedUpstreamTaskId && capability.dependency)
-  const selectedKind = KIND_OPTIONS.find((item) => item.value === kind)
+  const selectedKind = kindOptions.find((item) => item.value === kind)
   const DriverForm = kind && !capability.dataSources ? driverForms[kind] : null
 
   const steps = useMemo<WizardStep[]>(() => [
@@ -342,6 +380,34 @@ export default function TaskForm({ initialValues, mode, creationContext, onSubmi
       .then((defs) => setTaskDefs(defs.filter((d) => d.enabled)))
       .catch(() => {})
       .finally(() => setTaskDefsLoading(false))
+  }, [])
+
+  useEffect(() => {
+    Promise.all([
+      fetchPluginCapabilities('task_driver'),
+      fetchPluginCapabilities('task_template'),
+    ])
+      .then(([driverCaps, templateCaps]) => {
+        const defaults = new Map(DEFAULT_KIND_OPTIONS.map((item) => [item.value, item]))
+        const nextKinds = driverCaps
+          .filter((cap) => cap.enabled)
+          .map((cap) => {
+            const fallback = defaults.get(cap.name)
+            return {
+              value: cap.name,
+              label: cap.title || fallback?.label || cap.name,
+              desc: cap.description || fallback?.desc || `${cap.plugin_name} · ${cap.plugin_version}`,
+            }
+          })
+        if (nextKinds.length > 0) setKindOptions(nextKinds)
+
+        const nextTemplates = buildTemplateOptions(templateCaps, nextKinds.length > 0 ? nextKinds : DEFAULT_KIND_OPTIONS)
+        if (nextTemplates.length > 0) setTemplateOptions(nextTemplates)
+      })
+      .catch(() => {
+        setKindOptions(DEFAULT_KIND_OPTIONS)
+        setTemplateOptions(DEFAULT_KIND_OPTIONS.map((item) => ({ ...item, templateId: item.value })))
+      })
   }, [])
 
   useEffect(() => {
@@ -476,8 +542,9 @@ export default function TaskForm({ initialValues, mode, creationContext, onSubmi
     }
   }
 
-  const selectKind = (value: string) => {
+  const selectTemplate = (option: TemplateOption) => {
     const applyKind = () => {
+      const value = option.value
       const nextCapability = TASK_CAPABILITIES[value] || { dependency: false, dataSources: false }
       const existingDeps = form.getFieldValue('dependencies')
       const existingDepsList = Array.isArray(existingDeps) ? existingDeps : []
@@ -489,22 +556,35 @@ export default function TaskForm({ initialValues, mode, creationContext, onSubmi
           ? existingDepsList
           : []
       const nextParams = shouldUseTopologyDeps && topologyUpstream
-        ? buildTopologyParams(value, {
+        ? { ...cloneRecord(option.params || {}), ...buildTopologyParams(value, {
             upstreamTaskId: topologyUpstream,
             upstreamName: creationContext?.lockedUpstreamName,
-          })
-        : {}
+          }) }
+        : cloneRecord(option.params || {})
+      const defaults = option.defaults || {}
+      const defaultTrigger = typeof defaults.trigger === 'string' ? defaults.trigger : ''
+      const defaultTimeout = typeof defaults.timeout === 'string' ? defaults.timeout : ''
+      const defaultInterval = typeof defaults.interval === 'string' ? defaults.interval : undefined
+      const defaultCron = typeof defaults.cron === 'string' ? defaults.cron : undefined
+      const defaultLabels = isPlainRecord(defaults.labels) ? recordToFormList(defaults.labels) : undefined
+      const nextTrigger = nextCapability.dependency
+        ? 'on_run'
+        : defaultTrigger || (creationContext?.source === 'topology' ? 'manual' : 'scheduled')
       form.setFieldsValue({
         kind: value,
+        timeout: defaultTimeout || form.getFieldValue('timeout'),
+        interval: defaultInterval,
+        cron: defaultCron,
+        labels: defaultLabels,
         params: nextParams,
         dependencies: nextCapability.dependency ? nextDeps : undefined,
         watch_task_id: '',
         watch_condition: '',
-        trigger: nextCapability.dependency ? 'on_run' : creationContext?.source === 'topology' ? 'manual' : 'scheduled',
+        trigger: nextTrigger,
       })
       resetVerification()
     }
-    if (mode === 'edit' && kind && kind !== value) {
+    if (mode === 'edit' && kind && kind !== option.value) {
       Modal.confirm({
         title: '确认切换任务类型？',
         content: '切换任务类型会清空不兼容的任务参数、依赖和数据源配置。',
@@ -548,6 +628,8 @@ export default function TaskForm({ initialValues, mode, creationContext, onSubmi
         capability,
         lockTopologyUpstream,
         selectedKind,
+        kindOptions,
+        templateOptions,
         DriverForm,
         taskDefs,
         taskDefsLoading,
@@ -557,7 +639,7 @@ export default function TaskForm({ initialValues, mode, creationContext, onSubmi
         testRun,
         validationResult,
         validationSource,
-        onSelectKind: selectKind,
+        onSelectTemplate: selectTemplate,
       })}
 
       <Card className="ops-card">
@@ -626,6 +708,8 @@ function renderStepContent(props: {
   capability: { dependency: boolean; dataSources: boolean }
   lockTopologyUpstream: boolean
   selectedKind?: { value: string; label: string; desc: string }
+  kindOptions: KindOption[]
+  templateOptions: TemplateOption[]
   DriverForm: React.ComponentType<{ form?: ReturnType<typeof Form.useForm>[0] }> | null
   taskDefs: TaskDefinition[]
   taskDefsLoading: boolean
@@ -635,13 +719,13 @@ function renderStepContent(props: {
   testRun: RunRecord | null
   validationResult: TaskValidationResponse | null
   validationSource: 'validate' | 'dry-run' | null
-  onSelectKind: (kind: string) => void
+  onSelectTemplate: (template: TemplateOption) => void
 }) {
   switch (props.key) {
     case 'template':
-      return <TemplateStep kind={props.kind} creationContext={props.creationContext} onSelectKind={props.onSelectKind} />
+      return <TemplateStep kind={props.kind} templateOptions={props.templateOptions} creationContext={props.creationContext} onSelectTemplate={props.onSelectTemplate} />
     case 'basic':
-      return <BasicInfoStep mode={props.mode} creationContext={props.creationContext} />
+      return <BasicInfoStep mode={props.mode} kindOptions={props.kindOptions} creationContext={props.creationContext} />
     case 'trigger':
       return (
         <TriggerStep
@@ -684,33 +768,36 @@ function renderStepContent(props: {
 
 function TemplateStep({
   kind,
+  templateOptions,
   creationContext,
-  onSelectKind,
+  onSelectTemplate,
 }: {
   kind?: string
+  templateOptions: TemplateOption[]
   creationContext?: TaskCreationContext
-  onSelectKind: (kind: string) => void
+  onSelectTemplate: (template: TemplateOption) => void
 }) {
   return (
     <Card className="ops-card" title="选择任务模板" style={{ marginBottom: 16 }}>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 10 }}>
-        {KIND_OPTIONS.map((item) => {
+        {templateOptions.map((item) => {
           const capability = TASK_CAPABILITIES[item.value]
           const recommended = creationContext?.recommendedKinds?.includes(item.value)
           return (
             <Button
-              key={item.value}
+              key={item.templateId}
               type={kind === item.value ? 'primary' : 'default'}
               style={{ height: 100, textAlign: 'left', justifyContent: 'flex-start' }}
-              onClick={() => onSelectKind(item.value)}
+              onClick={() => onSelectTemplate(item)}
             >
               <span style={{ width: '100%' }}>
                 <strong>{item.label}</strong>
                 <Text type="secondary" style={{ display: 'block', marginTop: 4, whiteSpace: 'normal' }}>
                   {item.desc}
                 </Text>
-                {capability.dataSources && <Tag style={{ marginTop: 7 }}>支持上游数据源</Tag>}
+                {capability?.dataSources && <Tag style={{ marginTop: 7 }}>支持上游数据源</Tag>}
                 {recommended && <Tag color="blue" style={{ marginTop: 7 }}>拓扑推荐</Tag>}
+                {item.pluginName && <Tag color="geekblue" style={{ marginTop: 7 }}>{item.pluginName}</Tag>}
               </span>
             </Button>
           )
@@ -720,7 +807,7 @@ function TemplateStep({
   )
 }
 
-function BasicInfoStep({ mode, creationContext }: { mode: 'create' | 'edit'; creationContext?: TaskCreationContext }) {
+function BasicInfoStep({ mode, kindOptions, creationContext }: { mode: 'create' | 'edit'; kindOptions: KindOption[]; creationContext?: TaskCreationContext }) {
   return (
     <Card className="ops-card" title="基础信息" style={{ marginBottom: 16 }}>
       <Form.Item name="task_id" label="任务 ID" rules={[{ required: true, message: '任务 ID 缺失' }]}>
@@ -731,7 +818,7 @@ function BasicInfoStep({ mode, creationContext }: { mode: 'create' | 'edit'; cre
       </Form.Item>
       <Form.Item name="kind" label="类型" rules={[{ required: true, message: '请选择任务类型' }]}>
         <Select
-          options={KIND_OPTIONS.map((item) => ({ value: item.value, label: item.label }))}
+          options={kindOptions.map((item) => ({ value: item.value, label: item.label }))}
           placeholder="请先选择任务模板"
           disabled
         />

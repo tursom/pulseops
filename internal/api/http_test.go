@@ -44,7 +44,7 @@ func TestArtifactEndpoints(t *testing.T) {
 				PreviewText: "{}",
 			},
 		},
-	}, &fakeArtifactStore{}, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, &fakeArtifactStore{}, nil, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks/task-a/runs/run-1/artifacts", nil)
 	rec := httptest.NewRecorder()
@@ -88,7 +88,7 @@ func TestRunDetailHydratesPayloadFromArtifact(t *testing.T) {
 		bodies: map[string]string{
 			"prod/task-a/run-1/payload.json": `{"body":{"status":"ok"}}`,
 		},
-	}, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, nil, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks/task-a/runs/run-1", nil)
 	rec := httptest.NewRecorder()
@@ -129,7 +129,7 @@ func TestRunDetailKeepsInlinePayload(t *testing.T) {
 		bodies: map[string]string{
 			"prod/task-a/run-1/payload.json": `{"inline":false}`,
 		},
-	}, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, nil, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks/task-a/runs/run-1", nil)
 	rec := httptest.NewRecorder()
@@ -162,7 +162,7 @@ func TestTaskViewIncludesDefinitionAndDependencies(t *testing.T) {
 			DownstreamTaskID: "task-a",
 			Condition:        "run_status == success",
 		}},
-	}, &fakeArtifactStore{}, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, &fakeArtifactStore{}, nil, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks/task-a", nil)
 	rec := httptest.NewRecorder()
@@ -200,7 +200,7 @@ func TestDashboardSummaryReturnsAggregates(t *testing.T) {
 			StartedAt:   time.Now(),
 			EndedAt:     time.Now(),
 		}},
-	}, &fakeArtifactStore{}, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, &fakeArtifactStore{}, nil, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/summary", nil)
 	rec := httptest.NewRecorder()
@@ -217,7 +217,7 @@ func TestDashboardSummaryReturnsAggregates(t *testing.T) {
 func TestDashboardSummaryReturnsEmptyLists(t *testing.T) {
 	t.Parallel()
 
-	handler := Routes("", &emptyTaskManager{}, &fakeRepository{}, &fakeArtifactStore{}, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	handler := Routes("", &emptyTaskManager{}, &fakeRepository{}, &fakeArtifactStore{}, nil, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/summary", nil)
 	rec := httptest.NewRecorder()
@@ -270,7 +270,7 @@ func TestTaskGraphReturnsDependencyEdges(t *testing.T) {
 			DownstreamTaskID: "task-a",
 			Condition:        "check_status == pass",
 		}},
-	}, &fakeArtifactStore{}, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, &fakeArtifactStore{}, nil, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/task-graph", nil)
 	rec := httptest.NewRecorder()
@@ -287,7 +287,7 @@ func TestTaskGraphReturnsDependencyEdges(t *testing.T) {
 func TestTaskDefinitionValidateRejectsInvalidCondition(t *testing.T) {
 	t.Parallel()
 
-	handler := Routes("", &fakeTaskManager{}, &fakeRepository{}, &fakeArtifactStore{}, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	handler := Routes("", &fakeTaskManager{}, &fakeRepository{}, &fakeArtifactStore{}, nil, nil, testPlatform(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/task-defs/validate", strings.NewReader(`{
 		"task_id":"task-a",

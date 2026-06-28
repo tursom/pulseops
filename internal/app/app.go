@@ -13,6 +13,8 @@ import (
 	"pulseops/internal/api"
 	"pulseops/internal/config"
 	"pulseops/internal/evaluator"
+	pluginmgr "pulseops/internal/plugin"
+	"pulseops/internal/pluginhook"
 	"pulseops/internal/runtime"
 	"pulseops/internal/store"
 	"pulseops/internal/task"
@@ -26,6 +28,7 @@ type App struct {
 	store         *store.PostgresStore
 	artifactStore store.ArtifactStore
 	manager       *runtime.Manager
+	plugins       *pluginmgr.Manager
 	server        *http.Server
 }
 
@@ -114,19 +117,35 @@ func New(ctx context.Context, baseDir, configPath, staticDir string, logger *slo
 		return nil, fmt.Errorf("at least one postgres trace sink is required — configure in settings page")
 	}
 
-	evaluators := evaluator.NewRegistry()
-	if err := evaluators.Register(evaluator.SteamGamePriceConsistency{}); err != nil {
-		return nil, err
-	}
-	drivers := task.NewRegistry()
-	driverList := []task.Driver{
+	httpClient := &http.Client{Timeout: cfg.Task.DefaultTimeout.Duration}
+	hookManager := pluginhook.NewManager(cfg.Plugins, httpClient, logger)
+	pluginManager := pluginmgr.NewManager(pluginmgr.Options{
+		BaseDir: baseDir,
+		Config:  cfg.Plugins,
+		Store:   stateStore,
+		Logger:  logger,
+	})
+	if err := pluginManager.RegisterBundled(pluginmgr.CoreTasksPlugin(
 		task.HTTPCheckDriver{},
 		task.TCPCheckDriver{},
 		task.ScriptExecDriver{},
 		task.ProcessCheckDriver{},
-		task.ScenarioCheckDriver{},
-		task.NewUpstreamDataDriver(stateStore, artifactStore, logger),
+	)); err != nil {
+		return nil, err
 	}
+	if err := pluginManager.RegisterBundled(pluginmgr.ScenarioPlugin(
+		task.ScenarioCheckDriver{},
+		evaluator.SteamGamePriceConsistency{},
+	)); err != nil {
+		return nil, err
+	}
+	dataProcessDriver := task.NewUpstreamDataDriver(stateStore, artifactStore, logger)
+	if err := pluginManager.RegisterBundled(pluginmgr.DataProcessPlugin(dataProcessDriver)); err != nil {
+		return nil, err
+	}
+	var aiDriver task.Driver
+	var aiAnalyzeDriver *ai.Driver
+	var aiEvaluator evaluator.ScenarioEvaluator
 	if cfg.AI.Enabled {
 		aiClient := ai.NewClient(ai.ClientConfig{
 			Endpoint:    cfg.AI.Endpoint,
@@ -136,9 +155,10 @@ func New(ctx context.Context, baseDir, configPath, staticDir string, logger *slo
 			MaxTokens:   cfg.AI.MaxTokens,
 			Temperature: cfg.AI.Temperature,
 		})
-		aiDriver := ai.NewDriver(aiClient, stateStore, logger)
+		driver := ai.NewDriver(aiClient, stateStore, logger)
+		aiAnalyzeDriver = driver
 		if cfg.AI.PluginDir != "" {
-			if err := aiDriver.LoadPlugins(cfg.AI.PluginDir, logger); err != nil {
+			if err := driver.LoadPlugins(cfg.AI.PluginDir, logger); err != nil {
 				logger.WarnContext(ctx, "load AI plugins failed, continuing without plugins", "err", err)
 				platform.Mode = "degraded"
 				platform.Applied = false
@@ -147,23 +167,58 @@ func New(ctx context.Context, baseDir, configPath, staticDir string, logger *slo
 				platform.Warnings = append(platform.Warnings, "ai plugins: "+err.Error())
 			}
 		}
-		driverList = append(driverList, aiDriver)
-		if err := evaluators.Register(&ai.AIEvaluator{Client: aiClient}); err != nil {
+		aiDriver = driver
+		aiEvaluator = &ai.AIEvaluator{Client: aiClient}
+	}
+	if err := pluginManager.RegisterBundled(pluginmgr.AIPlugin(cfg.AI.Enabled, aiDriver, aiEvaluator)); err != nil {
+		return nil, err
+	}
+	if err := pluginManager.RegisterBundled(pluginmgr.TraceSinksPlugin()); err != nil {
+		return nil, err
+	}
+	if err := pluginManager.RegisterBundled(pluginmgr.GRPCSourcePlugin(cfg.Plugins.GRPCAllowed())); err != nil {
+		return nil, err
+	}
+	pluginManager.RegisterGenerationListener(func(gen *pluginmgr.Generation) {
+		if gen == nil {
+			return
+		}
+		dataProcessDriver.SyncPluginDataSources(gen.Capabilities, cfg.Plugins)
+		hookManager.SyncPluginHooks(gen.Capabilities, cfg.Plugins)
+		traceManager.SyncPluginSinks(gen.Capabilities, cfg.Plugins, httpClient)
+		if aiAnalyzeDriver != nil {
+			aiAnalyzeDriver.SyncPluginCapabilities(gen.Capabilities, cfg.Plugins)
+		}
+		go hookManager.Dispatch(context.Background(), pluginhook.Event{
+			Type:         pluginhook.EventPluginLoaded,
+			GenerationID: gen.ID,
+			Data: map[string]any{
+				"active_versions": gen.ActiveVersions,
+			},
+		})
+	})
+	if err := pluginManager.Initialize(ctx); err != nil {
+		if cfg.Plugins.Strict {
+			_ = stateStore.Close()
 			return nil, err
 		}
+		logger.WarnContext(ctx, "initialize plugin catalog failed, continuing in degraded mode", "err", err)
+		platform.Mode = "degraded"
+		platform.Applied = false
+		platform.Plugins.Status = "config_error"
+		platform.Plugins.Error = err.Error()
+		platform.Warnings = append(platform.Warnings, "plugins: "+err.Error())
 	}
-	for _, driver := range driverList {
-		if err := drivers.Register(driver); err != nil {
-			return nil, err
-		}
-	}
+	drivers, _ := pluginManager.ActiveDriverRegistry()
+	evaluators, _ := pluginManager.ActiveEvaluatorRegistry()
 
-	httpClient := &http.Client{Timeout: cfg.Task.DefaultTimeout.Duration}
 	manager := runtime.NewManager(ctx, cfg, logger, drivers, task.RunnerDeps{
 		BaseDir:    baseDir,
 		HTTPClient: httpClient,
 		Evaluators: evaluators,
 	}, stateStore, traceManager)
+	manager.SetPluginGenerationProvider(pluginManager)
+	manager.SetHookDispatcher(hookManager)
 	if err := manager.LoadAllFromDB(ctx); err != nil {
 		logger.ErrorContext(ctx, "load task definitions from db failed", "err", err)
 	}
@@ -175,7 +230,7 @@ func New(ctx context.Context, baseDir, configPath, staticDir string, logger *slo
 		}
 	}
 
-	handler := api.Routes(staticDir, manager, stateStore, artifactStore, traceManager, platform, logger)
+	handler := api.Routes(staticDir, manager, stateStore, artifactStore, traceManager, pluginManager, platform, logger)
 	server := &http.Server{
 		Addr:         cfg.Server.Addr,
 		Handler:      handler,
@@ -192,6 +247,7 @@ func New(ctx context.Context, baseDir, configPath, staticDir string, logger *slo
 		store:         stateStore,
 		artifactStore: artifactStore,
 		manager:       manager,
+		plugins:       pluginManager,
 		server:        server,
 	}, nil
 }
@@ -241,6 +297,36 @@ func applyPlatformConfigSummary(cfg *config.Config, summary config.PlatformConfi
 	if summary.AI.PluginDir != "" {
 		cfg.AI.PluginDir = config.ResolvePath(cfg.BaseDir, summary.AI.PluginDir)
 	}
+	if summary.Plugins.Dir != "" || summary.Plugins.DefaultTimeout != "" || summary.Plugins.GenerationRetention != "" || summary.Plugins.Status != "" || summary.Plugins.MaxOutputBytes > 0 || summary.Plugins.MaxConcurrentCalls > 0 || len(summary.Plugins.AllowedPermissions) > 0 || len(summary.Plugins.EnvAllowlist) > 0 {
+		pluginsEnabled := summary.Plugins.Enabled
+		cfg.Plugins.Enabled = &pluginsEnabled
+		if summary.Plugins.Dir != "" {
+			cfg.Plugins.Dir = config.ResolvePath(cfg.BaseDir, summary.Plugins.Dir)
+		}
+		cfg.Plugins.Strict = summary.Plugins.Strict
+		allowProcess := summary.Plugins.AllowProcess
+		cfg.Plugins.AllowProcess = &allowProcess
+		allowHTTP := summary.Plugins.AllowHTTP
+		cfg.Plugins.AllowHTTP = &allowHTTP
+		allowGRPC := summary.Plugins.AllowGRPC
+		cfg.Plugins.AllowGRPC = &allowGRPC
+		if summary.Plugins.DefaultTimeout != "" {
+			_ = cfg.Plugins.DefaultTimeout.UnmarshalText([]byte(summary.Plugins.DefaultTimeout))
+		}
+		if summary.Plugins.MaxOutputBytes > 0 {
+			cfg.Plugins.MaxOutputBytes = summary.Plugins.MaxOutputBytes
+		}
+		if summary.Plugins.MaxConcurrentCalls > 0 {
+			cfg.Plugins.MaxConcurrentCalls = summary.Plugins.MaxConcurrentCalls
+		}
+		if summary.Plugins.GenerationRetention != "" {
+			_ = cfg.Plugins.GenerationRetention.UnmarshalText([]byte(summary.Plugins.GenerationRetention))
+		}
+		if summary.Plugins.AllowedPermissions != nil {
+			cfg.Plugins.AllowedPermissions = append([]string(nil), summary.Plugins.AllowedPermissions...)
+		}
+		cfg.Plugins.EnvAllowlist = append([]string(nil), summary.Plugins.EnvAllowlist...)
+	}
 }
 
 func buildPlatformSummary(cfg config.Config) config.PlatformConfigSummary {
@@ -279,6 +365,21 @@ func buildPlatformSummary(cfg config.Config) config.PlatformConfigSummary {
 			Temperature: cfg.AI.Temperature,
 			PluginDir:   cfg.AI.PluginDir,
 			Status:      "active",
+		},
+		Plugins: config.PluginsConfigSummary{
+			Enabled:             cfg.Plugins.IsEnabled(),
+			Dir:                 cfg.Plugins.Dir,
+			Strict:              cfg.Plugins.Strict,
+			AllowProcess:        cfg.Plugins.ProcessAllowed(),
+			AllowHTTP:           cfg.Plugins.HTTPAllowed(),
+			AllowGRPC:           cfg.Plugins.GRPCAllowed(),
+			DefaultTimeout:      cfg.Plugins.DefaultTimeout.String(),
+			MaxOutputBytes:      cfg.Plugins.MaxOutputBytes,
+			MaxConcurrentCalls:  cfg.Plugins.MaxConcurrentCalls,
+			GenerationRetention: cfg.Plugins.GenerationRetention.String(),
+			AllowedPermissions:  append([]string(nil), cfg.Plugins.AllowedPermissions...),
+			EnvAllowlist:        append([]string(nil), cfg.Plugins.EnvAllowlist...),
+			Status:              "active",
 		},
 	}
 }

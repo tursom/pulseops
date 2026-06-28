@@ -92,6 +92,7 @@ export default function Settings() {
         ...platform,
         ai: { ...platform.ai, ...(values.ai || {}) },
         artifact_store: { ...platform.artifact_store, ...(values.artifact_store || {}) },
+        plugins: { ...platform.plugins, ...(values.plugins || {}) },
       }
       const response = await updatePlatformConfig(updated)
       setPlatform(response)
@@ -313,16 +314,13 @@ export default function Settings() {
                   <InputNumber min={0} max={2} step={0.1} />
                 </Form.Item>
               </Space>
-              <Form.Item name={['ai', 'plugin_dir']} label="插件目录">
-                <Input placeholder="plugins" />
-              </Form.Item>
               <Tag color={platform?.ai.status === 'config_error' ? 'orange' : 'blue'}>{platform?.ai.status || '启动配置'}</Tag>
               {platform?.ai.error && <Text type="danger"> {platform.ai.error}</Text>}
             </Form>
           </Card>
 
-          <Card className="ops-card" title="对象存储配置">
-            <Form form={platformForm} layout="vertical">
+	          <Card className="ops-card" title="对象存储配置">
+	            <Form form={platformForm} layout="vertical">
               <Space style={{ width: '100%' }} align="start">
                 <Form.Item name={['artifact_store', 'provider']} label="Provider">
                   <Input placeholder="minio" />
@@ -356,18 +354,99 @@ export default function Settings() {
                 </Form.Item>
               </Space>
               <Tag color={platform?.artifact_store.status === 'config_error' ? 'orange' : 'blue'}>{platform?.artifact_store.status || '启动配置'}</Tag>
-              {platform?.artifact_store.error && <Text type="danger"> {platform.artifact_store.error}</Text>}
-            </Form>
-          </Card>
+	              {platform?.artifact_store.error && <Text type="danger"> {platform.artifact_store.error}</Text>}
+	            </Form>
+	          </Card>
 
-          <Card className="ops-card" title="平台配置保存">
-            <Space direction="vertical" style={{ width: '100%' }}>
-              <Alert
-                type="info"
-                showIcon
-                message="AI 和对象存储配置保存到 DB 后需要重启服务应用"
-                description="Trace Sink 和最大 Payload 字节数在上方保存后可热应用。"
-              />
+	          <Card className="ops-card" title="插件配置">
+	            <Form form={platformForm} layout="vertical">
+	              <Space style={{ width: '100%' }} align="start">
+	                <Form.Item name={['plugins', 'enabled']} label="扫描外部插件目录" valuePropName="checked">
+	                  <Switch />
+	                </Form.Item>
+	                <Form.Item name={['plugins', 'strict']} label="严格启动" valuePropName="checked">
+	                  <Switch />
+	                </Form.Item>
+	              </Space>
+	              <Form.Item name={['plugins', 'dir']} label="插件目录">
+	                <Input placeholder="plugins" />
+	              </Form.Item>
+	              <Space style={{ width: '100%' }} align="start">
+	                <Form.Item name={['plugins', 'allow_process']} label="Process Runtime" valuePropName="checked">
+	                  <Switch />
+	                </Form.Item>
+	                <Form.Item name={['plugins', 'allow_http']} label="HTTP Runtime" valuePropName="checked">
+	                  <Switch />
+	                </Form.Item>
+	                <Form.Item name={['plugins', 'allow_grpc']} label="gRPC Adapter" valuePropName="checked">
+	                  <Switch />
+	                </Form.Item>
+	              </Space>
+	              <Space style={{ width: '100%' }} align="start">
+	                <Form.Item name={['plugins', 'default_timeout']} label="默认超时">
+	                  <Input placeholder="30s" />
+	                </Form.Item>
+	                <Form.Item name={['plugins', 'max_output_bytes']} label="输出上限">
+	                  <InputNumber min={1} style={{ width: '100%' }} />
+	                </Form.Item>
+	                <Form.Item name={['plugins', 'max_concurrent_calls']} label="并发上限">
+	                  <InputNumber min={1} style={{ width: '100%' }} />
+	                </Form.Item>
+	                <Form.Item name={['plugins', 'generation_retention']} label="Generation 保留">
+	                  <Input placeholder="10m" />
+	                </Form.Item>
+	              </Space>
+	              <Form.Item name={['plugins', 'allowed_permissions']} label="权限 Allowlist">
+	                <Select
+	                  mode="tags"
+	                  tokenSeparators={[',']}
+	                  options={[
+	                    { value: 'runs:read' },
+	                    { value: 'runs:write' },
+	                    { value: 'artifacts:read' },
+	                    { value: 'artifacts:write' },
+	                    { value: 'tasks:read' },
+	                    { value: 'tasks:write' },
+	                    { value: 'settings:read' },
+	                    { value: 'network:outbound' },
+	                    { value: 'grpc:call' },
+	                    { value: 'process:exec' },
+	                    { value: 'ai:read' },
+	                    { value: 'ai:write' },
+	                  ]}
+	                />
+	              </Form.Item>
+	              <Form.Item name={['plugins', 'env_allowlist']} label="环境变量 Allowlist">
+	                <Select
+	                  mode="tags"
+	                  tokenSeparators={[',']}
+	                  options={[
+	                    { value: 'HTTP_PROXY' },
+	                    { value: 'HTTPS_PROXY' },
+	                    { value: 'NO_PROXY' },
+	                  ]}
+	                />
+	              </Form.Item>
+	              <Alert
+	                type="info"
+	                showIcon
+	                message="插件密钥通过 secret reference 读取"
+	                description="插件配置中的敏感值应使用 secret://ENV_NAME 或 { secret_ref: ENV_NAME }，签名密钥仍只从后端配置读取。"
+	                style={{ marginBottom: 12 }}
+	              />
+	              <Tag color={platform?.plugins.status === 'config_error' ? 'orange' : 'blue'}>{platform?.plugins.status || '启动配置'}</Tag>
+	              {platform?.plugins.error && <Text type="danger"> {platform.plugins.error}</Text>}
+	            </Form>
+	          </Card>
+
+	          <Card className="ops-card" title="平台配置保存">
+	            <Space direction="vertical" style={{ width: '100%' }}>
+	              <Alert
+	                type="info"
+	                showIcon
+	                message="AI、对象存储和插件配置保存到 DB 后需要重启服务应用"
+	                description="Trace Sink 和最大 Payload 字节数在上方保存后可热应用。"
+	              />
               <Button block type="primary" icon={<SaveOutlined />} loading={platformSaving} onClick={handleSavePlatform}>
                 保存平台配置
               </Button>
@@ -381,8 +460,20 @@ export default function Settings() {
               <Descriptions.Item label="状态存储"><Tag color="blue">{platform?.state.backend || 'Postgres'}</Tag></Descriptions.Item>
               <Descriptions.Item label="对象存储"><Tag color={platform?.artifact_store.status === 'config_error' ? 'orange' : 'blue'}>{platform?.artifact_store.kind || '—'}</Tag></Descriptions.Item>
               <Descriptions.Item label="AI"><Tag color={platform?.ai.enabled ? 'green' : 'default'}>{platform?.ai.enabled ? platform.ai.model || '启用' : '关闭'}</Tag></Descriptions.Item>
-            </Descriptions>
-          </Card>
+              <Descriptions.Item label="插件目录"><Text type="secondary">{platform?.plugins.dir || '—'}</Text></Descriptions.Item>
+              <Descriptions.Item label="插件运行时">
+                <Space wrap>
+                  <Tag color={platform?.plugins.allow_process ? 'green' : 'default'}>process</Tag>
+                  <Tag color={platform?.plugins.allow_http ? 'green' : 'default'}>http</Tag>
+                  <Tag color={platform?.plugins.allow_grpc ? 'green' : 'default'}>grpc</Tag>
+                </Space>
+              </Descriptions.Item>
+	              <Descriptions.Item label="插件输出上限"><Text type="secondary">{platform?.plugins.max_output_bytes || 0} bytes</Text></Descriptions.Item>
+	              <Descriptions.Item label="插件并发上限"><Text type="secondary">{platform?.plugins.max_concurrent_calls || 0}</Text></Descriptions.Item>
+	              <Descriptions.Item label="Generation 保留"><Text type="secondary">{platform?.plugins.generation_retention || '—'}</Text></Descriptions.Item>
+	              <Descriptions.Item label="插件权限数"><Text type="secondary">{platform?.plugins.allowed_permissions?.length || 0}</Text></Descriptions.Item>
+	            </Descriptions>
+	          </Card>
 
           <Card className="ops-card" title="人工恢复能力">
             <Alert

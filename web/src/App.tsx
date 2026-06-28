@@ -1,6 +1,7 @@
 import { Routes, Route, useNavigate, useLocation } from 'react-router-dom'
 import { Layout, Menu } from 'antd'
 import {
+  ApiOutlined,
   ApartmentOutlined,
   DashboardOutlined,
   SettingOutlined,
@@ -13,6 +14,8 @@ import RunDetail from './pages/RunDetail'
 import TaskEditor from './pages/TaskEditor'
 import PipelineList from './pages/PipelineList'
 import PipelineEditor from './pages/PipelineEditor'
+import PluginCenter from './pages/PluginCenter'
+import PluginExtensionFrame from './pages/PluginExtensionFrame'
 import Settings from './pages/Settings'
 import './App.css'
 
@@ -22,6 +25,7 @@ const menuItems = [
   { key: '/', icon: <DashboardOutlined />, label: '工作台' },
   { key: '/tasks', icon: <UnorderedListOutlined />, label: '任务监控' },
   { key: '/pipelines', icon: <ApartmentOutlined />, label: '依赖拓扑' },
+  { key: '/plugins', icon: <ApiOutlined />, label: '插件中心' },
   { key: '/settings', icon: <SettingOutlined />, label: '平台设置' },
 ]
 
@@ -58,6 +62,8 @@ export default function App() {
             <Route path="/tasks/:id" element={<TaskDetail />} />
             <Route path="/pipelines" element={<PipelineList />} />
             <Route path="/pipelines/:id" element={<PipelineEditor />} />
+            <Route path="/plugins" element={<PluginCenter />} />
+            <Route path="/plugins/extension" element={<PluginExtensionFrame />} />
             <Route path="/task-defs/new" element={<TaskEditor />} />
             <Route path="/task-defs/:id/edit" element={<TaskEditor />} />
             <Route path="/settings" element={<Settings />} />

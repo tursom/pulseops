@@ -27,6 +27,7 @@ export interface RunRecord {
   run_id: string
   task_id: string
   task_kind: string
+  plugin_generation_id?: string
   trigger_type: string
   run_status: string   // "success" | "failed" | "timeout"
   check_status: string // "pass" | "fail" | "unknown"
@@ -227,6 +228,122 @@ export interface PlatformConfigSummary {
     status: string
     error?: string
   }
+  plugins: {
+    enabled: boolean
+    dir: string
+    strict: boolean
+    allow_process: boolean
+    allow_http: boolean
+    allow_grpc: boolean
+    default_timeout: string
+    max_output_bytes: number
+    max_concurrent_calls: number
+    generation_retention: string
+    allowed_permissions: string[]
+    env_allowlist: string[]
+    status: string
+    error?: string
+  }
+}
+
+export interface PluginSchemaField {
+  type: string
+  required?: boolean
+  description?: string
+}
+
+export interface PluginCapability {
+  id: string
+  type: string
+  name: string
+  title?: string
+  description?: string
+  plugin_id: string
+  plugin_name: string
+  plugin_version: string
+  kind?: string
+  protocol?: string
+  runtime?: string
+  entrypoint?: string
+  endpoint?: string
+  path?: string
+  release_path?: string
+  status: string
+  enabled: boolean
+  official: boolean
+  bundled: boolean
+  permissions?: string[]
+  defaults?: Record<string, unknown>
+  params?: Record<string, unknown>
+  schema?: Record<string, PluginSchemaField>
+}
+
+export interface PluginManifest {
+  schema_version: string
+  id: string
+  name: string
+  version: string
+  description?: string
+  author?: string
+  homepage?: string
+  enabled: boolean
+  permissions?: string[]
+}
+
+export interface PluginPackage {
+  id: string
+  name: string
+  description?: string
+  author?: string
+  homepage?: string
+  official: boolean
+  bundled: boolean
+  status: string
+  last_error?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface PluginRelease {
+  plugin_id: string
+  version: string
+  schema_version: string
+  manifest: PluginManifest
+  path?: string
+  status: string
+  checksum?: string
+  validation_error?: string
+  official: boolean
+  bundled: boolean
+  created_at: string
+  updated_at: string
+  validated_at?: string
+  activated_at?: string
+}
+
+export interface PluginView {
+  package: PluginPackage
+  active_version?: string
+  release?: PluginRelease
+  releases?: PluginRelease[]
+  capabilities: PluginCapability[]
+  permissions?: string[]
+}
+
+export interface PluginCatalog {
+  generated_at: string
+  plugin_dir: string
+  status: string
+  active_generation_id?: string
+  stats: {
+    total: number
+    enabled: number
+    disabled: number
+    errors: number
+    capabilities: number
+  }
+  plugins: PluginView[]
+  errors?: string[]
 }
 
 // === Alert policy (nested in TaskDefinition) ===

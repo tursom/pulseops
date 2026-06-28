@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"pulseops/internal/config"
+	"pulseops/internal/pluginmodel"
 
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -80,23 +81,24 @@ type RunStat struct {
 }
 
 type RunRecord struct {
-	RunID        string            `json:"run_id"`
-	TaskID       string            `json:"task_id"`
-	TaskKind     string            `json:"task_kind"`
-	TriggerType  string            `json:"trigger_type"`
-	RunStatus    string            `json:"run_status"`
-	CheckStatus  string            `json:"check_status"`
-	StartedAt    time.Time         `json:"started_at"`
-	EndedAt      time.Time         `json:"ended_at"`
-	DurationMS   int64             `json:"duration_ms"`
-	ErrorMessage string            `json:"error_message,omitempty"`
-	Summary      map[string]any    `json:"summary,omitempty"`
-	Payload      json.RawMessage   `json:"payload,omitempty"`
-	ArtifactRefs []ArtifactRef     `json:"artifact_refs,omitempty"`
-	Findings     []Finding         `json:"findings,omitempty"`
-	Stdout       string            `json:"stdout,omitempty"`
-	Stderr       string            `json:"stderr,omitempty"`
-	Labels       map[string]string `json:"labels,omitempty"`
+	RunID              string            `json:"run_id"`
+	TaskID             string            `json:"task_id"`
+	TaskKind           string            `json:"task_kind"`
+	PluginGenerationID string            `json:"plugin_generation_id,omitempty"`
+	TriggerType        string            `json:"trigger_type"`
+	RunStatus          string            `json:"run_status"`
+	CheckStatus        string            `json:"check_status"`
+	StartedAt          time.Time         `json:"started_at"`
+	EndedAt            time.Time         `json:"ended_at"`
+	DurationMS         int64             `json:"duration_ms"`
+	ErrorMessage       string            `json:"error_message,omitempty"`
+	Summary            map[string]any    `json:"summary,omitempty"`
+	Payload            json.RawMessage   `json:"payload,omitempty"`
+	ArtifactRefs       []ArtifactRef     `json:"artifact_refs,omitempty"`
+	Findings           []Finding         `json:"findings,omitempty"`
+	Stdout             string            `json:"stdout,omitempty"`
+	Stderr             string            `json:"stderr,omitempty"`
+	Labels             map[string]string `json:"labels,omitempty"`
 }
 
 type RunListItem struct {
@@ -182,6 +184,11 @@ type PostgresStore struct {
 	db *sql.DB
 }
 
+type sqlExecutor interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 func OpenPostgres(dsn string) (*PostgresStore, error) {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -206,6 +213,401 @@ func (s *PostgresStore) Close() error {
 		return nil
 	}
 	return s.db.Close()
+}
+
+func (s *PostgresStore) EnsurePluginPackage(ctx context.Context, record pluginmodel.PackageRecord) error {
+	if record.Status == "" {
+		record.Status = pluginmodel.PackageStatusDisabled
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO plugin_packages (
+			id, name, description, author, homepage, official, bundled, status, last_error, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+		ON CONFLICT(id) DO UPDATE SET
+			name=excluded.name,
+			description=excluded.description,
+			author=excluded.author,
+			homepage=excluded.homepage,
+			official=excluded.official,
+			bundled=excluded.bundled,
+			updated_at=NOW()
+	`, record.ID, record.Name, record.Description, record.Author, record.Homepage,
+		record.Official, record.Bundled, record.Status, record.LastError)
+	if err != nil {
+		return fmt.Errorf("ensure plugin package: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) UpsertPluginRelease(ctx context.Context, record pluginmodel.ReleaseRecord) error {
+	manifestJSON, err := json.Marshal(record.Manifest)
+	if err != nil {
+		return fmt.Errorf("marshal plugin manifest: %w", err)
+	}
+	if record.SchemaVersion == "" {
+		record.SchemaVersion = record.Manifest.SchemaVersion
+	}
+	if record.Status == "" {
+		record.Status = pluginmodel.ReleaseStatusStaged
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO plugin_releases (
+			plugin_id, version, schema_version, manifest_json, path, status, checksum,
+			validation_error, official, bundled, created_at, updated_at
+		) VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+		ON CONFLICT(plugin_id, version) DO UPDATE SET
+			schema_version=excluded.schema_version,
+			manifest_json=excluded.manifest_json,
+			path=excluded.path,
+			status=CASE
+				WHEN plugin_releases.status IN ('active', 'draining', 'retired') THEN plugin_releases.status
+				ELSE excluded.status
+			END,
+			checksum=excluded.checksum,
+			validation_error=excluded.validation_error,
+			official=excluded.official,
+			bundled=excluded.bundled,
+			updated_at=NOW()
+	`, record.PluginID, record.Version, record.SchemaVersion, string(manifestJSON), record.Path,
+		record.Status, record.Checksum, record.ValidationError, record.Official, record.Bundled)
+	if err != nil {
+		return fmt.Errorf("upsert plugin release: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) ListPluginPackages(ctx context.Context) ([]pluginmodel.PackageRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, description, author, homepage, official, bundled, status, last_error, created_at, updated_at
+		FROM plugin_packages
+		ORDER BY id ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list plugin packages: %w", err)
+	}
+	defer rows.Close()
+	var records []pluginmodel.PackageRecord
+	for rows.Next() {
+		record, err := scanPluginPackage(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+func (s *PostgresStore) GetPluginPackage(ctx context.Context, pluginID string) (pluginmodel.PackageRecord, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, name, description, author, homepage, official, bundled, status, last_error, created_at, updated_at
+		FROM plugin_packages
+		WHERE id = $1
+	`, pluginID)
+	record, err := scanPluginPackage(row)
+	if err != nil {
+		return pluginmodel.PackageRecord{}, err
+	}
+	return record, nil
+}
+
+func (s *PostgresStore) UpdatePluginPackageStatus(ctx context.Context, pluginID, status, lastError string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE plugin_packages
+		SET status = $2, last_error = $3, updated_at = NOW()
+		WHERE id = $1
+	`, pluginID, status, lastError)
+	if err != nil {
+		return fmt.Errorf("update plugin package status: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) ListPluginReleases(ctx context.Context, pluginID string) ([]pluginmodel.ReleaseRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT plugin_id, version, schema_version, manifest_json, path, status, checksum,
+		       validation_error, official, bundled, created_at, updated_at, validated_at, activated_at
+		FROM plugin_releases
+		WHERE plugin_id = $1
+		ORDER BY created_at DESC, version DESC
+	`, pluginID)
+	if err != nil {
+		return nil, fmt.Errorf("list plugin releases: %w", err)
+	}
+	defer rows.Close()
+	var records []pluginmodel.ReleaseRecord
+	for rows.Next() {
+		record, err := scanPluginRelease(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+func (s *PostgresStore) GetPluginRelease(ctx context.Context, pluginID, version string) (pluginmodel.ReleaseRecord, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT plugin_id, version, schema_version, manifest_json, path, status, checksum,
+		       validation_error, official, bundled, created_at, updated_at, validated_at, activated_at
+		FROM plugin_releases
+		WHERE plugin_id = $1 AND version = $2
+	`, pluginID, version)
+	record, err := scanPluginRelease(row)
+	if err != nil {
+		return pluginmodel.ReleaseRecord{}, err
+	}
+	return record, nil
+}
+
+func (s *PostgresStore) UpdatePluginReleaseStatus(ctx context.Context, pluginID, version, status, validationError string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE plugin_releases
+		SET status = $3,
+		    validation_error = $4,
+		    validated_at = CASE WHEN $3 = 'validated' THEN NOW() ELSE validated_at END,
+		    activated_at = CASE WHEN $3 = 'active' THEN NOW() ELSE activated_at END,
+		    updated_at = NOW()
+		WHERE plugin_id = $1 AND version = $2
+	`, pluginID, version, status, validationError)
+	if err != nil {
+		return fmt.Errorf("update plugin release status: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) SetActivePluginVersion(ctx context.Context, pluginID, version, generationID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO plugin_active_versions(plugin_id, version, generation_id, updated_at)
+		VALUES ($1, $2, $3, NOW())
+		ON CONFLICT(plugin_id) DO UPDATE SET
+			version=excluded.version,
+			generation_id=excluded.generation_id,
+			updated_at=excluded.updated_at
+	`, pluginID, version, generationID)
+	if err != nil {
+		return fmt.Errorf("set active plugin version: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetActivePluginVersions(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT plugin_id, version FROM plugin_active_versions`)
+	if err != nil {
+		return nil, fmt.Errorf("get active plugin versions: %w", err)
+	}
+	defer rows.Close()
+	versions := map[string]string{}
+	for rows.Next() {
+		var pluginID, version string
+		if err := rows.Scan(&pluginID, &version); err != nil {
+			return nil, err
+		}
+		versions[pluginID] = version
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return versions, nil
+}
+
+func (s *PostgresStore) InsertPluginGeneration(ctx context.Context, record pluginmodel.GenerationRecord) error {
+	return insertPluginGeneration(ctx, s.db, record)
+}
+
+func insertPluginGeneration(ctx context.Context, exec sqlExecutor, record pluginmodel.GenerationRecord) error {
+	activeJSON, err := json.Marshal(record.ActiveVersions)
+	if err != nil {
+		return fmt.Errorf("marshal plugin generation active versions: %w", err)
+	}
+	capabilitiesJSON, err := json.Marshal(record.Capabilities)
+	if err != nil {
+		return fmt.Errorf("marshal plugin generation capabilities: %w", err)
+	}
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = time.Now()
+	}
+	_, err = exec.ExecContext(ctx, `
+			INSERT INTO plugin_generations (
+				generation_id, status, active_versions_json, capabilities_json, created_at, retired_at
+			) VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6)
+		ON CONFLICT(generation_id) DO NOTHING
+	`, record.ID, record.Status, string(activeJSON), string(capabilitiesJSON), record.CreatedAt, record.RetiredAt)
+	if err != nil {
+		return fmt.Errorf("insert plugin generation: %w", err)
+	}
+	_, err = exec.ExecContext(ctx, `
+		INSERT INTO plugin_generation_refs(generation_id, ref_count, last_released_at, updated_at)
+		VALUES ($1, 0, NOW(), NOW())
+		ON CONFLICT(generation_id) DO NOTHING
+	`, record.ID)
+	if err != nil {
+		return fmt.Errorf("insert plugin generation refs: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) AcquirePluginGeneration(ctx context.Context, generationID string) error {
+	generationID = strings.TrimSpace(generationID)
+	if generationID == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO plugin_generation_refs(generation_id, ref_count, updated_at)
+		VALUES ($1, 1, NOW())
+		ON CONFLICT(generation_id) DO UPDATE
+		SET ref_count = plugin_generation_refs.ref_count + 1,
+		    updated_at = NOW()
+	`, generationID)
+	if err != nil {
+		return fmt.Errorf("acquire plugin generation %s: %w", generationID, err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) ReleasePluginGeneration(ctx context.Context, generationID string) error {
+	generationID = strings.TrimSpace(generationID)
+	if generationID == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE plugin_generation_refs
+		SET ref_count = GREATEST(ref_count - 1, 0),
+		    last_released_at = CASE WHEN ref_count <= 1 THEN NOW() ELSE last_released_at END,
+		    updated_at = NOW()
+		WHERE generation_id = $1
+	`, generationID)
+	if err != nil {
+		return fmt.Errorf("release plugin generation %s: %w", generationID, err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) PluginReleaseProtected(ctx context.Context, pluginID, version string, retention time.Duration) (bool, error) {
+	if strings.TrimSpace(pluginID) == "" || strings.TrimSpace(version) == "" {
+		return true, nil
+	}
+	if retention < 0 {
+		retention = 0
+	}
+	cutoff := time.Now().Add(-retention)
+	var protected bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM plugin_generations g
+			JOIN plugin_generation_refs r ON r.generation_id = g.generation_id
+			WHERE g.active_versions_json ->> $1 = $2
+			  AND (r.ref_count > 0 OR r.last_released_at IS NULL OR r.last_released_at > $3)
+		)
+	`, pluginID, version, cutoff).Scan(&protected)
+	if err != nil {
+		return false, fmt.Errorf("check plugin release protection %s@%s: %w", pluginID, version, err)
+	}
+	return protected, nil
+}
+
+func (s *PostgresStore) InsertPluginEvent(ctx context.Context, record pluginmodel.EventRecord) error {
+	return insertPluginEvent(ctx, s.db, record)
+}
+
+func insertPluginEvent(ctx context.Context, exec sqlExecutor, record pluginmodel.EventRecord) error {
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = time.Now()
+	}
+	_, err := exec.ExecContext(ctx, `
+			INSERT INTO plugin_events(plugin_id, version, action, status, message, generation_id, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`, record.PluginID, record.Version, record.Action, record.Status, record.Message, record.GenerationID, record.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("insert plugin event: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) CommitPluginGeneration(ctx context.Context, commit pluginmodel.GenerationCommit) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin plugin generation commit: %w", err)
+	}
+	defer tx.Rollback()
+
+	if commit.SetActiveVersion {
+		if err := setActivePluginVersionCAS(ctx, tx, commit.PackageID, commit.ExpectedActiveVersion, commit.ActiveVersion, commit.Generation.ID); err != nil {
+			return err
+		}
+	}
+	if commit.PackageID != "" && commit.PackageStatus != "" {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE plugin_packages
+			SET status = $2, last_error = $3, updated_at = NOW()
+			WHERE id = $1
+		`, commit.PackageID, commit.PackageStatus, commit.PackageLastError); err != nil {
+			return fmt.Errorf("update plugin package status: %w", err)
+		}
+	}
+	if commit.DrainingVersion != "" && commit.DrainingVersion != commit.ActiveReleaseVersion {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE plugin_releases
+			SET status = 'draining', validation_error = '', updated_at = NOW()
+			WHERE plugin_id = $1 AND version = $2
+		`, commit.PackageID, commit.DrainingVersion); err != nil {
+			return fmt.Errorf("mark plugin release draining: %w", err)
+		}
+	}
+	if commit.ActiveReleaseVersion != "" {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE plugin_releases
+			SET status = 'active', validation_error = '', activated_at = NOW(), updated_at = NOW()
+			WHERE plugin_id = $1 AND version = $2
+		`, commit.PackageID, commit.ActiveReleaseVersion); err != nil {
+			return fmt.Errorf("mark plugin release active: %w", err)
+		}
+	}
+	if err := insertPluginGeneration(ctx, tx, commit.Generation); err != nil {
+		return err
+	}
+	if commit.Event.Action != "" {
+		if commit.Event.GenerationID == "" {
+			commit.Event.GenerationID = commit.Generation.ID
+		}
+		if err := insertPluginEvent(ctx, tx, commit.Event); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit plugin generation: %w", err)
+	}
+	return nil
+}
+
+func setActivePluginVersionCAS(ctx context.Context, exec sqlExecutor, pluginID, expectedVersion, version, generationID string) error {
+	var affected int
+	err := exec.QueryRowContext(ctx, `
+		WITH changed AS (
+			INSERT INTO plugin_active_versions(plugin_id, version, generation_id, updated_at)
+			VALUES ($1, $3, $4, NOW())
+			ON CONFLICT(plugin_id) DO UPDATE SET
+				version = EXCLUDED.version,
+				generation_id = EXCLUDED.generation_id,
+				updated_at = EXCLUDED.updated_at
+			WHERE plugin_active_versions.version = $2
+			RETURNING 1
+		)
+		SELECT COUNT(*) FROM changed
+	`, pluginID, expectedVersion, version, generationID).Scan(&affected)
+	if err != nil {
+		return fmt.Errorf("cas active plugin version: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("active plugin version changed for %s", pluginID)
+	}
+	return nil
 }
 
 func (s *PostgresStore) init() error {
@@ -1389,6 +1791,37 @@ func scanTaskDependency(scanner scanner) (config.TaskDependency, error) {
 		}
 	}
 	return dep, nil
+}
+
+func scanPluginPackage(scanner scanner) (pluginmodel.PackageRecord, error) {
+	var record pluginmodel.PackageRecord
+	if err := scanner.Scan(
+		&record.ID, &record.Name, &record.Description, &record.Author, &record.Homepage,
+		&record.Official, &record.Bundled, &record.Status, &record.LastError,
+		&record.CreatedAt, &record.UpdatedAt,
+	); err != nil {
+		return pluginmodel.PackageRecord{}, fmt.Errorf("scan plugin package: %w", err)
+	}
+	return record, nil
+}
+
+func scanPluginRelease(scanner scanner) (pluginmodel.ReleaseRecord, error) {
+	var record pluginmodel.ReleaseRecord
+	var manifestJSON []byte
+	if err := scanner.Scan(
+		&record.PluginID, &record.Version, &record.SchemaVersion, &manifestJSON,
+		&record.Path, &record.Status, &record.Checksum, &record.ValidationError,
+		&record.Official, &record.Bundled, &record.CreatedAt, &record.UpdatedAt,
+		&record.ValidatedAt, &record.ActivatedAt,
+	); err != nil {
+		return pluginmodel.ReleaseRecord{}, fmt.Errorf("scan plugin release: %w", err)
+	}
+	if len(manifestJSON) > 0 {
+		if err := json.Unmarshal(manifestJSON, &record.Manifest); err != nil {
+			return pluginmodel.ReleaseRecord{}, fmt.Errorf("unmarshal plugin manifest: %w", err)
+		}
+	}
+	return record, nil
 }
 
 func marshalJSONBytes(v any) ([]byte, error) {

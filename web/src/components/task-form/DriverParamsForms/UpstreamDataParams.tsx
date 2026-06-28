@@ -3,8 +3,8 @@ import { Form, Input, Select, Button, Space, Tooltip, Typography, Spin, Collapse
 import type { FormInstance } from 'antd';
 import { MinusCircleOutlined, PlusOutlined, QuestionCircleOutlined } from '@ant-design/icons';
 import JsonFieldPicker from '../../JsonFieldPicker';
-import { fetchTaskDefinitions, fetchTaskSample } from '../../../api/client';
-import type { TaskDefinition, SampleResponse } from '../../../api/types';
+import { fetchPluginCapabilities, fetchTaskDefinitions, fetchTaskSample } from '../../../api/client';
+import type { PluginCapability, PluginSchemaField, TaskDefinition, SampleResponse } from '../../../api/types';
 import { useWatchedFormValue } from '../useWatchedFormValue';
 
 const { Text } = Typography;
@@ -19,6 +19,7 @@ const sourceOptions: SourceOption[] = [
   { value: 'payload', label: 'Payload — 上游任务返回的 JSON 数据体', description: '上游任务执行后存储的原始 JSON 数据（如 HTTP 响应体）' },
   { value: 'summary', label: 'Summary — 上游任务的摘要字段', description: '上游任务自己定义的摘要信息（如 status_code、response_time 等）' },
   { value: 'record', label: 'Record — 上游任务的运行记录', description: '上游任务的运行元数据：duration_ms, check_status, run_id, task_id, trigger_type 等' },
+  { value: 'data', label: 'Data — 插件数据源 JSON', description: '插件数据源返回的 JSON 数据对象' },
   { value: 'artifact:payload', label: 'Artifact:Payload — 上游产物（payload）', description: '上游任务存储的 payload 产物文件内容' },
   { value: 'artifact:stdout', label: 'Artifact:Stdout — 上游标准输出', description: '上游任务的标准输出产物' },
   { value: 'artifact:stderr', label: 'Artifact:Stderr — 上游标准错误', description: '上游任务的标准错误输出产物' },
@@ -46,12 +47,12 @@ const UpstreamDataParams = ({ form }: { form?: FormInstance }) => {
   const trigger = useWatchedFormValue<string>(form, 'trigger');
   const watchTaskId = useWatchedFormValue<string>(form, 'watch_task_id');
   const dependencies = useWatchedFormValue<Array<{ upstream_task_id?: string; source_key?: string }>>(form, 'dependencies') || [];
-  const dataSources = useWatchedFormValue<Array<{ key?: string; task_id?: string }>>(form, ['params', 'data_sources']) || [];
+  const dataSources = useWatchedFormValue<Array<{ key?: string; task_id?: string; type?: string; alias?: string }>>(form, ['params', 'data_sources']) || [];
   const extractExprs = useWatchedFormValue<Array<{ source_key?: string; source?: string }>>(form, ['params', 'extract_exprs']) || [];
   const defaultDependencyTaskId = dependencies?.find((dep) => dep.upstream_task_id)?.upstream_task_id;
   const singleLockedDependency = dependencies?.length === 1 ? dependencies[0] : undefined;
   const defaultSourceKey = extractExprs?.find((expr) => expr.source_key)?.source_key || '';
-  const selectedDataSourceTaskId = dataSources?.find((source) => source.key === defaultSourceKey)?.task_id;
+  const selectedDataSourceTaskId = dataSources?.find((source) => !source.type && source.key === defaultSourceKey)?.task_id;
   const selectedDependencyTaskId = dependencies?.find((dep) => dep.source_key === defaultSourceKey)?.upstream_task_id;
   const resolvedTaskId = selectedDataSourceTaskId || selectedDependencyTaskId || sourceTaskId || defaultDependencyTaskId || (trigger === 'on_run' ? watchTaskId : null) || null;
   const sourceKeyOptions = [
@@ -59,12 +60,20 @@ const UpstreamDataParams = ({ form }: { form?: FormInstance }) => {
       .filter((dep) => dep.source_key && dep.upstream_task_id)
       .map((dep) => ({ value: dep.source_key!, label: `${dep.source_key} (${dep.upstream_task_id})` })),
     ...(dataSources || [])
-      .filter((source) => source.key && source.task_id)
+      .filter((source) => !source.type && source.key && source.task_id)
       .map((source) => ({ value: source.key!, label: `${source.key} (${source.task_id})` })),
+    ...(dataSources || [])
+      .filter((source) => source.type && (source.alias || source.key || source.type))
+      .map((source) => {
+        const key = source.alias || source.key || source.type!
+        return { value: key, label: `${key} (${source.type})` }
+      }),
   ]
 
   const [taskDefs, setTaskDefs] = useState<TaskDefinition[]>([]);
   const [taskDefsLoading, setTaskDefsLoading] = useState(false);
+  const [pluginDataSources, setPluginDataSources] = useState<PluginCapability[]>([]);
+  const [pluginCapabilitiesByName, setPluginCapabilitiesByName] = useState<Record<string, PluginCapability>>({});
 
   useEffect(() => {
     setTaskDefsLoading(true);
@@ -73,6 +82,21 @@ const UpstreamDataParams = ({ form }: { form?: FormInstance }) => {
       .catch(() => {})
       .finally(() => setTaskDefsLoading(false));
   }, []);
+
+  useEffect(() => {
+    fetchPluginCapabilities('data_source')
+      .then((caps) => {
+        const enabled = caps.filter((cap) => cap.enabled)
+        const byName: Record<string, PluginCapability> = {}
+        for (const cap of enabled) byName[cap.name] = cap
+        setPluginDataSources(enabled)
+        setPluginCapabilitiesByName(byName)
+      })
+      .catch(() => {
+        setPluginDataSources([])
+        setPluginCapabilitiesByName({})
+      })
+  }, [])
 
   const [previewData, setPreviewData] = useState<Record<string, SampleResponse | null>>({})
   const [previewLoading, setPreviewLoading] = useState(false)
@@ -161,30 +185,103 @@ const UpstreamDataParams = ({ form }: { form?: FormInstance }) => {
               <Space key={key} align="baseline" style={{ display: 'flex', marginBottom: 8, flexWrap: 'wrap' }}>
                 <Form.Item
                   {...restField}
-                  name={[name, 'key']}
-                  label="Key"
-                  rules={[{ required: true, message: '请输入数据源 Key' }]}
-                >
-                  <Input placeholder="如 upstream_a" style={{ width: 150 }} />
-                </Form.Item>
-                <Form.Item
-                  {...restField}
-                  name={[name, 'task_id']}
-                  label="上游任务"
-                  rules={[{ required: true, message: '请选择上游任务' }]}
+                  name={[name, 'type']}
+                  label="类型"
                 >
                   <Select
-                    loading={taskDefsLoading}
-                    notFoundContent={taskDefsLoading ? <Spin size="small" /> : '没有启用的任务'}
-                    placeholder="选择上游任务"
-                    options={taskDefs.map((d) => ({
-                      value: d.task_id,
-                      label: `${d.name} (${d.task_id})`,
+                    allowClear
+                    placeholder="上游任务"
+                    style={{ width: 180 }}
+                    options={pluginDataSources.map((cap) => ({
+                      value: cap.name,
+                      label: cap.title || `${cap.name}${cap.protocol ? ` (${cap.protocol})` : ''}`,
                     }))}
                     showSearch
                     optionFilterProp="label"
-                    style={{ width: 260 }}
                   />
+                </Form.Item>
+
+                <Form.Item noStyle shouldUpdate={(prev, cur) => {
+                  const prevType = prev.params?.data_sources?.[name]?.type
+                  const curType = cur.params?.data_sources?.[name]?.type
+                  return prevType !== curType
+                }}>
+                  {({ getFieldValue }) => {
+                    const dsType = getFieldValue(['params', 'data_sources', name, 'type'])
+                    if (dsType) {
+                      const capability = pluginCapabilitiesByName[dsType]
+                      return (
+                        <>
+                          <Form.Item
+                            {...restField}
+                            name={[name, 'alias']}
+                            label="Alias"
+                            rules={[{ required: true, message: '请输入别名' }]}
+                          >
+                            <Input placeholder="如 inventory" style={{ width: 150 }} />
+                          </Form.Item>
+                          {capability?.schema && Object.keys(capability.schema).length > 0 ? (
+                            <Space wrap align="baseline">
+                              {Object.entries(capability.schema).map(([field, schema]) => (
+                                <PluginSchemaConfigField
+                                  key={field}
+                                  field={field}
+                                  schema={schema}
+                                  name={name}
+                                  restField={restField}
+                                />
+                              ))}
+                            </Space>
+                          ) : null}
+                          <Form.Item
+                            {...restField}
+                            name={[name, 'on_error']}
+                            initialValue="fail"
+                            label="失败策略"
+                          >
+                            <Select
+                              style={{ width: 100 }}
+                              options={[
+                                { value: 'fail', label: '失败' },
+                                { value: 'skip', label: '跳过' },
+                              ]}
+                            />
+                          </Form.Item>
+                        </>
+                      )
+                    }
+                    return (
+                      <>
+                        <Form.Item
+                          {...restField}
+                          name={[name, 'key']}
+                          label="Key"
+                          rules={[{ required: true, message: '请输入数据源 Key' }]}
+                        >
+                          <Input placeholder="如 upstream_a" style={{ width: 150 }} />
+                        </Form.Item>
+                        <Form.Item
+                          {...restField}
+                          name={[name, 'task_id']}
+                          label="上游任务"
+                          rules={[{ required: true, message: '请选择上游任务' }]}
+                        >
+                          <Select
+                            loading={taskDefsLoading}
+                            notFoundContent={taskDefsLoading ? <Spin size="small" /> : '没有启用的任务'}
+                            placeholder="选择上游任务"
+                            options={taskDefs.map((d) => ({
+                              value: d.task_id,
+                              label: `${d.name} (${d.task_id})`,
+                            }))}
+                            showSearch
+                            optionFilterProp="label"
+                            style={{ width: 260 }}
+                          />
+                        </Form.Item>
+                      </>
+                    )
+                  }}
                 </Form.Item>
                 <MinusCircleOutlined onClick={() => remove(name)} style={{ color: '#ff4d4f' }} />
               </Space>
@@ -433,5 +530,51 @@ const UpstreamDataParams = ({ form }: { form?: FormInstance }) => {
     </>
   );
 };
+
+function PluginSchemaConfigField({
+  field,
+  schema,
+  name,
+  restField,
+}: {
+  field: string
+  schema: PluginSchemaField
+  name: number
+  restField: Record<string, unknown>
+}) {
+  const rules = schema.required ? [{ required: true, message: `需填 ${field}` }] : undefined
+  const commonProps = {
+    ...restField,
+    name: [name, 'config', field],
+    rules,
+    style: { marginBottom: 0 },
+  }
+  if (schema.type === 'object' || schema.type === 'array') {
+    return (
+      <Form.Item
+        {...commonProps}
+        getValueFromEvent={(event) => {
+          const raw = event.target.value.trim()
+          if (!raw) return undefined
+          try {
+            return JSON.parse(raw)
+          } catch {
+            return event.target.value
+          }
+        }}
+        getValueProps={(value) => ({
+          value: value && typeof value === 'object' ? JSON.stringify(value, null, 2) : value,
+        })}
+      >
+        <Input.TextArea rows={1} placeholder={schema.description || field} style={{ width: 220 }} />
+      </Form.Item>
+    )
+  }
+  return (
+    <Form.Item {...commonProps}>
+      <Input placeholder={schema.description || field} style={{ width: 180 }} />
+    </Form.Item>
+  )
+}
 
 export default UpstreamDataParams;

@@ -1,8 +1,16 @@
+import { useEffect, useState } from 'react'
 import { Form, Input, Select, Button, Space, Tooltip } from 'antd'
 import { MinusCircleOutlined, PlusOutlined, QuestionCircleOutlined } from '@ant-design/icons'
 import type { FormInstance } from 'antd'
+import { fetchPluginCapabilities } from '../../../api/client'
+import type { PluginCapability, PluginSchemaField } from '../../../api/types'
 
-const DATA_SOURCE_TYPE_OPTIONS = [
+interface DataSourceOption {
+  value: string
+  label: string
+}
+
+const DATA_SOURCE_TYPE_OPTIONS: DataSourceOption[] = [
   { value: 'upstream_output', label: '上游任务输出' },
   { value: 'run_context', label: '触发上下文' },
   { value: 'run_history', label: '运行历史' },
@@ -11,8 +19,62 @@ const DATA_SOURCE_TYPE_OPTIONS = [
 ]
 
 export default function AIAnalyzeParams(_props: { form?: FormInstance }) {
+  const [dataSourceOptions, setDataSourceOptions] = useState(DATA_SOURCE_TYPE_OPTIONS)
+  const [capabilitiesByName, setCapabilitiesByName] = useState<Record<string, PluginCapability>>({})
+  const [outputWriterOptions, setOutputWriterOptions] = useState([
+    { value: 'summary', label: 'Summary' },
+    { value: 'findings', label: 'Findings' },
+    { value: 'artifact', label: 'Artifact' },
+  ])
+  const [outputCapabilitiesByName, setOutputCapabilitiesByName] = useState<Record<string, PluginCapability>>({})
   const promptHint = `可用模板变量: {{.DataSources.<别名>.<字段>}}
 辅助函数: {{json .}}, {{table . "col1" "col2"}}, {{len .}}, {{avg . "field"}}, {{failures .}}`
+
+  useEffect(() => {
+    Promise.all([
+      fetchPluginCapabilities('ai_data_source'),
+      fetchPluginCapabilities('data_source'),
+    ])
+      .then(([aiCaps, dataSourceCaps]) => {
+        const defaults = new Map(DATA_SOURCE_TYPE_OPTIONS.map((item) => [item.value, item]))
+        const seen = new Set<string>()
+        const capMap: Record<string, PluginCapability> = {}
+        const next = [...aiCaps, ...dataSourceCaps]
+          .filter((cap) => cap.enabled)
+          .filter((cap) => {
+            if (seen.has(cap.name)) return false
+            seen.add(cap.name)
+            return true
+          })
+          .map((cap) => ({
+            value: cap.name,
+            label: cap.title || defaults.get(cap.name)?.label || `${cap.name}${cap.protocol ? ` (${cap.protocol})` : ''}`,
+          }))
+        for (const cap of [...aiCaps, ...dataSourceCaps]) {
+          if (cap.enabled) capMap[cap.name] = cap
+        }
+        if (next.length > 0) setDataSourceOptions(next)
+        setCapabilitiesByName(capMap)
+      })
+      .catch(() => setDataSourceOptions(DATA_SOURCE_TYPE_OPTIONS))
+  }, [])
+
+  useEffect(() => {
+    fetchPluginCapabilities('output_writer')
+      .then((caps) => {
+        const defaults = new Map(outputWriterOptions.map((item) => [item.value, item]))
+        const enabled = caps.filter((cap) => cap.enabled)
+        const byName: Record<string, PluginCapability> = {}
+        const next = enabled.map((cap) => {
+          byName[cap.name] = cap
+          return { value: cap.name, label: cap.title || defaults.get(cap.name)?.label || cap.name }
+        })
+        if (next.length > 0) setOutputWriterOptions(next)
+        setOutputCapabilitiesByName(byName)
+      })
+      .catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   return (
     <>
@@ -47,7 +109,7 @@ export default function AIAnalyzeParams(_props: { form?: FormInstance }) {
                     <Select
                       placeholder="类型"
                       style={{ width: 140 }}
-                      options={DATA_SOURCE_TYPE_OPTIONS}
+                      options={dataSourceOptions}
                     />
                   </Form.Item>
 
@@ -104,6 +166,23 @@ export default function AIAnalyzeParams(_props: { form?: FormInstance }) {
                               ]} />
                             </Form.Item>
                           </>
+                        )
+                      }
+
+                      const capability = capabilitiesByName[dsType]
+                      if (capability?.schema && Object.keys(capability.schema).length > 0) {
+                        return (
+                          <Space wrap align="baseline">
+                            {Object.entries(capability.schema).map(([field, schema]) => (
+                              <SchemaConfigField
+                                key={field}
+                                field={field}
+                                schema={schema}
+                                name={name}
+                                restField={restField}
+                              />
+                            ))}
+                          </Space>
                         )
                       }
                       
@@ -174,19 +253,43 @@ export default function AIAnalyzeParams(_props: { form?: FormInstance }) {
                   >
                     <Select
                       style={{ width: 120 }}
-                      options={[
-                        { value: 'summary', label: 'Summary' },
-                        { value: 'findings', label: 'Findings' },
-                        { value: 'artifact', label: 'Artifact' },
-                      ]}
+                      options={outputWriterOptions}
                     />
                   </Form.Item>
-                  <Form.Item
-                    {...restField}
-                    name={[name, 'config', 'field']}
-                    style={{ marginBottom: 0 }}
-                  >
-                    <Input placeholder="字段名，如 ai_analysis" style={{ width: 200 }} />
+                  <Form.Item noStyle shouldUpdate={(prev, cur) => {
+                    const prevType = prev.params?.outputs?.[name]?.type
+                    const curType = cur.params?.outputs?.[name]?.type
+                    return prevType !== curType
+                  }}>
+                    {({ getFieldValue }) => {
+                      const outputType = getFieldValue(['params', 'outputs', name, 'type'])
+                      const capability = outputCapabilitiesByName[outputType]
+                      if (capability?.schema && Object.keys(capability.schema).length > 0) {
+                        return (
+                          <Space wrap align="baseline">
+                            {Object.entries(capability.schema).map(([field, schema]) => (
+                              <SchemaConfigField
+                                key={field}
+                                field={field}
+                                schema={schema}
+                                name={name}
+                                restField={restField}
+                                root="outputs"
+                              />
+                            ))}
+                          </Space>
+                        )
+                      }
+                      return (
+                        <Form.Item
+                          {...restField}
+                          name={[name, 'config', 'field']}
+                          style={{ marginBottom: 0 }}
+                        >
+                          <Input placeholder="字段名，如 ai_analysis" style={{ width: 200 }} />
+                        </Form.Item>
+                      )
+                    }}
                   </Form.Item>
                   <MinusCircleOutlined onClick={() => remove(name)} />
                 </Space>
@@ -201,5 +304,53 @@ export default function AIAnalyzeParams(_props: { form?: FormInstance }) {
         </Form.List>
       </Form.Item>
     </>
+  )
+}
+
+function SchemaConfigField({
+  field,
+  schema,
+  name,
+  restField,
+  root = 'data_sources',
+}: {
+  field: string
+  schema: PluginSchemaField
+  name: number
+  restField: Record<string, unknown>
+  root?: 'data_sources' | 'outputs'
+}) {
+  const rules = schema.required ? [{ required: true, message: `需填 ${field}` }] : undefined
+  const commonProps = {
+    ...restField,
+    name: root === 'outputs' ? [name, 'config', field] : [name, 'config', field],
+    rules,
+    style: { marginBottom: 0 },
+  }
+  if (schema.type === 'object' || schema.type === 'array') {
+    return (
+      <Form.Item
+        {...commonProps}
+        getValueFromEvent={(event) => {
+          const raw = event.target.value.trim()
+          if (!raw) return undefined
+          try {
+            return JSON.parse(raw)
+          } catch {
+            return event.target.value
+          }
+        }}
+        getValueProps={(value) => ({
+          value: value && typeof value === 'object' ? JSON.stringify(value, null, 2) : value,
+        })}
+      >
+        <Input.TextArea rows={1} placeholder={schema.description || field} style={{ width: 220 }} />
+      </Form.Item>
+    )
+  }
+  return (
+    <Form.Item {...commonProps}>
+      <Input placeholder={schema.description || field} style={{ width: 180 }} />
+    </Form.Item>
   )
 }

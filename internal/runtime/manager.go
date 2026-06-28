@@ -15,6 +15,8 @@ import (
 
 	"pulseops/internal/config"
 	"pulseops/internal/ctxkey"
+	"pulseops/internal/evaluator"
+	"pulseops/internal/pluginhook"
 	"pulseops/internal/store"
 	"pulseops/internal/task"
 	"pulseops/internal/trace"
@@ -29,6 +31,8 @@ type Manager struct {
 	store   store.Repository
 	tracer  *trace.Manager
 	metrics *Metrics
+	plugins PluginGenerationProvider
+	hooks   *pluginhook.Manager
 
 	mu       sync.RWMutex
 	tasks    map[string]*managedTask
@@ -36,9 +40,84 @@ type Manager struct {
 	depTasks map[string][]managedDependency
 }
 
+type PluginGenerationProvider interface {
+	ActiveDriverRegistry() (*task.Registry, string)
+	ActiveEvaluatorRegistry() (*evaluator.Registry, string)
+}
+
+type pluginGenerationRefStore interface {
+	AcquirePluginGeneration(ctx context.Context, generationID string) error
+	ReleasePluginGeneration(ctx context.Context, generationID string) error
+}
+
 type managedDependency struct {
 	task      *managedTask
 	condition string
+}
+
+func (m *Manager) SetPluginGenerationProvider(provider PluginGenerationProvider) {
+	m.mu.Lock()
+	m.plugins = provider
+	m.mu.Unlock()
+}
+
+func (m *Manager) SetHookDispatcher(hooks *pluginhook.Manager) {
+	m.mu.Lock()
+	m.hooks = hooks
+	m.mu.Unlock()
+}
+
+func (m *Manager) activeDriverRegistry() (*task.Registry, string) {
+	m.mu.RLock()
+	provider := m.plugins
+	fallback := m.drivers
+	m.mu.RUnlock()
+	if provider != nil {
+		if drivers, generationID := provider.ActiveDriverRegistry(); drivers != nil {
+			return drivers, generationID
+		}
+	}
+	return fallback, ""
+}
+
+func (m *Manager) activeEvaluatorRegistry() *evaluator.Registry {
+	m.mu.RLock()
+	provider := m.plugins
+	fallback := m.deps.Evaluators
+	m.mu.RUnlock()
+	if provider != nil {
+		if evaluators, _ := provider.ActiveEvaluatorRegistry(); evaluators != nil {
+			return evaluators
+		}
+	}
+	return fallback
+}
+
+func (m *Manager) acquirePluginGeneration(ctx context.Context, generationID string) (func(), error) {
+	if generationID == "" {
+		return func() {}, nil
+	}
+	refs, ok := m.store.(pluginGenerationRefStore)
+	if !ok {
+		return func() {}, nil
+	}
+	if err := refs.AcquirePluginGeneration(ctx, generationID); err != nil {
+		return nil, err
+	}
+	return func() {
+		if err := refs.ReleasePluginGeneration(context.Background(), generationID); err != nil {
+			m.logger.ErrorContext(context.Background(), "release plugin generation failed", "generation_id", generationID, "err", err)
+		}
+	}, nil
+}
+
+func (m *Manager) driverAvailable(kind string) (string, bool) {
+	drivers, generationID := m.activeDriverRegistry()
+	if drivers == nil {
+		return generationID, false
+	}
+	_, ok := drivers.Get(kind)
+	return generationID, ok
 }
 
 func NewManager(
@@ -171,7 +250,8 @@ func (m *Manager) ValidateTaskDefinition(def config.TaskDefinition) (config.Task
 	if err := spec.ValidateBasic(); err != nil {
 		return spec, fmt.Errorf("validate task %s: %w", def.TaskID, err)
 	}
-	driver, ok := m.drivers.Get(spec.Kind)
+	drivers, _ := m.activeDriverRegistry()
+	driver, ok := drivers.Get(spec.Kind)
 	if !ok {
 		return spec, fmt.Errorf("task %s driver %q not found", spec.ID, spec.Kind)
 	}
@@ -186,11 +266,19 @@ func (m *Manager) TestRunTaskDefinition(ctx context.Context, def config.TaskDefi
 	if err != nil {
 		return store.RunRecord{}, err
 	}
-	driver, ok := m.drivers.Get(spec.Kind)
+	drivers, generationID := m.activeDriverRegistry()
+	driver, ok := drivers.Get(spec.Kind)
 	if !ok {
 		return store.RunRecord{}, fmt.Errorf("task %s driver %q not found", spec.ID, spec.Kind)
 	}
-	runner, err := driver.NewRunner(spec, m.deps)
+	releaseGeneration, err := m.acquirePluginGeneration(context.Background(), generationID)
+	if err != nil {
+		return store.RunRecord{}, err
+	}
+	defer releaseGeneration()
+	deps := m.deps
+	deps.Evaluators = m.activeEvaluatorRegistry()
+	runner, err := driver.NewRunner(spec, deps)
 	if err != nil {
 		return store.RunRecord{}, fmt.Errorf("build runner for %s: %w", spec.ID, err)
 	}
@@ -226,27 +314,29 @@ func (m *Manager) TestRunTaskDefinition(ctx context.Context, def config.TaskDefi
 		runStatus = "failed"
 	}
 	return store.RunRecord{
-		RunID:        runID,
-		TaskID:       spec.ID,
-		TaskKind:     spec.Kind,
-		TriggerType:  "dry_run",
-		RunStatus:    runStatus,
-		CheckStatus:  checkStatus,
-		StartedAt:    startedAt,
-		EndedAt:      endedAt,
-		DurationMS:   endedAt.Sub(startedAt).Milliseconds(),
-		ErrorMessage: errString(runErr),
-		Summary:      cloneAnyMap(result.Summary),
-		Payload:      payload,
-		Findings:     cloneFindings(result.Findings),
-		Stdout:       result.Stdout,
-		Stderr:       result.Stderr,
-		Labels:       cloneLabels(spec.Labels),
+		RunID:              runID,
+		TaskID:             spec.ID,
+		TaskKind:           spec.Kind,
+		PluginGenerationID: generationID,
+		TriggerType:        "dry_run",
+		RunStatus:          runStatus,
+		CheckStatus:        checkStatus,
+		StartedAt:          startedAt,
+		EndedAt:            endedAt,
+		DurationMS:         endedAt.Sub(startedAt).Milliseconds(),
+		ErrorMessage:       errString(runErr),
+		Summary:            cloneAnyMap(result.Summary),
+		Payload:            payload,
+		Findings:           cloneFindings(result.Findings),
+		Stdout:             result.Stdout,
+		Stderr:             result.Stderr,
+		Labels:             cloneLabels(spec.Labels),
 	}, runErr
 }
 
 func (m *Manager) UpsertTaskSpec(ctx context.Context, spec config.TaskSpec) error {
-	driver, ok := m.drivers.Get(spec.Kind)
+	drivers, _ := m.activeDriverRegistry()
+	driver, ok := drivers.Get(spec.Kind)
 	if !ok {
 		return fmt.Errorf("task %s driver %q not found", spec.ID, spec.Kind)
 	}
@@ -304,6 +394,12 @@ func (m *Manager) UpsertTaskSpec(ctx context.Context, spec config.TaskSpec) erro
 	for _, item := range toStop {
 		item.stop()
 	}
+	m.dispatchHook(ctx, pluginhook.Event{
+		Type:     pluginhook.EventTaskUpdated,
+		TaskID:   spec.ID,
+		TaskKind: spec.Kind,
+		Task:     &spec,
+	})
 	return nil
 }
 
@@ -412,6 +508,33 @@ func (m *Manager) ListTasks() []store.TaskState {
 	return items
 }
 
+func (m *Manager) RefreshPluginStatus(ctx context.Context) {
+	m.mu.RLock()
+	tasks := make([]*managedTask, 0, len(m.tasks))
+	for _, entry := range m.tasks {
+		tasks = append(tasks, entry)
+	}
+	m.mu.RUnlock()
+	for _, entry := range tasks {
+		_, ok := m.driverAvailable(entry.spec.Kind)
+		entry.updateState(ctx, func(state *store.TaskState) {
+			if !ok {
+				state.Status = "plugin_disabled"
+				state.NextRunAt = nil
+				state.LastReloadError = fmt.Sprintf("driver %q is disabled by plugin catalog", entry.spec.Kind)
+				return
+			}
+			if state.Status == "plugin_disabled" {
+				state.LastReloadError = ""
+				state.Status = initialStatus(entry.spec.Enabled, entry.schedule != nil)
+				if entry.spec.Enabled && entry.schedule != nil {
+					state.Status = "running"
+				}
+			}
+		})
+	}
+}
+
 func (m *Manager) Close() {
 	m.mu.Lock()
 	tasks := make([]*managedTask, 0, len(m.tasks))
@@ -446,12 +569,24 @@ func (m *Manager) triggerDepTasks(sourceTaskID string, record store.RunRecord) {
 	}
 }
 
+func (m *Manager) dispatchHook(ctx context.Context, event pluginhook.Event) {
+	m.mu.RLock()
+	hooks := m.hooks
+	m.mu.RUnlock()
+	if hooks != nil {
+		hooks.Dispatch(ctx, event)
+	}
+}
+
 func (m *Manager) newManagedTask(spec config.TaskSpec) (*managedTask, error) {
-	driver, ok := m.drivers.Get(spec.Kind)
+	drivers, _ := m.activeDriverRegistry()
+	driver, ok := drivers.Get(spec.Kind)
 	if !ok {
 		return nil, fmt.Errorf("driver %q not found", spec.Kind)
 	}
-	runner, err := driver.NewRunner(spec, m.deps)
+	deps := m.deps
+	deps.Evaluators = m.activeEvaluatorRegistry()
+	runner, err := driver.NewRunner(spec, deps)
 	if err != nil {
 		return nil, fmt.Errorf("build runner for %s: %w", spec.ID, err)
 	}
@@ -733,6 +868,104 @@ func matchCondition(condition string, record store.RunRecord) bool {
 func (t *managedTask) execute(trigger task.TriggerType, sourceRecord *store.RunRecord) (store.RunRecord, error) {
 	runID := fmt.Sprintf("%s-%d", t.spec.ID, time.Now().UnixNano())
 	startedAt := time.Now()
+	drivers, generationID := t.manager.activeDriverRegistry()
+	driver, driverOK := drivers.Get(t.spec.Kind)
+	if !driverOK {
+		endedAt := time.Now()
+		err := fmt.Errorf("plugin disabled: driver %q is not available in active generation %s", t.spec.Kind, generationID)
+		record := store.RunRecord{
+			RunID:              runID,
+			TaskID:             t.spec.ID,
+			TaskKind:           t.spec.Kind,
+			PluginGenerationID: generationID,
+			TriggerType:        string(trigger),
+			RunStatus:          "failed",
+			CheckStatus:        "fail",
+			StartedAt:          startedAt,
+			EndedAt:            endedAt,
+			DurationMS:         endedAt.Sub(startedAt).Milliseconds(),
+			ErrorMessage:       err.Error(),
+			Summary:            map[string]any{"plugin_status": "disabled"},
+			Labels:             cloneLabels(t.spec.Labels),
+		}
+		t.updateState(context.Background(), func(state *store.TaskState) {
+			state.LastRunAt = &endedAt
+			state.LastRunStatus = record.RunStatus
+			state.LastCheckStatus = record.CheckStatus
+			state.LastError = record.ErrorMessage
+			state.LastDurationMS = record.DurationMS
+			state.Status = "plugin_disabled"
+		})
+		processed, traceErr := t.manager.tracer.Process(context.Background(), t.spec.Trace, record)
+		if traceErr != nil {
+			t.manager.logger.ErrorContext(context.Background(), "process trace record failed", "task_id", t.spec.ID, "err", traceErr)
+		}
+		t.manager.tracer.Dispatch(context.Background(), t.spec.Trace, processed)
+		return processed, err
+	}
+	deps := t.manager.deps
+	deps.Evaluators = t.manager.activeEvaluatorRegistry()
+	releaseGeneration, refErr := t.manager.acquirePluginGeneration(context.Background(), generationID)
+	if refErr != nil {
+		endedAt := time.Now()
+		record := store.RunRecord{
+			RunID:              runID,
+			TaskID:             t.spec.ID,
+			TaskKind:           t.spec.Kind,
+			PluginGenerationID: generationID,
+			TriggerType:        string(trigger),
+			RunStatus:          "failed",
+			CheckStatus:        "fail",
+			StartedAt:          startedAt,
+			EndedAt:            endedAt,
+			DurationMS:         endedAt.Sub(startedAt).Milliseconds(),
+			ErrorMessage:       refErr.Error(),
+			Labels:             cloneLabels(t.spec.Labels),
+		}
+		t.updateState(context.Background(), func(state *store.TaskState) {
+			state.LastRunAt = &endedAt
+			state.LastRunStatus = record.RunStatus
+			state.LastCheckStatus = record.CheckStatus
+			state.LastError = record.ErrorMessage
+			state.LastDurationMS = record.DurationMS
+			state.Status = "reload_failed"
+		})
+		return record, refErr
+	}
+	defer releaseGeneration()
+	runner, buildErr := driver.NewRunner(t.spec, deps)
+	if buildErr != nil {
+		endedAt := time.Now()
+		err := fmt.Errorf("build runner for %s: %w", t.spec.ID, buildErr)
+		record := store.RunRecord{
+			RunID:              runID,
+			TaskID:             t.spec.ID,
+			TaskKind:           t.spec.Kind,
+			PluginGenerationID: generationID,
+			TriggerType:        string(trigger),
+			RunStatus:          "failed",
+			CheckStatus:        "fail",
+			StartedAt:          startedAt,
+			EndedAt:            endedAt,
+			DurationMS:         endedAt.Sub(startedAt).Milliseconds(),
+			ErrorMessage:       err.Error(),
+			Labels:             cloneLabels(t.spec.Labels),
+		}
+		t.updateState(context.Background(), func(state *store.TaskState) {
+			state.LastRunAt = &endedAt
+			state.LastRunStatus = record.RunStatus
+			state.LastCheckStatus = record.CheckStatus
+			state.LastError = record.ErrorMessage
+			state.LastDurationMS = record.DurationMS
+			state.Status = "reload_failed"
+		})
+		processed, traceErr := t.manager.tracer.Process(context.Background(), t.spec.Trace, record)
+		if traceErr != nil {
+			t.manager.logger.ErrorContext(context.Background(), "process trace record failed", "task_id", t.spec.ID, "err", traceErr)
+		}
+		t.manager.tracer.Dispatch(context.Background(), t.spec.Trace, processed)
+		return processed, err
+	}
 	runCtx := t.ctx
 	cancel := func() {}
 	if t.spec.Timeout.Duration > 0 {
@@ -745,7 +978,17 @@ func (t *managedTask) execute(trigger task.TriggerType, sourceRecord *store.RunR
 		runCtx = context.WithValue(runCtx, ctxkey.CtxTriggerRun, sourceRecord)
 	}
 
-	result, err := t.runner.Run(runCtx, trigger)
+	t.manager.dispatchHook(runCtx, pluginhook.Event{
+		Type:         pluginhook.EventRunStarted,
+		GenerationID: generationID,
+		TaskID:       t.spec.ID,
+		TaskKind:     t.spec.Kind,
+		RunID:        runID,
+		TriggerType:  string(trigger),
+		Task:         &t.spec,
+	})
+
+	result, err := runner.Run(runCtx, trigger)
 	endedAt := time.Now()
 	runStatus := "success"
 	if err != nil {
@@ -768,22 +1011,23 @@ func (t *managedTask) execute(trigger task.TriggerType, sourceRecord *store.RunR
 		runStatus = "failed"
 	}
 	record := store.RunRecord{
-		RunID:        runID,
-		TaskID:       t.spec.ID,
-		TaskKind:     t.spec.Kind,
-		TriggerType:  string(trigger),
-		RunStatus:    runStatus,
-		CheckStatus:  checkStatus,
-		StartedAt:    startedAt,
-		EndedAt:      endedAt,
-		DurationMS:   endedAt.Sub(startedAt).Milliseconds(),
-		ErrorMessage: errString(err),
-		Summary:      cloneAnyMap(result.Summary),
-		Payload:      payload,
-		Findings:     cloneFindings(result.Findings),
-		Stdout:       result.Stdout,
-		Stderr:       result.Stderr,
-		Labels:       cloneLabels(t.spec.Labels),
+		RunID:              runID,
+		TaskID:             t.spec.ID,
+		TaskKind:           t.spec.Kind,
+		PluginGenerationID: generationID,
+		TriggerType:        string(trigger),
+		RunStatus:          runStatus,
+		CheckStatus:        checkStatus,
+		StartedAt:          startedAt,
+		EndedAt:            endedAt,
+		DurationMS:         endedAt.Sub(startedAt).Milliseconds(),
+		ErrorMessage:       errString(err),
+		Summary:            cloneAnyMap(result.Summary),
+		Payload:            payload,
+		Findings:           cloneFindings(result.Findings),
+		Stdout:             result.Stdout,
+		Stderr:             result.Stderr,
+		Labels:             cloneLabels(t.spec.Labels),
 	}
 
 	t.updateState(context.Background(), func(state *store.TaskState) {
@@ -814,6 +1058,16 @@ func (t *managedTask) execute(trigger task.TriggerType, sourceRecord *store.RunR
 		t.manager.logger.ErrorContext(context.Background(), "process trace record failed", "task_id", t.spec.ID, "err", traceErr)
 	}
 	t.manager.tracer.Dispatch(context.Background(), t.spec.Trace, processed)
+	t.manager.dispatchHook(context.Background(), pluginhook.Event{
+		Type:         pluginhook.EventRunFinished,
+		GenerationID: generationID,
+		TaskID:       t.spec.ID,
+		TaskKind:     t.spec.Kind,
+		RunID:        runID,
+		TriggerType:  string(trigger),
+		Task:         &t.spec,
+		Record:       &processed,
+	})
 
 	t.manager.triggerDepTasks(t.spec.ID, processed)
 

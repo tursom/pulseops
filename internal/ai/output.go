@@ -63,6 +63,16 @@ func (r *OutputWriterRegistry) Get(name string) (OutputWriter, bool) {
 	return w, ok
 }
 
+func (r *OutputWriterRegistry) Snapshot() map[string]OutputWriter {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]OutputWriter, len(r.writers))
+	for name, writer := range r.writers {
+		out[name] = writer
+	}
+	return out
+}
+
 func (r *OutputWriterRegistry) registerBuiltins() {
 	r.Register("summary", &summaryWriter{})
 	r.Register("findings", &findingsWriter{})

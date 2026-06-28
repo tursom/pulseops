@@ -20,6 +20,7 @@ import (
 
 	"pulseops/internal/appctx"
 	"pulseops/internal/config"
+	pluginmgr "pulseops/internal/plugin"
 	"pulseops/internal/store"
 	"pulseops/internal/task"
 )
@@ -39,6 +40,26 @@ type TaskManager interface {
 type SettingsReloader interface {
 	ReloadSinks(entries []config.SinkEntry, store *store.PostgresStore) error
 	SetMaxPayloadBytes(maxPayloadBytes int)
+}
+
+type PluginManager interface {
+	Catalog(ctx context.Context) (pluginmgr.Catalog, error)
+	Plugin(ctx context.Context, pluginID string) (pluginmgr.PluginView, error)
+	Releases(ctx context.Context, pluginID string) ([]pluginmgr.ReleaseRecord, error)
+	Capabilities(ctx context.Context, typ, kind string) ([]pluginmgr.Capability, error)
+	Reload(ctx context.Context) (pluginmgr.Catalog, error)
+	ValidateRelease(ctx context.Context, pluginID, version string) (pluginmgr.ReleaseRecord, error)
+	ActivateRelease(ctx context.Context, pluginID, version string) (pluginmgr.Catalog, error)
+	DisablePlugin(ctx context.Context, pluginID string) (pluginmgr.Catalog, error)
+	EnablePlugin(ctx context.Context, pluginID string) (pluginmgr.Catalog, error)
+	RollbackPlugin(ctx context.Context, pluginID string) (pluginmgr.Catalog, error)
+	GC(ctx context.Context) (pluginmgr.Catalog, error)
+	ExportRelease(ctx context.Context, pluginID, version string) (string, []byte, error)
+	ImportRelease(ctx context.Context, reader io.Reader) (pluginmgr.ReleaseRecord, error)
+}
+
+type PluginStatusRefresher interface {
+	RefreshPluginStatus(ctx context.Context)
 }
 
 type settingsResponse struct {
@@ -156,7 +177,7 @@ type taskValidationResponse struct {
 	Normalized any      `json:"normalized,omitempty"`
 }
 
-func Routes(staticDir string, manager TaskManager, repository store.Repository, artifactStore store.ArtifactStore, settingsReloader SettingsReloader, platform config.PlatformConfigSummary, logger *slog.Logger) http.Handler {
+func Routes(staticDir string, manager TaskManager, repository store.Repository, artifactStore store.ArtifactStore, settingsReloader SettingsReloader, pluginManager PluginManager, platform config.PlatformConfigSummary, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 
 	// API routes — register before static/file routes for specificity priority
@@ -184,6 +205,185 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 			return
 		}
 		writeJSON(w, http.StatusOK, updated)
+	})
+	mux.HandleFunc("GET /api/plugins", func(w http.ResponseWriter, r *http.Request) {
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		catalog, err := pluginManager.Catalog(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, catalog)
+	})
+	mux.HandleFunc("POST /api/plugins/reload", func(w http.ResponseWriter, r *http.Request) {
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		catalog, err := pluginManager.Reload(r.Context())
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, catalog)
+	})
+	mux.HandleFunc("POST /api/plugins/install", func(w http.ResponseWriter, r *http.Request) {
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		catalog, err := pluginManager.Reload(r.Context())
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, catalog)
+	})
+	mux.HandleFunc("POST /api/plugins/import", func(w http.ResponseWriter, r *http.Request) {
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		defer r.Body.Close()
+		release, err := pluginManager.ImportRelease(r.Context(), http.MaxBytesReader(w, r.Body, 128<<20))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, release)
+	})
+	mux.HandleFunc("POST /api/plugins/gc", func(w http.ResponseWriter, r *http.Request) {
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		catalog, err := pluginManager.GC(r.Context())
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, catalog)
+	})
+	mux.HandleFunc("GET /api/plugin-capabilities", func(w http.ResponseWriter, r *http.Request) {
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		caps, err := pluginManager.Capabilities(r.Context(), r.URL.Query().Get("type"), r.URL.Query().Get("kind"))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, caps)
+	})
+	mux.HandleFunc("GET /api/plugins/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		item, err := pluginManager.Plugin(r.Context(), r.PathValue("id"))
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "plugin not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, item)
+	})
+	mux.HandleFunc("GET /api/plugins/{id}/releases", func(w http.ResponseWriter, r *http.Request) {
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		releases, err := pluginManager.Releases(r.Context(), r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, releases)
+	})
+	mux.HandleFunc("POST /api/plugins/{id}/releases/{version}/validate", func(w http.ResponseWriter, r *http.Request) {
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		release, err := pluginManager.ValidateRelease(r.Context(), r.PathValue("id"), r.PathValue("version"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, release)
+	})
+	mux.HandleFunc("POST /api/plugins/{id}/releases/{version}/activate", func(w http.ResponseWriter, r *http.Request) {
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		catalog, err := pluginManager.ActivateRelease(r.Context(), r.PathValue("id"), r.PathValue("version"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		refreshPluginStatus(r.Context(), manager)
+		writeJSON(w, http.StatusOK, catalog)
+	})
+	mux.HandleFunc("GET /api/plugins/{id}/releases/{version}/export", func(w http.ResponseWriter, r *http.Request) {
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		filename, content, err := pluginManager.ExportRelease(r.Context(), r.PathValue("id"), r.PathValue("version"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ReplaceAll(filename, `"`, "")+`"`)
+		_, _ = w.Write(content)
+	})
+	mux.HandleFunc("POST /api/plugins/{id}/disable", func(w http.ResponseWriter, r *http.Request) {
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		catalog, err := pluginManager.DisablePlugin(r.Context(), r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		refreshPluginStatus(r.Context(), manager)
+		writeJSON(w, http.StatusOK, catalog)
+	})
+	mux.HandleFunc("POST /api/plugins/{id}/enable", func(w http.ResponseWriter, r *http.Request) {
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		catalog, err := pluginManager.EnablePlugin(r.Context(), r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		refreshPluginStatus(r.Context(), manager)
+		writeJSON(w, http.StatusOK, catalog)
+	})
+	mux.HandleFunc("POST /api/plugins/{id}/rollback", func(w http.ResponseWriter, r *http.Request) {
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		catalog, err := pluginManager.RollbackPlugin(r.Context(), r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		refreshPluginStatus(r.Context(), manager)
+		writeJSON(w, http.StatusOK, catalog)
 	})
 	mux.HandleFunc("GET /api/dashboard/summary", func(w http.ResponseWriter, r *http.Request) {
 		since := parseDurationQuery(r, "since", 24*time.Hour)
@@ -826,6 +1026,12 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func refreshPluginStatus(ctx context.Context, manager TaskManager) {
+	if refresher, ok := manager.(PluginStatusRefresher); ok {
+		refresher.RefreshPluginStatus(ctx)
+	}
 }
 
 var jsonMarshalerType = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
