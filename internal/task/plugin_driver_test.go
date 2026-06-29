@@ -150,3 +150,35 @@ func TestPluginDriverProcessCrashDoesNotPanic(t *testing.T) {
 		t.Fatalf("expected fail result on crash, got %#v", result)
 	}
 }
+
+func TestPluginDriverValidatesSchemaTypes(t *testing.T) {
+	t.Parallel()
+
+	capability := pluginmodel.Capability{
+		PluginID: "@test/external",
+		Name:     "external_check",
+		Runtime:  "http",
+		Schema: pluginmodel.Schema{
+			"target":    {Type: "string", Required: true},
+			"threshold": {Type: "number"},
+			"enabled":   {Type: "bool"},
+			"payload":   {Type: "object"},
+			"tags":      {Type: "array"},
+		},
+	}
+	err := validatePluginSchema(capability, map[string]any{
+		"target":    "steam",
+		"threshold": 3,
+		"enabled":   true,
+		"payload":   map[string]any{"region": "cn"},
+		"tags":      []any{"prod"},
+	})
+	if err != nil {
+		t.Fatalf("schema validation should pass: %v", err)
+	}
+
+	err = validatePluginSchema(capability, map[string]any{"target": 42})
+	if err == nil || err.Error() != "external_check params.target must be a string" {
+		t.Fatalf("expected schema type error, got %v", err)
+	}
+}

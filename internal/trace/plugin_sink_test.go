@@ -41,7 +41,7 @@ func TestManagerDispatchesPluginTraceSink(t *testing.T) {
 		Name:     "notify",
 		Runtime:  "http",
 		Endpoint: server.URL,
-	}}, config.PluginsConfig{}, server.Client())
+	}}, config.PluginsConfig{}, server.Client(), nil)
 	manager.Dispatch(context.Background(), config.TracePolicy{Level: "detail"}, store.RunRecord{
 		RunID:       "run-1",
 		TaskID:      "task-1",

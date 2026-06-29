@@ -7,11 +7,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"pulseops/internal/config"
+	"pulseops/internal/pluginconfig"
 	"pulseops/internal/pluginmodel"
 	"pulseops/internal/store"
 )
@@ -336,9 +338,482 @@ func TestUpstreamDataRunnerReadsPluginDataSourceAlias(t *testing.T) {
 	}
 }
 
+func TestUpstreamDataRunnerMergesPluginConfigRefsAndOverrides(t *testing.T) {
+	t.Parallel()
+
+	captured := make(chan map[string]any, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var envelope struct {
+			Config map[string]any `json:"config"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil {
+			t.Errorf("decode plugin envelope: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		captured <- envelope.Config
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":   true,
+			"data": map[string]any{"inventory": map[string]any{"count": 7}},
+		})
+	}))
+	defer server.Close()
+
+	repo := &sampleRepository{
+		pluginConfigInstances: map[string]pluginmodel.ConfigInstanceRecord{
+			"cfg-common": {
+				ID:       "cfg-common",
+				PluginID: "@test/source",
+				Scope:    "plugin",
+				Status:   "active",
+			},
+			"cfg-inventory": {
+				ID:           "cfg-inventory",
+				PluginID:     "@test/source",
+				CapabilityID: "@test/source:data_source:inventory_source",
+				Scope:        "capability",
+				Status:       "active",
+			},
+		},
+		pluginConfigVersions: map[string]pluginmodel.ConfigVersionRecord{
+			"cfg-common": {
+				InstanceID: "cfg-common",
+				Version:    1,
+				Status:     "active",
+				Values: map[string]any{
+					"endpoint": "inventory.service:9090",
+					"timeout":  3,
+				},
+			},
+			"cfg-inventory": {
+				InstanceID: "cfg-inventory",
+				Version:    2,
+				Status:     "active",
+				Values: map[string]any{
+					"service": "yym.inventory.v1.InventoryService",
+					"method":  "GetInventory",
+					"request": map[string]any{"user_id": "default"},
+				},
+			},
+		},
+	}
+	driver := NewUpstreamDataDriver(repo, nil, nil)
+	driver.SyncPluginDataSources([]pluginmodel.Capability{testInventoryCapability(server.URL)}, config.PluginsConfig{})
+
+	spec := config.TaskSpec{
+		ID:      "processor",
+		Kind:    "data_process",
+		Enabled: true,
+		Params: map[string]any{
+			"data_sources": []any{
+				map[string]any{
+					"type":                  "inventory_source",
+					"alias":                 "inventory",
+					"plugin_config_ref":     "cfg-common",
+					"capability_config_ref": "cfg-inventory",
+					"overrides": map[string]any{
+						"method":  "GetInventoryV2",
+						"request": map[string]any{"user_id": "42"},
+					},
+				},
+			},
+			"extract_exprs": []any{
+				map[string]any{"field": "inventory_count", "source_key": "inventory", "source": "data", "jq_expr": ".inventory.count"},
+			},
+		},
+	}
+	if err := driver.Validate(spec); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	runner, err := driver.NewRunner(spec, RunnerDeps{HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+	result, err := runner.Run(context.Background(), TriggerManual)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.Summary["inventory_count"] != float64(7) {
+		t.Fatalf("unexpected summary: %#v", result.Summary)
+	}
+	if result.PluginConfigVersions["cfg-common"] != 1 || result.PluginConfigVersions["cfg-inventory"] != 2 {
+		t.Fatalf("unexpected plugin config version trace: %#v", result.PluginConfigVersions)
+	}
+	if _, ok := result.PluginTaskOverrides["inventory"].(map[string]any); !ok {
+		t.Fatalf("expected inventory override trace, got %#v", result.PluginTaskOverrides)
+	}
+	got := <-captured
+	if got["schema_mode"] != "reflection" {
+		t.Fatalf("expected schema default, got %#v", got)
+	}
+	if got["endpoint"] != "inventory.service:9090" || got["service"] != "yym.inventory.v1.InventoryService" || got["method"] != "GetInventoryV2" {
+		t.Fatalf("unexpected merged config: %#v", got)
+	}
+	request, ok := got["request"].(map[string]any)
+	if !ok || request["user_id"] != "42" {
+		t.Fatalf("expected override request, got %#v", got["request"])
+	}
+}
+
+func TestUpstreamDataRunnerResolvesPluginConfigAssetsAndSecrets(t *testing.T) {
+	t.Parallel()
+
+	type capturedConfig struct {
+		Authorization string
+		ProtoContent  string
+		ProtoPath     string
+	}
+	captured := make(chan capturedConfig, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var envelope struct {
+			Config map[string]any `json:"config"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil {
+			t.Errorf("decode plugin envelope: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		protoPath, _ := envelope.Config["proto"].(string)
+		raw, err := os.ReadFile(protoPath)
+		if err != nil {
+			t.Errorf("read resolved proto file: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		authorization, _ := envelope.Config["authorization"].(string)
+		captured <- capturedConfig{
+			Authorization: authorization,
+			ProtoContent:  string(raw),
+			ProtoPath:     protoPath,
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":   true,
+			"data": map[string]any{"inventory": map[string]any{"count": 7}},
+		})
+	}))
+	defer server.Close()
+
+	ciphertext, encryptionMeta, err := pluginconfig.EncryptSecret("Bearer test-token")
+	if err != nil {
+		t.Fatalf("encrypt secret: %v", err)
+	}
+	repo := &sampleRepository{
+		pluginConfigInstances: map[string]pluginmodel.ConfigInstanceRecord{
+			"cfg-inventory": {
+				ID:           "cfg-inventory",
+				PluginID:     "@test/source",
+				CapabilityID: "@test/source:data_source:inventory_source",
+				Scope:        "capability",
+				Status:       "active",
+			},
+		},
+		pluginConfigVersions: map[string]pluginmodel.ConfigVersionRecord{
+			"cfg-inventory": {
+				InstanceID: "cfg-inventory",
+				Version:    2,
+				Status:     "active",
+				Values: map[string]any{
+					"service":       "yym.inventory.v1.InventoryService",
+					"method":        "GetInventory",
+					"request":       map[string]any{"user_id": "42"},
+					"proto":         map[string]any{"asset_id": "inventory-proto"},
+					"authorization": "sec-auth",
+				},
+			},
+		},
+		pluginAssets: map[string]pluginmodel.AssetRecord{
+			"inventory-proto": {
+				ID:            "inventory-proto",
+				PluginID:      "@test/source",
+				CapabilityID:  "@test/source:data_source:inventory_source",
+				Scope:         pluginmodel.AssetScopeCapabilityShared,
+				Kind:          "proto_files",
+				Status:        "active",
+				ActiveVersion: 1,
+			},
+		},
+		pluginAssetVersions: map[string]pluginmodel.AssetVersionRecord{
+			"inventory-proto": {
+				AssetID:    "inventory-proto",
+				Version:    1,
+				Status:     "active",
+				Filename:   "inventory.proto",
+				StorageURI: "s3://pulseops-artifacts/plugins/test-source/assets/inventory-proto/1/inventory.proto",
+			},
+		},
+		pluginSecrets: map[string]pluginmodel.SecretRecord{
+			"sec-auth": {
+				ID:     "sec-auth",
+				Status: "active",
+			},
+		},
+		pluginSecretValues: map[string]pluginmodel.SecretValueRecord{
+			"sec-auth": {
+				SecretID:       "sec-auth",
+				Ciphertext:     ciphertext,
+				EncryptionMeta: encryptionMeta,
+			},
+		},
+	}
+	artifacts := &sampleArtifactStore{
+		bodies: map[string]string{
+			"plugins/test-source/assets/inventory-proto/1/inventory.proto": `syntax = "proto3";`,
+		},
+	}
+	driver := NewUpstreamDataDriver(repo, artifacts, nil)
+	driver.SyncPluginDataSources([]pluginmodel.Capability{testInventoryCapability(server.URL)}, config.PluginsConfig{})
+
+	spec := config.TaskSpec{
+		ID:      "processor",
+		Kind:    "data_process",
+		Enabled: true,
+		Params: map[string]any{
+			"data_sources": []any{
+				map[string]any{
+					"type":                  "inventory_source",
+					"alias":                 "inventory",
+					"capability_config_ref": "cfg-inventory",
+				},
+			},
+			"extract_exprs": []any{
+				map[string]any{"field": "inventory_count", "source_key": "inventory", "source": "data", "jq_expr": ".inventory.count"},
+			},
+		},
+	}
+	if err := driver.Validate(spec); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	runner, err := driver.NewRunner(spec, RunnerDeps{HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+	result, err := runner.Run(context.Background(), TriggerManual)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.Summary["inventory_count"] != float64(7) {
+		t.Fatalf("unexpected summary: %#v", result.Summary)
+	}
+	if result.PluginConfigVersions["cfg-inventory"] != 2 {
+		t.Fatalf("unexpected plugin config version trace: %#v", result.PluginConfigVersions)
+	}
+	if result.PluginAssetVersions["inventory-proto"] != 1 {
+		t.Fatalf("unexpected plugin asset version trace: %#v", result.PluginAssetVersions)
+	}
+	got := <-captured
+	if got.Authorization != "Bearer test-token" || got.ProtoContent != `syntax = "proto3";` {
+		t.Fatalf("unexpected resolved config: %#v", got)
+	}
+	if _, err := os.Stat(got.ProtoPath); !os.IsNotExist(err) {
+		t.Fatalf("expected temp proto file to be cleaned up, stat error: %v", err)
+	}
+	if artifacts.gotKey != "plugins/test-source/assets/inventory-proto/1/inventory.proto" {
+		t.Fatalf("expected artifact key, got %q", artifacts.gotKey)
+	}
+}
+
+func TestUpstreamDataDriverRejectsNonOverridablePluginDataSourceOverride(t *testing.T) {
+	t.Parallel()
+
+	driver := NewUpstreamDataDriver(&sampleRepository{}, nil, nil)
+	driver.SyncPluginDataSources([]pluginmodel.Capability{testInventoryCapability("http://plugin.example.test")}, config.PluginsConfig{})
+	spec := config.TaskSpec{
+		ID:      "processor",
+		Kind:    "data_process",
+		Enabled: true,
+		Params: map[string]any{
+			"data_sources": []any{
+				map[string]any{
+					"type":  "inventory_source",
+					"alias": "inventory",
+					"overrides": map[string]any{
+						"service": "yym.inventory.v1.OtherService",
+					},
+				},
+			},
+			"extract_exprs": []any{
+				map[string]any{"field": "inventory_count", "source_key": "inventory", "source": "data", "jq_expr": ".inventory.count"},
+			},
+		},
+	}
+	err := driver.Validate(spec)
+	if err == nil || !strings.Contains(err.Error(), "config.service is not overridable") {
+		t.Fatalf("expected non-overridable override error, got %v", err)
+	}
+}
+
+func TestUpstreamDataDriverRejectsInvalidPluginDataSourceOverrideType(t *testing.T) {
+	t.Parallel()
+
+	driver := NewUpstreamDataDriver(&sampleRepository{}, nil, nil)
+	driver.SyncPluginDataSources([]pluginmodel.Capability{testInventoryCapability("http://plugin.example.test")}, config.PluginsConfig{})
+	spec := config.TaskSpec{
+		ID:      "processor",
+		Kind:    "data_process",
+		Enabled: true,
+		Params: map[string]any{
+			"data_sources": []any{
+				map[string]any{
+					"type":  "inventory_source",
+					"alias": "inventory",
+					"overrides": map[string]any{
+						"request": map[string]any{"user_id": 42},
+					},
+				},
+			},
+			"extract_exprs": []any{
+				map[string]any{"field": "inventory_count", "source_key": "inventory", "source": "data", "jq_expr": ".inventory.count"},
+			},
+		},
+	}
+	err := driver.Validate(spec)
+	if err == nil || !strings.Contains(err.Error(), "config.request.user_id must be a string") {
+		t.Fatalf("expected override type error, got %v", err)
+	}
+}
+
+func TestUpstreamDataDriverRejectsMissingPluginConfigRef(t *testing.T) {
+	t.Parallel()
+
+	driver := NewUpstreamDataDriver(&sampleRepository{}, nil, nil)
+	driver.SyncPluginDataSources([]pluginmodel.Capability{testInventoryCapability("http://plugin.example.test")}, config.PluginsConfig{})
+	spec := config.TaskSpec{
+		ID:      "processor",
+		Kind:    "data_process",
+		Enabled: true,
+		Params: map[string]any{
+			"data_sources": []any{
+				map[string]any{
+					"type":                  "inventory_source",
+					"alias":                 "inventory",
+					"capability_config_ref": "missing-config",
+				},
+			},
+			"extract_exprs": []any{
+				map[string]any{"field": "inventory_count", "source_key": "inventory", "source": "data", "jq_expr": ".inventory.count"},
+			},
+		},
+	}
+	err := driver.Validate(spec)
+	if err == nil || !strings.Contains(err.Error(), `load plugin config instance "missing-config"`) {
+		t.Fatalf("expected missing config ref error, got %v", err)
+	}
+}
+
+func TestUpstreamDataDriverRejectsDisallowedPluginConfigRef(t *testing.T) {
+	t.Parallel()
+
+	repo := &sampleRepository{
+		pluginConfigInstances: map[string]pluginmodel.ConfigInstanceRecord{
+			"cfg-common": {
+				ID:       "cfg-common",
+				PluginID: "@test/source",
+				Scope:    "plugin",
+				Status:   "active",
+			},
+		},
+		pluginConfigVersions: map[string]pluginmodel.ConfigVersionRecord{
+			"cfg-common": {
+				InstanceID: "cfg-common",
+				Version:    1,
+				Status:     "active",
+				Values:     map[string]any{"endpoint": "inventory.service:9090"},
+			},
+		},
+	}
+	capability := testInventoryCapability("http://plugin.example.test")
+	capability.Config.AllowPluginConfigRef = false
+	driver := NewUpstreamDataDriver(repo, nil, nil)
+	driver.SyncPluginDataSources([]pluginmodel.Capability{capability}, config.PluginsConfig{})
+	spec := config.TaskSpec{
+		ID:      "processor",
+		Kind:    "data_process",
+		Enabled: true,
+		Params: map[string]any{
+			"data_sources": []any{
+				map[string]any{
+					"type":              "inventory_source",
+					"alias":             "inventory",
+					"plugin_config_ref": "cfg-common",
+				},
+			},
+			"extract_exprs": []any{
+				map[string]any{"field": "inventory_count", "source_key": "inventory", "source": "data", "jq_expr": ".inventory.count"},
+			},
+		},
+	}
+	err := driver.Validate(spec)
+	if err == nil || !strings.Contains(err.Error(), "does not allow plugin_config_ref") {
+		t.Fatalf("expected disallowed plugin_config_ref error, got %v", err)
+	}
+}
+
+func testInventoryCapability(endpoint string) pluginmodel.Capability {
+	return pluginmodel.Capability{
+		ID:       "@test/source:data_source:inventory_source",
+		Type:     pluginmodel.CapabilityDataSource,
+		PluginID: "@test/source",
+		Name:     "inventory_source",
+		Runtime:  "http",
+		Endpoint: endpoint,
+		ConfigClasses: map[string]pluginmodel.ConfigClass{
+			"InventoryRequest": {
+				Fields: map[string]pluginmodel.ConfigField{
+					"user_id": {Type: "string", Required: true, Overridable: true},
+				},
+			},
+		},
+		Config: &pluginmodel.ConfigSchema{AllowPluginConfigRef: true, Fields: map[string]pluginmodel.ConfigField{
+			"schema_mode": {
+				Type:    "select",
+				Default: "reflection",
+				Options: []pluginmodel.ConfigOption{
+					{Value: "reflection"},
+					{Value: "proto_files"},
+				},
+			},
+			"endpoint": {
+				Type:        "string",
+				Overridable: false,
+			},
+			"timeout": {
+				Type:        "number",
+				Overridable: true,
+			},
+			"service": {
+				Type:        "string",
+				Overridable: false,
+			},
+			"method": {
+				Type:        "string",
+				Overridable: true,
+			},
+			"request": {
+				Type:        "object",
+				Class:       "InventoryRequest",
+				Overridable: true,
+			},
+			"proto": {
+				Type:       "file",
+				AssetKind:  "proto_files",
+				AssetScope: pluginmodel.AssetScopeCapabilityShared,
+			},
+			"authorization": {
+				Type: "secret",
+			},
+		}},
+	}
+}
+
 type sampleRepository struct {
-	runs       []store.RunRecord
-	runsByTask map[string][]store.RunRecord
+	runs                  []store.RunRecord
+	runsByTask            map[string][]store.RunRecord
+	pluginConfigInstances map[string]pluginmodel.ConfigInstanceRecord
+	pluginConfigVersions  map[string]pluginmodel.ConfigVersionRecord
+	pluginAssets          map[string]pluginmodel.AssetRecord
+	pluginAssetVersions   map[string]pluginmodel.AssetVersionRecord
+	pluginSecrets         map[string]pluginmodel.SecretRecord
+	pluginSecretValues    map[string]pluginmodel.SecretValueRecord
 }
 
 func (r *sampleRepository) Close() error { return nil }
@@ -448,6 +923,49 @@ func (r *sampleRepository) UpsertTaskDependency(context.Context, config.TaskDepe
 	return config.TaskDependency{}, nil
 }
 func (r *sampleRepository) DeleteTaskDependency(context.Context, string) error { return nil }
+func (r *sampleRepository) GetPluginConfigInstance(_ context.Context, instanceID string) (pluginmodel.ConfigInstanceRecord, error) {
+	if record, ok := r.pluginConfigInstances[instanceID]; ok {
+		return record, nil
+	}
+	return pluginmodel.ConfigInstanceRecord{}, sql.ErrNoRows
+}
+func (r *sampleRepository) GetActivePluginConfigVersion(_ context.Context, instanceID string) (pluginmodel.ConfigVersionRecord, error) {
+	if record, ok := r.pluginConfigVersions[instanceID]; ok {
+		return record, nil
+	}
+	return pluginmodel.ConfigVersionRecord{}, sql.ErrNoRows
+}
+func (r *sampleRepository) GetPluginAsset(_ context.Context, assetID string) (pluginmodel.AssetRecord, error) {
+	if record, ok := r.pluginAssets[assetID]; ok {
+		return record, nil
+	}
+	return pluginmodel.AssetRecord{}, sql.ErrNoRows
+}
+func (r *sampleRepository) GetPluginAssetVersion(_ context.Context, assetID string, version int) (pluginmodel.AssetVersionRecord, error) {
+	record, ok := r.pluginAssetVersions[assetID]
+	if !ok || record.Version != version {
+		return pluginmodel.AssetVersionRecord{}, sql.ErrNoRows
+	}
+	return record, nil
+}
+func (r *sampleRepository) GetActivePluginAssetVersion(_ context.Context, assetID string) (pluginmodel.AssetVersionRecord, error) {
+	if record, ok := r.pluginAssetVersions[assetID]; ok {
+		return record, nil
+	}
+	return pluginmodel.AssetVersionRecord{}, sql.ErrNoRows
+}
+func (r *sampleRepository) GetPluginSecret(_ context.Context, secretID string) (pluginmodel.SecretRecord, error) {
+	if record, ok := r.pluginSecrets[secretID]; ok {
+		return record, nil
+	}
+	return pluginmodel.SecretRecord{}, sql.ErrNoRows
+}
+func (r *sampleRepository) GetPluginSecretValue(_ context.Context, secretID string) (pluginmodel.SecretValueRecord, error) {
+	if record, ok := r.pluginSecretValues[secretID]; ok {
+		return record, nil
+	}
+	return pluginmodel.SecretValueRecord{}, sql.ErrNoRows
+}
 
 type sampleArtifactStore struct {
 	bodies map[string]string

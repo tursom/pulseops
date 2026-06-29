@@ -4,6 +4,7 @@ import { MinusCircleOutlined, PlusOutlined, QuestionCircleOutlined } from '@ant-
 import type { FormInstance } from 'antd'
 import { fetchPluginCapabilities } from '../../../api/client'
 import type { PluginCapability, PluginSchemaField } from '../../../api/types'
+import PluginConfigRefFields from './PluginConfigRefFields'
 
 interface DataSourceOption {
   value: string
@@ -170,6 +171,17 @@ export default function AIAnalyzeParams(_props: { form?: FormInstance }) {
                       }
 
                       const capability = capabilitiesByName[dsType]
+                      if (capability?.config) {
+                        return (
+                          <PluginConfigRefFields
+                            capability={capability}
+                            name={name}
+                            restField={restField}
+                            absoluteBaseName={['params', 'data_sources', name]}
+                          />
+                        )
+                      }
+
                       if (capability?.schema && Object.keys(capability.schema).length > 0) {
                         return (
                           <Space wrap align="baseline">

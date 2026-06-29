@@ -38,6 +38,9 @@ export interface RunRecord {
   summary?: Record<string, unknown>
   payload?: unknown
   artifact_refs?: ArtifactRef[]
+  plugin_config_versions?: Record<string, unknown>
+  plugin_asset_versions?: Record<string, unknown>
+  plugin_task_overrides?: Record<string, unknown>
   findings?: Finding[]
   stdout?: string
   stderr?: string
@@ -252,6 +255,78 @@ export interface PluginSchemaField {
   description?: string
 }
 
+export interface PluginConfigOption {
+  value: unknown
+  label?: string
+}
+
+export interface PluginConfigValidation {
+  min?: number
+  max?: number
+  step?: number
+  min_len?: number
+  max_len?: number
+  pattern?: string
+}
+
+export interface PluginConfigCondition {
+  field: string
+  op: 'eq' | 'ne' | 'in' | 'not_in' | 'exists' | 'empty' | string
+  value?: unknown
+}
+
+export interface PluginConfigUI {
+  group?: string
+  label?: string
+  widget?: string
+  order?: number
+  placeholder?: string
+  help?: string
+  advanced?: boolean
+  collapsed?: boolean
+  visible_when?: PluginConfigCondition
+}
+
+export interface PluginConfigField {
+  type: string
+  class?: string
+  required?: boolean
+  default?: unknown
+  overridable?: boolean
+  description?: string
+  options?: PluginConfigOption[]
+  items?: PluginConfigField
+  asset_kind?: string
+  asset_scope?: 'plugin_shared' | 'capability_shared' | 'config_instance' | string
+  accept?: string[]
+  validation?: PluginConfigValidation
+  ui?: PluginConfigUI
+}
+
+export interface PluginConfigClass {
+  title?: string
+  description?: string
+  fields?: Record<string, PluginConfigField>
+}
+
+export interface PluginConfigSchema {
+  title?: string
+  description?: string
+  validate_action?: string
+  allow_plugin_config_ref?: boolean
+  fields?: Record<string, PluginConfigField>
+}
+
+export interface PluginConfigSchemaResponse {
+  plugin_id: string
+  plugin_version?: string
+  capability_id?: string
+  capability_type?: string
+  capability_name?: string
+  config_classes?: Record<string, PluginConfigClass>
+  config?: PluginConfigSchema
+}
+
 export interface PluginCapability {
   id: string
   type: string
@@ -276,6 +351,8 @@ export interface PluginCapability {
   defaults?: Record<string, unknown>
   params?: Record<string, unknown>
   schema?: Record<string, PluginSchemaField>
+  config_classes?: Record<string, PluginConfigClass>
+  config?: PluginConfigSchema
 }
 
 export interface PluginManifest {
@@ -344,6 +421,98 @@ export interface PluginCatalog {
   }
   plugins: PluginView[]
   errors?: string[]
+}
+
+export interface PluginConfigInstance {
+  id: string
+  plugin_id: string
+  capability_id?: string
+  capability_type?: string
+  capability_name?: string
+  scope: string
+  title?: string
+  status: string
+  active_version?: number
+  created_at: string
+  updated_at: string
+}
+
+export interface PluginConfigVersion {
+  instance_id: string
+  version: number
+  status: string
+  values?: Record<string, unknown>
+  validation_error?: string
+  created_at: string
+  updated_at: string
+  validated_at?: string
+  activated_at?: string
+  retired_at?: string
+}
+
+export interface PluginConfigInstanceDetail {
+  instance: PluginConfigInstance
+  versions: PluginConfigVersion[]
+  active?: PluginConfigVersion
+}
+
+export interface PluginConfigValidationResponse {
+  valid: boolean
+  errors?: string[]
+  version: PluginConfigVersion
+}
+
+export interface PluginConfigEvent {
+  id: number
+  resource_type: string
+  resource_id: string
+  plugin_id?: string
+  action: string
+  status: string
+  message?: string
+  created_at: string
+}
+
+export interface PluginAsset {
+  id: string
+  plugin_id: string
+  capability_id?: string
+  config_instance_id?: string
+  scope: 'plugin_shared' | 'capability_shared' | 'config_instance' | string
+  kind: string
+  title?: string
+  status: string
+  active_version?: number
+  created_at: string
+  updated_at: string
+}
+
+export interface PluginAssetVersion {
+  asset_id: string
+  version: number
+  status: string
+  filename?: string
+  content_type?: string
+  storage_uri?: string
+  size_bytes?: number
+  checksum?: string
+  validation_error?: string
+  created_at: string
+  updated_at: string
+  validated_at?: string
+  activated_at?: string
+  retired_at?: string
+}
+
+export interface PluginSecret {
+  id: string
+  plugin_id: string
+  scope?: string
+  title?: string
+  masked: string
+  status: string
+  created_at: string
+  updated_at: string
 }
 
 // === Alert policy (nested in TaskDefinition) ===

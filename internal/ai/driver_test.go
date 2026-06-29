@@ -489,7 +489,7 @@ func TestDriverSyncPluginDataSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new runner: %v", err)
 	}
-	prompt, err := r.(*runner).renderPrompt(context.Background(), task.TriggerManual)
+	prompt, _, err := r.(*runner).renderPrompt(context.Background(), task.TriggerManual)
 	if err != nil {
 		t.Fatalf("render prompt: %v", err)
 	}
@@ -498,19 +498,111 @@ func TestDriverSyncPluginDataSource(t *testing.T) {
 	}
 }
 
-func TestDriverRejectsManifestCABIEntrypointEscape(t *testing.T) {
+func TestDriverPluginDataSourceConfigRefsAndOverrides(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var envelope struct {
+			Config map[string]any `json:"config"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil {
+			t.Errorf("decode plugin envelope: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"data": map[string]any{
+				"method": envelope.Config["method"],
+			},
+		})
+	}))
+	defer server.Close()
+
+	repo := &aiPluginConfigRepo{
+		instances: map[string]pluginmodel.ConfigInstanceRecord{
+			"cfg-inventory": {
+				ID:           "cfg-inventory",
+				PluginID:     "@test/source",
+				CapabilityID: "@test/source:data_source:plugin_inventory",
+				Scope:        "capability",
+				Status:       "active",
+			},
+		},
+		versions: map[string]pluginmodel.ConfigVersionRecord{
+			"cfg-inventory": {
+				InstanceID: "cfg-inventory",
+				Version:    2,
+				Status:     "active",
+				Values: map[string]any{
+					"method": "GetInventory",
+				},
+			},
+		},
+	}
+	d := NewDriver(nil, repo, slog.Default())
+	d.SyncPluginDataSources([]pluginmodel.Capability{{
+		ID:       "@test/source:data_source:plugin_inventory",
+		Type:     pluginmodel.CapabilityDataSource,
+		PluginID: "@test/source",
+		Name:     "plugin_inventory",
+		Runtime:  "http",
+		Endpoint: server.URL,
+		Config: &pluginmodel.ConfigSchema{Fields: map[string]pluginmodel.ConfigField{
+			"method": {Type: "string", Overridable: true},
+		}},
+	}}, config.PluginsConfig{})
+
+	spec := config.TaskSpec{
+		ID:   "test",
+		Kind: "ai_analyze",
+		Params: map[string]any{
+			"data_sources": []any{map[string]any{
+				"type":                  "plugin_inventory",
+				"alias":                 "inventory",
+				"capability_config_ref": "cfg-inventory",
+				"overrides": map[string]any{
+					"method": "GetInventoryV2",
+				},
+			}},
+			"prompt": map[string]any{"text": "{{ .DataSources.inventory.method }}"},
+		},
+	}
+	if err := d.Validate(spec); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	taskRunner, err := d.NewRunner(spec, task.RunnerDeps{HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+	prompt, trace, err := taskRunner.(*runner).renderPrompt(context.Background(), task.TriggerManual)
+	if err != nil {
+		t.Fatalf("render prompt: %v", err)
+	}
+	if prompt != "GetInventoryV2" {
+		t.Fatalf("unexpected prompt: %s", prompt)
+	}
+	if trace.ConfigVersions["cfg-inventory"] != 2 {
+		t.Fatalf("unexpected config version trace: %#v", trace.ConfigVersions)
+	}
+	if _, ok := trace.TaskOverrides["inventory"].(map[string]any); !ok {
+		t.Fatalf("expected task override trace, got %#v", trace.TaskOverrides)
+	}
+}
+
+func TestDriverIgnoresManifestCABIDataSource(t *testing.T) {
 	t.Parallel()
 
 	driver := NewDriver(nil, nil, nil)
-	_, err := driver.loadManifestCABIDataSource(pluginmodel.Capability{
+	driver.SyncPluginCapabilities([]pluginmodel.Capability{{
 		Name:        "native_source",
 		Type:        pluginmodel.CapabilityAIDataSource,
 		Runtime:     "c_abi",
-		Entrypoint:  "../native.so",
+		Entrypoint:  "native.so",
 		ReleasePath: t.TempDir(),
-	})
-	if err == nil || !strings.Contains(err.Error(), "release path") {
-		t.Fatalf("expected release path error, got: %v", err)
+	}}, config.PluginsConfig{})
+	if _, ok := driver.sourceRegistry().Get("native_source"); ok {
+		t.Fatal("c_abi data source should not be registered")
 	}
 }
 
@@ -585,6 +677,26 @@ func (s *testStaticSource) Name() string { return "test_aliased" }
 
 func (s *testStaticSource) Fetch(ctx context.Context, spec DataSourceSpec, deps FetchDeps) (any, error) {
 	return s.data, nil
+}
+
+type aiPluginConfigRepo struct {
+	store.Repository
+	instances map[string]pluginmodel.ConfigInstanceRecord
+	versions  map[string]pluginmodel.ConfigVersionRecord
+}
+
+func (r *aiPluginConfigRepo) GetPluginConfigInstance(_ context.Context, instanceID string) (pluginmodel.ConfigInstanceRecord, error) {
+	if record, ok := r.instances[instanceID]; ok {
+		return record, nil
+	}
+	return pluginmodel.ConfigInstanceRecord{}, fmt.Errorf("plugin config instance %q not found", instanceID)
+}
+
+func (r *aiPluginConfigRepo) GetActivePluginConfigVersion(_ context.Context, instanceID string) (pluginmodel.ConfigVersionRecord, error) {
+	if record, ok := r.versions[instanceID]; ok {
+		return record, nil
+	}
+	return pluginmodel.ConfigVersionRecord{}, fmt.Errorf("active plugin config version %q not found", instanceID)
 }
 
 func TestRunnerRunID(t *testing.T) {

@@ -104,7 +104,7 @@ func (c *Client) Call(ctx context.Context, req Request, deps Deps) (Response, er
 		return Response{}, err
 	}
 	req.Config = ResolveSecretRefs(req.Config)
-	release, err := acquireLimiter(ctx, limiterKey(c.cap), c.cfg.MaxConcurrentCalls)
+	release, err := acquireCapabilityPool(ctx, c.cap, c.cfg.MaxConcurrentCalls)
 	if err != nil {
 		return Response{}, err
 	}
@@ -159,26 +159,189 @@ func resolveSecretValue(value any) any {
 
 var limiterRegistry sync.Map
 
-type limiter struct {
-	size int
-	ch   chan struct{}
+type runtimePool struct {
+	size         int
+	slots        chan struct{}
+	drainCh      chan struct{}
+	wg           sync.WaitGroup
+	mu           sync.Mutex
+	draining     bool
+	key          string
+	generationID string
+	pluginID     string
+	version      string
+	releasePath  string
+	capabilityID string
+	validation   bool
 }
 
 func acquireLimiter(ctx context.Context, key string, size int) (func(), error) {
+	return acquireRuntimePool(ctx, key, pluginmodel.Capability{}, size)
+}
+
+func acquireCapabilityPool(ctx context.Context, cap pluginmodel.Capability, size int) (func(), error) {
+	return acquireRuntimePool(ctx, limiterKey(cap), cap, size)
+}
+
+func acquireRuntimePool(ctx context.Context, key string, cap pluginmodel.Capability, size int) (func(), error) {
 	if size <= 0 {
 		size = 32
 	}
-	value, _ := limiterRegistry.LoadOrStore(key, &limiter{size: size, ch: make(chan struct{}, size)})
-	lim := value.(*limiter)
-	select {
-	case lim.ch <- struct{}{}:
-		return func() { <-lim.ch }, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	value, _ := limiterRegistry.LoadOrStore(key, newRuntimePool(key, cap, size))
+	pool := value.(*runtimePool)
+	return pool.acquire(ctx, key)
+}
+
+func newRuntimePool(key string, cap pluginmodel.Capability, size int) *runtimePool {
+	if size <= 0 {
+		size = 32
+	}
+	return &runtimePool{
+		size:         size,
+		slots:        make(chan struct{}, size),
+		drainCh:      make(chan struct{}),
+		key:          key,
+		generationID: cap.GenerationID,
+		pluginID:     cap.PluginID,
+		version:      cap.PluginVersion,
+		releasePath:  cap.ReleasePath,
+		capabilityID: capabilityKeyPart(cap),
+		validation:   strings.HasPrefix(cap.GenerationID, "validate:"),
 	}
 }
 
+func (p *runtimePool) acquire(ctx context.Context, key string) (func(), error) {
+	p.mu.Lock()
+	if p.draining {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("plugin runtime capability %s is draining and rejects new calls", key)
+	}
+	drainCh := p.drainCh
+	p.mu.Unlock()
+
+	select {
+	case p.slots <- struct{}{}:
+	case <-drainCh:
+		return nil, fmt.Errorf("plugin runtime capability %s is draining and rejects new calls", key)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	p.mu.Lock()
+	if p.draining {
+		p.mu.Unlock()
+		<-p.slots
+		return nil, fmt.Errorf("plugin runtime capability %s is draining and rejects new calls", key)
+	}
+	p.wg.Add(1)
+	p.mu.Unlock()
+	return p.release, nil
+}
+
+func (p *runtimePool) release() {
+	p.wg.Done()
+	<-p.slots
+}
+
+func (p *runtimePool) startDraining() {
+	p.mu.Lock()
+	if !p.draining {
+		p.draining = true
+		close(p.drainCh)
+	}
+	p.mu.Unlock()
+}
+
+func (p *runtimePool) waitDrained(ctx context.Context) error {
+	p.startDraining()
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func DrainCapabilities(caps []pluginmodel.Capability, maxConcurrentCalls int) {
+	for _, cap := range caps {
+		if !isExternalRuntime(cap.Runtime) {
+			continue
+		}
+		key := limiterKey(cap)
+		value, _ := limiterRegistry.LoadOrStore(key, newRuntimePool(key, cap, maxConcurrentCalls))
+		value.(*runtimePool).startDraining()
+	}
+}
+
+func WaitCapabilitiesDrained(ctx context.Context, caps []pluginmodel.Capability) error {
+	var errs []error
+	for _, cap := range caps {
+		if !isExternalRuntime(cap.Runtime) {
+			continue
+		}
+		if value, ok := limiterRegistry.Load(limiterKey(cap)); ok {
+			if err := value.(*runtimePool).waitDrained(ctx); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", capabilityKeyPart(cap), err))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func WaitReleaseDrained(ctx context.Context, pluginID, version, releasePath string) error {
+	var errs []error
+	limiterRegistry.Range(func(_, value any) bool {
+		pool := value.(*runtimePool)
+		if pool.validation {
+			return true
+		}
+		if pool.pluginID != pluginID || pool.version != version {
+			return true
+		}
+		if releasePath != "" && pool.releasePath != releasePath {
+			return true
+		}
+		if err := pool.waitDrained(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", pool.capabilityID, err))
+		}
+		return true
+	})
+	return errors.Join(errs...)
+}
+
+func resetPoolsForTest() {
+	limiterRegistry = sync.Map{}
+}
+
+func isExternalRuntime(runtime string) bool {
+	return runtime == "process" || runtime == "http" || runtime == "http_plugin"
+}
+
 func limiterKey(cap pluginmodel.Capability) string {
+	if cap.GenerationID != "" {
+		return cap.GenerationID + ":" + releaseKeyPart(cap) + ":" + capabilityKeyPart(cap)
+	}
+	if cap.ReleasePath != "" {
+		return releaseKeyPart(cap) + ":" + capabilityKeyPart(cap)
+	}
+	if cap.ID != "" {
+		return cap.ID
+	}
+	return capabilityKeyPart(cap)
+}
+
+func releaseKeyPart(cap pluginmodel.Capability) string {
+	if cap.PluginID != "" || cap.PluginVersion != "" || cap.ReleasePath != "" {
+		return cap.PluginID + "@" + cap.PluginVersion + ":" + cap.ReleasePath
+	}
+	return "unknown-release"
+}
+
+func capabilityKeyPart(cap pluginmodel.Capability) string {
 	if cap.ID != "" {
 		return cap.ID
 	}

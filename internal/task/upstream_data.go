@@ -14,6 +14,7 @@ import (
 	"pulseops/internal/config"
 	"pulseops/internal/ctxkey"
 	"pulseops/internal/datasource"
+	"pulseops/internal/pluginconfig"
 	"pulseops/internal/pluginmodel"
 	"pulseops/internal/store"
 )
@@ -26,13 +27,16 @@ type UpstreamDataParams struct {
 }
 
 type UpstreamDataSource struct {
-	Key     string         `json:"key"`
-	TaskID  string         `json:"task_id"`
-	Params  map[string]any `json:"params"`
-	Type    string         `json:"type"`
-	Alias   string         `json:"alias"`
-	Config  map[string]any `json:"config"`
-	OnError string         `json:"on_error"`
+	Key                 string         `json:"key"`
+	TaskID              string         `json:"task_id"`
+	Params              map[string]any `json:"params"`
+	Type                string         `json:"type"`
+	Alias               string         `json:"alias"`
+	Config              map[string]any `json:"config"`
+	PluginConfigRef     string         `json:"plugin_config_ref"`
+	CapabilityConfigRef string         `json:"capability_config_ref"`
+	Overrides           map[string]any `json:"overrides"`
+	OnError             string         `json:"on_error"`
 }
 
 func (s UpstreamDataSource) referenceKey() string {
@@ -46,7 +50,7 @@ func (s UpstreamDataSource) referenceKey() string {
 }
 
 func mergedDataSourceConfig(common map[string]any, source UpstreamDataSource) map[string]any {
-	out := make(map[string]any, len(common)+len(source.Params)+len(source.Config))
+	out := make(map[string]any, len(common)+len(source.Params)+len(source.Config)+len(source.Overrides))
 	for key, value := range common {
 		out[key] = value
 	}
@@ -54,6 +58,9 @@ func mergedDataSourceConfig(common map[string]any, source UpstreamDataSource) ma
 		out[key] = value
 	}
 	for key, value := range source.Config {
+		out[key] = value
+	}
+	for key, value := range source.Overrides {
 		out[key] = value
 	}
 	return out
@@ -73,6 +80,15 @@ type UpstreamDataDriver struct {
 	logger        *slog.Logger
 	dataSourcesMu sync.RWMutex
 	dataSources   *datasource.Registry
+}
+
+type pluginConfigReader interface {
+	GetPluginConfigInstance(ctx context.Context, instanceID string) (pluginmodel.ConfigInstanceRecord, error)
+	GetActivePluginConfigVersion(ctx context.Context, instanceID string) (pluginmodel.ConfigVersionRecord, error)
+}
+
+type capabilityProvider interface {
+	Capability() pluginmodel.Capability
 }
 
 func NewUpstreamDataDriver(repo store.Repository, artStore store.ArtifactStore, logger *slog.Logger) *UpstreamDataDriver {
@@ -123,7 +139,18 @@ func (d *UpstreamDataDriver) Validate(spec config.TaskSpec) error {
 			if !ok {
 				return fmt.Errorf("data_process data_sources[%d].type %q is not available", i, source.Type)
 			}
+			if err := validateDataSourceOverrides(dataSource, source.Overrides); err != nil {
+				return fmt.Errorf("validate data_process data_sources[%d] overrides: %w", i, err)
+			}
 			if validator, ok := dataSource.(datasource.Validator); ok {
+				if source.PluginConfigRef != "" || source.CapabilityConfigRef != "" {
+					if err := d.validatePluginDataSourceConfigRefs(context.Background(), dataSource, params.CommonParams, source, key); err != nil {
+						return fmt.Errorf("validate data_process data_sources[%d] config refs: %w", i, err)
+					}
+					sourceKeys[key] = ""
+					pluginSourceKeys[key] = struct{}{}
+					continue
+				}
 				if err := validator.ValidateSpec(datasource.Spec{
 					Type:    source.Type,
 					Config:  mergedDataSourceConfig(params.CommonParams, source),
@@ -202,6 +229,45 @@ func (d *UpstreamDataDriver) dataSourceRegistry() *datasource.Registry {
 	return d.dataSources
 }
 
+func (d *UpstreamDataDriver) validatePluginDataSourceConfigRefs(ctx context.Context, source datasource.Source, common map[string]any, spec UpstreamDataSource, key string) error {
+	reader, ok := d.repo.(pluginConfigReader)
+	if !ok {
+		return fmt.Errorf("plugin config store is unavailable")
+	}
+	capability := pluginmodel.Capability{}
+	if provider, ok := source.(capabilityProvider); ok {
+		capability = provider.Capability()
+	}
+	out := configSchemaDefaults(capability.Config)
+	if spec.PluginConfigRef != "" {
+		if capability.Config == nil || !capability.Config.AllowPluginConfigRef {
+			return fmt.Errorf("capability %q does not allow plugin_config_ref", capability.ID)
+		}
+		values, _, err := activePluginConfigValues(ctx, reader, spec.PluginConfigRef, capability, "plugin")
+		if err != nil {
+			return err
+		}
+		mergeAnyMap(out, values)
+	}
+	if spec.CapabilityConfigRef != "" {
+		values, _, err := activePluginConfigValues(ctx, reader, spec.CapabilityConfigRef, capability, "capability")
+		if err != nil {
+			return err
+		}
+		mergeAnyMap(out, values)
+	}
+	mergeAnyMap(out, common)
+	mergeAnyMap(out, spec.Params)
+	mergeAnyMap(out, spec.Config)
+	mergeAnyMap(out, spec.Overrides)
+	if validator, ok := source.(datasource.Validator); ok {
+		if err := validator.ValidateSpec(datasource.Spec{Type: spec.Type, Config: out, Alias: key, OnError: spec.OnError}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type upstreamDataRunner struct {
 	spec               config.TaskSpec
 	params             UpstreamDataParams
@@ -221,9 +287,15 @@ func (r *upstreamDataRunner) Run(ctx context.Context, trigger TriggerType) (Resu
 	summary := map[string]any{}
 	var findings []store.Finding
 	artifactCache := map[string][]store.ArtifactRef{}
-	pluginSources, pluginFindings, err := r.fetchPluginDataSources(ctx, trigger)
+	pluginSources, pluginFindings, pluginTrace, err := r.fetchPluginDataSources(ctx, trigger)
 	if err != nil {
-		return Result{CheckStatus: "fail", Findings: pluginFindings}, err
+		return Result{
+			CheckStatus:          "fail",
+			Findings:             pluginFindings,
+			PluginConfigVersions: pluginTrace.ConfigVersions,
+			PluginAssetVersions:  pluginTrace.AssetVersions,
+			PluginTaskOverrides:  pluginTrace.TaskOverrides,
+		}, err
 	}
 	findings = append(findings, pluginFindings...)
 
@@ -273,14 +345,37 @@ func (r *upstreamDataRunner) Run(ctx context.Context, trigger TriggerType) (Resu
 	}
 
 	return Result{
-		CheckStatus: "pass",
-		Summary:     summary,
-		Payload:     summary,
-		Findings:    findings,
+		CheckStatus:          "pass",
+		Summary:              summary,
+		Payload:              summary,
+		Findings:             findings,
+		PluginConfigVersions: pluginTrace.ConfigVersions,
+		PluginAssetVersions:  pluginTrace.AssetVersions,
+		PluginTaskOverrides:  pluginTrace.TaskOverrides,
 	}, nil
 }
 
-func (r *upstreamDataRunner) fetchPluginDataSources(ctx context.Context, trigger TriggerType) (map[string]any, []store.Finding, error) {
+type pluginDataSourceTrace struct {
+	ConfigVersions map[string]any
+	AssetVersions  map[string]any
+	TaskOverrides  map[string]any
+}
+
+func newPluginDataSourceTrace() pluginDataSourceTrace {
+	return pluginDataSourceTrace{
+		ConfigVersions: map[string]any{},
+		AssetVersions:  map[string]any{},
+		TaskOverrides:  map[string]any{},
+	}
+}
+
+func (t *pluginDataSourceTrace) merge(other pluginDataSourceTrace) {
+	mergeAnyMap(t.ConfigVersions, other.ConfigVersions)
+	mergeAnyMap(t.AssetVersions, other.AssetVersions)
+	mergeAnyMap(t.TaskOverrides, other.TaskOverrides)
+}
+
+func (r *upstreamDataRunner) fetchPluginDataSources(ctx context.Context, trigger TriggerType) (map[string]any, []store.Finding, pluginDataSourceTrace, error) {
 	registry := r.dataSourceRegistry()
 	runID, _ := ctx.Value(ctxkey.CtxRunID).(string)
 	deps := datasource.FetchDeps{
@@ -290,6 +385,7 @@ func (r *upstreamDataRunner) fetchPluginDataSources(ctx context.Context, trigger
 		TriggerType:   string(trigger),
 	}
 	results := map[string]any{}
+	trace := newPluginDataSourceTrace()
 	var findings []store.Finding
 	for _, spec := range r.params.DataSources {
 		if spec.Type == "" {
@@ -303,25 +399,164 @@ func (r *upstreamDataRunner) fetchPluginDataSources(ctx context.Context, trigger
 				findings = append(findings, store.Finding{Reason: err.Error()})
 				continue
 			}
-			return results, findings, err
+			return results, findings, trace, err
 		}
-		data, err := source.Fetch(ctx, datasource.Spec{
-			Type:    spec.Type,
-			Config:  mergedDataSourceConfig(r.params.CommonParams, spec),
-			Alias:   key,
-			OnError: spec.OnError,
-		}, deps)
+		data, configTrace, err := func() (any, pluginDataSourceTrace, error) {
+			configMap, resolvedTrace, cleanup, err := r.resolvePluginDataSourceConfig(ctx, source, spec)
+			if cleanup != nil {
+				defer cleanup()
+			}
+			if err != nil {
+				return nil, resolvedTrace, err
+			}
+			data, err := source.Fetch(ctx, datasource.Spec{
+				Type:    spec.Type,
+				Config:  configMap,
+				Alias:   key,
+				OnError: spec.OnError,
+			}, deps)
+			return data, resolvedTrace, err
+		}()
+		trace.merge(configTrace)
 		if err != nil {
 			wrapped := fmt.Errorf("fetch data source %q: %w", spec.Type, err)
 			if spec.OnError == "skip" {
 				findings = append(findings, store.Finding{Reason: wrapped.Error()})
 				continue
 			}
-			return results, findings, wrapped
+			return results, findings, trace, wrapped
 		}
 		results[key] = data
 	}
-	return results, findings, nil
+	return results, findings, trace, nil
+}
+
+func (r *upstreamDataRunner) resolvePluginDataSourceConfig(ctx context.Context, source datasource.Source, spec UpstreamDataSource) (map[string]any, pluginDataSourceTrace, func(), error) {
+	trace := newPluginDataSourceTrace()
+	capability := pluginmodel.Capability{}
+	if provider, ok := source.(capabilityProvider); ok {
+		capability = provider.Capability()
+	}
+	out := configSchemaDefaults(capability.Config)
+	configInstanceIDs := make([]string, 0, 2)
+	reader, _ := r.repo.(pluginConfigReader)
+	if spec.PluginConfigRef != "" || spec.CapabilityConfigRef != "" {
+		if reader == nil {
+			return nil, trace, nil, fmt.Errorf("plugin config store is unavailable")
+		}
+	}
+	if spec.PluginConfigRef != "" {
+		if capability.Config == nil || !capability.Config.AllowPluginConfigRef {
+			return nil, trace, nil, fmt.Errorf("capability %q does not allow plugin_config_ref", capability.ID)
+		}
+		values, version, err := activePluginConfigValues(ctx, reader, spec.PluginConfigRef, capability, "plugin")
+		if err != nil {
+			return nil, trace, nil, err
+		}
+		trace.ConfigVersions[spec.PluginConfigRef] = version
+		configInstanceIDs = append(configInstanceIDs, spec.PluginConfigRef)
+		mergeAnyMap(out, values)
+	}
+	if spec.CapabilityConfigRef != "" {
+		values, version, err := activePluginConfigValues(ctx, reader, spec.CapabilityConfigRef, capability, "capability")
+		if err != nil {
+			return nil, trace, nil, err
+		}
+		trace.ConfigVersions[spec.CapabilityConfigRef] = version
+		configInstanceIDs = append(configInstanceIDs, spec.CapabilityConfigRef)
+		mergeAnyMap(out, values)
+	}
+	mergeAnyMap(out, r.params.CommonParams)
+	mergeAnyMap(out, spec.Params)
+	mergeAnyMap(out, spec.Config)
+	if err := validateCapabilityOverrides(capability, spec.Overrides); err != nil {
+		return nil, trace, nil, err
+	}
+	if len(spec.Overrides) > 0 {
+		trace.TaskOverrides[spec.referenceKey()] = spec.Overrides
+	}
+	mergeAnyMap(out, spec.Overrides)
+	runtimeStore, _ := r.repo.(pluginconfig.RuntimeStore)
+	resolved, assetVersions, _, cleanup, err := pluginconfig.ResolveRuntimeValuesWithOptions(ctx, runtimeStore, r.artStore, capability.Config, capability.ConfigClasses, out, pluginconfig.RuntimeResolveOptions{
+		PluginID:          capability.PluginID,
+		CapabilityID:      capability.ID,
+		ConfigInstanceIDs: configInstanceIDs,
+	})
+	mergeAnyMap(trace.AssetVersions, assetVersions)
+	if err != nil {
+		return nil, trace, cleanup, err
+	}
+	return resolved, trace, cleanup, nil
+}
+
+func activePluginConfigValues(ctx context.Context, reader pluginConfigReader, instanceID string, capability pluginmodel.Capability, wantScope string) (map[string]any, int, error) {
+	instance, err := reader.GetPluginConfigInstance(ctx, instanceID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("load plugin config instance %q: %w", instanceID, err)
+	}
+	if instance.Status != "active" {
+		return nil, 0, fmt.Errorf("plugin config instance %q is not active", instanceID)
+	}
+	if instance.Scope != wantScope {
+		return nil, 0, fmt.Errorf("plugin config instance %q scope is %q, want %q", instanceID, instance.Scope, wantScope)
+	}
+	if capability.PluginID != "" && instance.PluginID != capability.PluginID {
+		return nil, 0, fmt.Errorf("plugin config instance %q belongs to plugin %q", instanceID, instance.PluginID)
+	}
+	if wantScope == "capability" && capability.ID != "" && instance.CapabilityID != capability.ID {
+		return nil, 0, fmt.Errorf("plugin config instance %q belongs to capability %q", instanceID, instance.CapabilityID)
+	}
+	version, err := reader.GetActivePluginConfigVersion(ctx, instanceID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("load active plugin config version for %q: %w", instanceID, err)
+	}
+	if version.Status != "active" {
+		return nil, 0, fmt.Errorf("plugin config instance %q active version is %q", instanceID, version.Status)
+	}
+	return version.Values, version.Version, nil
+}
+
+func configSchemaDefaults(schema *pluginmodel.ConfigSchema) map[string]any {
+	out := map[string]any{}
+	if schema == nil {
+		return out
+	}
+	for key, field := range schema.Fields {
+		if field.Default != nil {
+			out[key] = field.Default
+		}
+	}
+	return out
+}
+
+func mergeAnyMap(dst map[string]any, src map[string]any) {
+	for key, value := range src {
+		dst[key] = value
+	}
+}
+
+func validateDataSourceOverrides(source datasource.Source, overrides map[string]any) error {
+	if len(overrides) == 0 {
+		return nil
+	}
+	provider, ok := source.(capabilityProvider)
+	if !ok {
+		return fmt.Errorf("data source does not expose plugin capability schema")
+	}
+	return validateCapabilityOverrides(provider.Capability(), overrides)
+}
+
+func validateCapabilityOverrides(capability pluginmodel.Capability, overrides map[string]any) error {
+	if len(overrides) == 0 {
+		return nil
+	}
+	if capability.Config == nil {
+		return fmt.Errorf("capability %q does not declare config schema", capability.ID)
+	}
+	if err := pluginconfig.ValidateValues(capability.Config, capability.ConfigClasses, overrides, pluginconfig.ValidationOptions{Overrides: true}); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (r *upstreamDataRunner) resolveSource(

@@ -6,13 +6,18 @@ import (
 	"fmt"
 
 	"pulseops/internal/config"
+	"pulseops/internal/pluginconfig"
 	"pulseops/internal/pluginmodel"
 	"pulseops/internal/pluginruntime"
+	"pulseops/internal/store"
 )
 
 type PluginEvaluator struct {
-	cap pluginmodel.Capability
-	cfg config.PluginsConfig
+	cap           pluginmodel.Capability
+	cfg           config.PluginsConfig
+	configReader  pluginconfig.ConfigReader
+	runtimeStore  pluginconfig.RuntimeStore
+	artifactStore store.ArtifactStore
 }
 
 type pluginEvaluatorPayload struct {
@@ -21,8 +26,10 @@ type pluginEvaluatorPayload struct {
 	Findings    []map[string]any `json:"findings"`
 }
 
-func NewPluginEvaluator(cap pluginmodel.Capability, cfg config.PluginsConfig) *PluginEvaluator {
-	return &PluginEvaluator{cap: cap, cfg: cfg}
+func NewPluginEvaluator(cap pluginmodel.Capability, cfg config.PluginsConfig, configStore any, artifactStore store.ArtifactStore) *PluginEvaluator {
+	reader, _ := configStore.(pluginconfig.ConfigReader)
+	runtimeStore, _ := configStore.(pluginconfig.RuntimeStore)
+	return &PluginEvaluator{cap: cap, cfg: cfg, configReader: reader, runtimeStore: runtimeStore, artifactStore: artifactStore}
 }
 
 func (e *PluginEvaluator) Name() string {
@@ -30,15 +37,33 @@ func (e *PluginEvaluator) Name() string {
 }
 
 func (e *PluginEvaluator) Evaluate(ctx context.Context, input Input) (Result, error) {
+	resolved, err := pluginconfig.ResolveCapabilityConfig(ctx, e.configReader, e.cap, pluginconfig.ResolveCapabilityOptions{
+		PluginConfigRef:     input.PluginConfigRef,
+		CapabilityConfigRef: input.CapabilityConfigRef,
+		Config:              input.TaskParams,
+		Overrides:           input.Overrides,
+		RuntimeStore:        e.runtimeStore,
+		ArtifactStore:       e.artifactStore,
+	})
+	if resolved.Cleanup != nil {
+		defer resolved.Cleanup()
+	}
+	if err != nil {
+		return Result{CheckStatus: "fail"}, err
+	}
 	resp, err := pluginruntime.NewClient(e.cap, e.cfg).Call(ctx, pluginruntime.Request{
 		Action: "evaluate",
-		Config: mergeEvaluatorParams(e.cap.Defaults, input.TaskParams),
+		Config: resolved.Config,
 		Input:  evaluatorInputMap(input),
 	}, pluginruntime.Deps{CurrentTaskID: input.TaskID})
 	if err != nil {
 		return Result{CheckStatus: "fail"}, err
 	}
-	return pluginResponseToEvaluatorResult(resp), nil
+	result := pluginResponseToEvaluatorResult(resp)
+	result.PluginConfigVersions = resolved.ConfigVersions
+	result.PluginAssetVersions = resolved.AssetVersions
+	result.PluginTaskOverrides = resolved.TaskOverrides
+	return result, nil
 }
 
 func pluginResponseToEvaluatorResult(resp pluginruntime.Response) Result {
@@ -78,17 +103,6 @@ func evaluatorInputMap(input Input) map[string]any {
 	var out map[string]any
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return map[string]any{"task_id": input.TaskID}
-	}
-	return out
-}
-
-func mergeEvaluatorParams(defaults, params map[string]any) map[string]any {
-	out := make(map[string]any, len(defaults)+len(params))
-	for key, value := range defaults {
-		out[key] = value
-	}
-	for key, value := range params {
-		out[key] = value
 	}
 	return out
 }

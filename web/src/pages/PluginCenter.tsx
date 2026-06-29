@@ -28,6 +28,7 @@ import {
   UploadOutlined,
 } from '@ant-design/icons'
 import type { PluginCatalog, PluginCapability, PluginRelease, PluginView } from '../api/types'
+import PluginConfigPanel from './PluginConfigPanel'
 import {
   activatePluginRelease,
   disablePlugin,
@@ -509,6 +510,7 @@ export default function PluginCenter() {
             expandedRowRender: (item) => (
               <Space direction="vertical" size={14} style={{ width: '100%' }}>
                 <PluginCapabilities capabilities={item.capabilities || []} />
+                <PluginConfigPanel plugin={item} />
                 <Table<PluginRelease>
                   size="small"
                   rowKey={(release) => `${release.plugin_id}:${release.version}`}

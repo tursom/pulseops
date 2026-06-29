@@ -13,6 +13,7 @@ import (
 
 	"pulseops/internal/config"
 	"pulseops/internal/datasource"
+	"pulseops/internal/pluginconfig"
 	"pulseops/internal/pluginmodel"
 	"pulseops/internal/store"
 	"pulseops/internal/task"
@@ -21,6 +22,7 @@ import (
 type Driver struct {
 	client        *Client
 	store         store.Repository
+	artifactStore store.ArtifactStore
 	sourcesMu     sync.RWMutex
 	sources       *DataSourceRegistry
 	legacySources map[string]DataSource
@@ -31,10 +33,15 @@ type Driver struct {
 	logger        *slog.Logger
 }
 
-func NewDriver(client *Client, store store.Repository, logger *slog.Logger) *Driver {
+func NewDriver(client *Client, repo store.Repository, logger *slog.Logger, artifactStores ...store.ArtifactStore) *Driver {
+	var artifactStore store.ArtifactStore
+	if len(artifactStores) > 0 {
+		artifactStore = artifactStores[0]
+	}
 	return &Driver{
 		client:        client,
-		store:         store,
+		store:         repo,
+		artifactStore: artifactStore,
 		sources:       NewDataSourceRegistry(),
 		legacySources: map[string]DataSource{},
 		pluginSources: map[string]DataSource{},
@@ -44,17 +51,8 @@ func NewDriver(client *Client, store store.Repository, logger *slog.Logger) *Dri
 	}
 }
 
-func (d *Driver) LoadPlugins(pluginDir string, logger *slog.Logger) error {
-	pm := NewPluginManager(pluginDir, logger)
-	registry := NewEmptyDataSourceRegistry()
-	if err := pm.LoadPlugins(registry); err != nil {
-		return err
-	}
-	d.sourcesMu.Lock()
-	d.legacySources = registry.Snapshot()
-	d.rebuildSourcesLocked()
-	d.sourcesMu.Unlock()
-	return nil
+func (d *Driver) LoadPlugins(pluginDir string, _ *slog.Logger) error {
+	return fmt.Errorf("legacy AI C ABI plugin loading from %q is not supported; use the plugin catalog", pluginDir)
 }
 
 func (d *Driver) SyncPluginDataSources(caps []pluginmodel.Capability, cfg config.PluginsConfig) {
@@ -67,23 +65,16 @@ func (d *Driver) SyncPluginCapabilities(caps []pluginmodel.Capability, cfg confi
 	for _, cap := range caps {
 		switch cap.Type {
 		case pluginmodel.CapabilityDataSource:
-			pluginSources[cap.Name] = &pluginDataSourceAdapter{source: datasource.NewPluginSource(cap, cfg)}
+			pluginSources[cap.Name] = &pluginDataSourceAdapter{source: datasource.NewPluginSource(cap, cfg), repo: d.store, artifactStore: d.artifactStore}
 		case pluginmodel.CapabilityAIDataSource:
 			if cap.Runtime == "process" || cap.Runtime == "http" || cap.Runtime == "http_plugin" {
-				pluginSources[cap.Name] = &pluginDataSourceAdapter{source: datasource.NewPluginSource(cap, cfg)}
-			} else if cap.Runtime == "c_abi" {
-				source, err := d.loadManifestCABIDataSource(cap)
-				if err != nil {
-					if d.logger != nil {
-						d.logger.Warn("load manifest C ABI data source failed", "plugin_id", cap.PluginID, "source", cap.Name, "err", err)
-					}
-					continue
-				}
-				pluginSources[cap.Name] = source
+				pluginSources[cap.Name] = &pluginDataSourceAdapter{source: datasource.NewPluginSource(cap, cfg), repo: d.store, artifactStore: d.artifactStore}
 			}
 		case pluginmodel.CapabilityOutputWriter:
 			if cap.Runtime == "process" || cap.Runtime == "http" || cap.Runtime == "http_plugin" {
-				pluginWriters[cap.Name] = &pluginOutputWriter{cap: cap, cfg: cfg}
+				reader, _ := d.store.(pluginconfig.ConfigReader)
+				runtimeStore, _ := d.store.(pluginconfig.RuntimeStore)
+				pluginWriters[cap.Name] = &pluginOutputWriter{cap: cap, cfg: cfg, configReader: reader, runtimeStore: runtimeStore, artifactStore: d.artifactStore}
 			}
 		}
 	}
@@ -263,7 +254,7 @@ type runner struct {
 func (r *runner) Run(ctx context.Context, trigger task.TriggerType) (task.Result, error) {
 	startedAt := time.Now()
 
-	promptText, err := r.renderPrompt(ctx, trigger)
+	promptText, pluginTrace, err := r.renderPrompt(ctx, trigger)
 	if err != nil {
 		return task.Result{CheckStatus: "fail"}, fmt.Errorf("render prompt: %w", err)
 	}
@@ -288,8 +279,11 @@ func (r *runner) Run(ctx context.Context, trigger task.TriggerType) (task.Result
 			return task.Result{CheckStatus: "fail"}, fmt.Errorf("ai analysis error: %s, insert: %w", err, insErr)
 		}
 		return task.Result{
-			CheckStatus: "fail",
-			Summary:     map[string]any{"ai_error": err.Error()},
+			CheckStatus:          "fail",
+			Summary:              map[string]any{"ai_error": err.Error()},
+			PluginConfigVersions: pluginTrace.ConfigVersions,
+			PluginAssetVersions:  pluginTrace.AssetVersions,
+			PluginTaskOverrides:  pluginTrace.TaskOverrides,
 		}, nil
 	}
 
@@ -336,6 +330,9 @@ func (r *runner) Run(ctx context.Context, trigger task.TriggerType) (task.Result
 			for k, v := range result.Summary {
 				outputSummary[k] = v
 			}
+			mergeAnyMap(pluginTrace.ConfigVersions, result.PluginConfigVersions)
+			mergeAnyMap(pluginTrace.AssetVersions, result.PluginAssetVersions)
+			mergeAnyMap(pluginTrace.TaskOverrides, result.PluginTaskOverrides)
 		}
 	}
 
@@ -350,23 +347,28 @@ func (r *runner) Run(ctx context.Context, trigger task.TriggerType) (task.Result
 	}
 
 	return task.Result{
-		CheckStatus: "pass",
-		Summary:     summary,
-		Findings:    outputFindings,
-		Payload:     resp.Content,
+		CheckStatus:          "pass",
+		Summary:              summary,
+		Findings:             outputFindings,
+		Payload:              resp.Content,
+		PluginConfigVersions: pluginTrace.ConfigVersions,
+		PluginAssetVersions:  pluginTrace.AssetVersions,
+		PluginTaskOverrides:  pluginTrace.TaskOverrides,
 	}, nil
 }
 
-func (r *runner) renderPrompt(ctx context.Context, trigger task.TriggerType) (string, error) {
-	dataSources, err := r.fetchDataSources(ctx, trigger)
+func (r *runner) renderPrompt(ctx context.Context, trigger task.TriggerType) (string, pluginDataSourceTrace, error) {
+	dataSources, pluginTrace, err := r.fetchDataSources(ctx, trigger)
 	if err != nil {
-		return "", fmt.Errorf("fetch data sources: %w", err)
+		return "", pluginTrace, fmt.Errorf("fetch data sources: %w", err)
 	}
-	return renderTemplate(r.params.Prompt, dataSources)
+	rendered, err := renderTemplate(r.params.Prompt, dataSources)
+	return rendered, pluginTrace, err
 }
 
-func (r *runner) fetchDataSources(ctx context.Context, trigger task.TriggerType) (map[string]any, error) {
+func (r *runner) fetchDataSources(ctx context.Context, trigger task.TriggerType) (map[string]any, pluginDataSourceTrace, error) {
 	registry := r.sources
+	pluginTrace := newPluginDataSourceTrace()
 	deps := FetchDeps{
 		DBRepository:  r.store,
 		HTTPClient:    r.deps.HTTPClient,
@@ -381,9 +383,25 @@ func (r *runner) fetchDataSources(ctx context.Context, trigger task.TriggerType)
 	for _, dsSpec := range r.params.DataSources {
 		source, ok := registry.Get(dsSpec.Type)
 		if !ok {
-			return nil, fmt.Errorf("unknown data source type %q", dsSpec.Type)
+			return nil, pluginTrace, fmt.Errorf("unknown data source type %q", dsSpec.Type)
 		}
-		data, err := source.Fetch(ctx, dsSpec, deps)
+		runSpec := dsSpec
+		cleanup := func() {}
+		if resolver, ok := source.(interface {
+			ResolveSpec(context.Context, DataSourceSpec) (DataSourceSpec, pluginDataSourceTrace, func(), error)
+		}); ok {
+			resolved, trace, release, err := resolver.ResolveSpec(ctx, dsSpec)
+			if err != nil {
+				return nil, pluginTrace, fmt.Errorf("resolve data source %q config: %w", dsSpec.Type, err)
+			}
+			runSpec = resolved
+			cleanup = release
+			mergeAnyMap(pluginTrace.ConfigVersions, trace.ConfigVersions)
+			mergeAnyMap(pluginTrace.AssetVersions, trace.AssetVersions)
+			mergeAnyMap(pluginTrace.TaskOverrides, trace.TaskOverrides)
+		}
+		data, err := source.Fetch(ctx, runSpec, deps)
+		cleanup()
 		if err != nil {
 			if dsSpec.OnError == "skip" {
 				r.logger.WarnContext(ctx, "skipping failed data source",
@@ -393,7 +411,7 @@ func (r *runner) fetchDataSources(ctx context.Context, trigger task.TriggerType)
 				)
 				continue
 			}
-			return nil, fmt.Errorf("fetch data source %q: %w", dsSpec.Type, err)
+			return nil, pluginTrace, fmt.Errorf("fetch data source %q: %w", dsSpec.Type, err)
 		}
 		key := dsSpec.Alias
 		if key == "" {
@@ -401,7 +419,7 @@ func (r *runner) fetchDataSources(ctx context.Context, trigger task.TriggerType)
 		}
 		result[key] = data
 	}
-	return result, nil
+	return result, pluginTrace, nil
 }
 
 func tryParseJSON(content string) map[string]any {

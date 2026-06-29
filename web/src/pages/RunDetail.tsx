@@ -347,6 +347,19 @@ export default function RunDetail() {
           <Card className="ops-card" title="结构化摘要">
             {run.summary ? <pre className="code-block">{safeJson(run.summary)}</pre> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无 summary" />}
           </Card>
+          <Card className="ops-card" title="插件配置追踪">
+            <Descriptions column={{ xs: 1, md: 3 }} size="small">
+              <Descriptions.Item label="plugin_config_versions">
+                <pre className="code-block">{safeJson(run.plugin_config_versions || {})}</pre>
+              </Descriptions.Item>
+              <Descriptions.Item label="plugin_asset_versions">
+                <pre className="code-block">{safeJson(run.plugin_asset_versions || {})}</pre>
+              </Descriptions.Item>
+              <Descriptions.Item label="plugin_task_overrides">
+                <pre className="code-block">{safeJson(run.plugin_task_overrides || {})}</pre>
+              </Descriptions.Item>
+            </Descriptions>
+          </Card>
           <Card className="ops-card" title={`Findings (${run.findings?.length || 0})`}>
             {run.findings?.length ? (
               <Table<Finding> className="dense-table" columns={findingColumns} dataSource={run.findings} rowKey="finding_id" size="small" pagination={false} />
@@ -455,6 +468,9 @@ export default function RunDetail() {
           <Descriptions.Item label="运行 ID"><Text code>{run.run_id}</Text></Descriptions.Item>
           <Descriptions.Item label="任务 ID"><Text code>{run.task_id}</Text></Descriptions.Item>
           <Descriptions.Item label="任务类型"><Tag>{run.task_kind}</Tag></Descriptions.Item>
+          <Descriptions.Item label="插件 Generation">
+            {run.plugin_generation_id ? <Text code>{run.plugin_generation_id}</Text> : <Text type="secondary">—</Text>}
+          </Descriptions.Item>
           <Descriptions.Item label="触发方式"><Tag>{run.trigger_type || '—'}</Tag></Descriptions.Item>
           <Descriptions.Item label="运行状态"><Tag color={runStatusColor(run.run_status)}>{RUN_STATUS_LABELS[run.run_status] || run.run_status}</Tag></Descriptions.Item>
           <Descriptions.Item label="检查状态"><Tag color={checkStatusColor(run.check_status)}>{CHECK_STATUS_LABELS[run.check_status] || run.check_status}</Tag></Descriptions.Item>

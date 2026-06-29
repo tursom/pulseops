@@ -15,19 +15,22 @@ import (
 type TriggerType string
 
 const (
-	TriggerScheduled  TriggerType = "scheduled"
-	TriggerManual     TriggerType = "manual"
-	TriggerRerun      TriggerType = "rerun"
-	TriggerDependent  TriggerType = "dependent"
+	TriggerScheduled TriggerType = "scheduled"
+	TriggerManual    TriggerType = "manual"
+	TriggerRerun     TriggerType = "rerun"
+	TriggerDependent TriggerType = "dependent"
 )
 
 type Result struct {
-	CheckStatus string
-	Summary     map[string]any
-	Payload     any
-	Findings    []store.Finding
-	Stdout      string
-	Stderr      string
+	CheckStatus          string
+	Summary              map[string]any
+	Payload              any
+	Findings             []store.Finding
+	Stdout               string
+	Stderr               string
+	PluginConfigVersions map[string]any
+	PluginAssetVersions  map[string]any
+	PluginTaskOverrides  map[string]any
 }
 
 type Runner interface {

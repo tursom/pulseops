@@ -119,6 +119,7 @@ func New(ctx context.Context, baseDir, configPath, staticDir string, logger *slo
 
 	httpClient := &http.Client{Timeout: cfg.Task.DefaultTimeout.Duration}
 	hookManager := pluginhook.NewManager(cfg.Plugins, httpClient, logger)
+	hookManager.SetConfigStore(stateStore, artifactStore)
 	pluginManager := pluginmgr.NewManager(pluginmgr.Options{
 		BaseDir: baseDir,
 		Config:  cfg.Plugins,
@@ -155,17 +156,11 @@ func New(ctx context.Context, baseDir, configPath, staticDir string, logger *slo
 			MaxTokens:   cfg.AI.MaxTokens,
 			Temperature: cfg.AI.Temperature,
 		})
-		driver := ai.NewDriver(aiClient, stateStore, logger)
+		driver := ai.NewDriver(aiClient, stateStore, logger, artifactStore)
 		aiAnalyzeDriver = driver
 		if cfg.AI.PluginDir != "" {
-			if err := driver.LoadPlugins(cfg.AI.PluginDir, logger); err != nil {
-				logger.WarnContext(ctx, "load AI plugins failed, continuing without plugins", "err", err)
-				platform.Mode = "degraded"
-				platform.Applied = false
-				platform.AI.Status = "config_error"
-				platform.AI.Error = err.Error()
-				platform.Warnings = append(platform.Warnings, "ai plugins: "+err.Error())
-			}
+			logger.WarnContext(ctx, "legacy AI C ABI plugin_dir is ignored; use the plugin catalog instead", "dir", cfg.AI.PluginDir)
+			platform.Warnings = append(platform.Warnings, "legacy ai plugin_dir ignored; use plugin catalog")
 		}
 		aiDriver = driver
 		aiEvaluator = &ai.AIEvaluator{Client: aiClient}
@@ -185,7 +180,7 @@ func New(ctx context.Context, baseDir, configPath, staticDir string, logger *slo
 		}
 		dataProcessDriver.SyncPluginDataSources(gen.Capabilities, cfg.Plugins)
 		hookManager.SyncPluginHooks(gen.Capabilities, cfg.Plugins)
-		traceManager.SyncPluginSinks(gen.Capabilities, cfg.Plugins, httpClient)
+		traceManager.SyncPluginSinks(gen.Capabilities, cfg.Plugins, httpClient, stateStore)
 		if aiAnalyzeDriver != nil {
 			aiAnalyzeDriver.SyncPluginCapabilities(gen.Capabilities, cfg.Plugins)
 		}

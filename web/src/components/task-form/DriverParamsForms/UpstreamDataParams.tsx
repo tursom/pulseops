@@ -6,6 +6,7 @@ import JsonFieldPicker from '../../JsonFieldPicker';
 import { fetchPluginCapabilities, fetchTaskDefinitions, fetchTaskSample } from '../../../api/client';
 import type { PluginCapability, PluginSchemaField, TaskDefinition, SampleResponse } from '../../../api/types';
 import { useWatchedFormValue } from '../useWatchedFormValue';
+import PluginConfigRefFields from './PluginConfigRefFields';
 
 const { Text } = Typography;
 
@@ -220,7 +221,14 @@ const UpstreamDataParams = ({ form }: { form?: FormInstance }) => {
                           >
                             <Input placeholder="如 inventory" style={{ width: 150 }} />
                           </Form.Item>
-                          {capability?.schema && Object.keys(capability.schema).length > 0 ? (
+                          {capability?.config ? (
+                            <PluginConfigRefFields
+                              capability={capability}
+                              name={name}
+                              restField={restField}
+                              absoluteBaseName={['params', 'data_sources', name]}
+                            />
+                          ) : capability?.schema && Object.keys(capability.schema).length > 0 ? (
                             <Space wrap align="baseline">
                               {Object.entries(capability.schema).map(([field, schema]) => (
                                 <PluginSchemaConfigField

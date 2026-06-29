@@ -20,22 +20,24 @@ PulseOps 当前已经有两类扩展雏形：
 
 插件系统需要支持以下能力：
 
-1. 插件包统一安装到固定目录，由 manifest 描述身份、版本、能力、权限和默认配置。
+1. 插件包统一安装到固定目录，由 `pulseops.plugin.yaml` 描述身份、版本、能力、权限、配置 schema 和声明式 UI。
 2. 内置能力和外部插件能力统一进入 Plugin Catalog，前端可查看、启停、重载和诊断。
 3. 插件可以扩展任务模板、任务驱动、AI 数据源、输出写入器、业务 evaluator、事件 Hook、通知 Sink、前端入口。
 4. 外部插件优先使用隔离运行时，不默认把不可信代码加载进 PulseOps 主进程。
 5. 插件能力可以被任务创建向导消费，例如新增模板卡片、AI 数据源选项、参数 schema。
-6. 插件运行要有权限声明、超时、资源限制、错误隔离和审计留痕。
-7. 插件升级、禁用、加载失败不能影响已有核心任务调度和管理页面启动。
+6. 插件可以声明插件级配置和能力级配置；PulseOps 提供配置实例、版本、资产、密钥、校验和任务覆盖能力。
+7. 插件运行要有权限声明、超时、资源限制、错误隔离和审计留痕。
+8. 插件升级、禁用、加载失败不能影响已有核心任务调度和管理页面启动。
 
 ## 3. 非目标
 
 第一阶段不做这些事：
 
-- 不把通用 Go `.so` 作为任务驱动热加载到主进程。现有 AI C ABI 数据源插件可以兼容保留，但不扩展为所有插件的推荐形态。
+- 不把通用 Go `.so` 作为任务驱动热加载到主进程，也不为旧 AI C ABI 插件提供 V1 兼容入口。存量插件若要继续使用，需要迁移成新的 YAML manifest 插件能力。
 - 不允许插件直接拿到 PostgreSQL、MinIO、AI API Key 等全量内部凭证。
 - 不在前端直接执行插件提供的任意 JS。前端扩展优先使用 schema 驱动表单、菜单入口和受控 iframe。
 - 不做公开插件市场。先支持本地目录安装和内部插件包治理。
+- 不兼容 `pulseops.plugin.toml`。V1 只支持 `pulseops.plugin.yaml`，避免复杂配置 schema 在 TOML 中失控。
 
 ## 4. 总体架构
 
@@ -44,17 +46,17 @@ plugins/
   steam-price-diagnostics/
     releases/
       1.0.0/
-        pulseops.plugin.toml
+        pulseops.plugin.yaml
         bin/diagnose
         README.md
       1.1.0/
-        pulseops.plugin.toml
+        pulseops.plugin.yaml
         bin/diagnose
         README.md
     active -> releases/1.0.0
   webhook-notifier/
     releases/2026.06.27-1/
-      pulseops.plugin.toml
+      pulseops.plugin.yaml
       bin/notifier
 
 PulseOps
@@ -63,7 +65,7 @@ PulseOps
       v
   plugin.Manager
       |-- 注册内置插件包
-      |-- 扫描 plugins/*/releases/*/pulseops.plugin.toml
+      |-- 扫描 plugins/*/releases/*/pulseops.plugin.yaml
       |-- 读取 DB 中 active version 和 release 状态
       |-- 校验权限、版本、能力冲突
       v
@@ -91,7 +93,7 @@ PulseOps
 ```text
 plugins/<plugin-id>/
   releases/<version>/
-    pulseops.plugin.toml
+    pulseops.plugin.yaml
     bin/
     schemas/
     static/
@@ -102,61 +104,153 @@ plugins/<plugin-id>/
 约束：
 
 - 插件版本目录一旦进入 `validated` 或 `active` 状态后不可原地修改。
+- 每个 release 必须且只能包含一个 `pulseops.plugin.yaml`。若同时出现 `pulseops.plugin.yaml` 和 `pulseops.plugin.toml`，视为插件包格式错误。
 - 新版本必须写入新的 release 目录，例如 `releases/1.1.0/` 或 `releases/2026.06.27-1/`。
 - `active` 软链接只用于人工排查和离线工具，运行时切换以 DB 中的 `active_version` 为准。
 - 删除 release 前必须确认没有 registry generation 和 in-flight run 仍引用它。
 - 容器部署时，插件目录必须挂载为可写持久卷；镜像内置插件只能作为 bundled official release，不作为在线更新目录。
 
-`pulseops.plugin.toml` 示例：
+`pulseops.plugin.yaml` 是 V1 唯一支持的插件声明文件。YAML 只作为声明式数据格式使用，不允许自定义 tag，不依赖 anchor/alias/merge 作为核心能力；PulseOps 读取后会 normalize 成内部 manifest model 并做 schema 校验。
 
-```toml
-schema_version = "pulseops.plugin/v1"
-id = "steam-price-diagnostics"
-name = "Steam 价格诊断"
-version = "1.0.0"
-description = "提供 Steam 价格异常诊断任务模板和 AI 数据源"
-author = "YYM"
-homepage = "https://internal.example.com/pulseops/plugins/steam-price-diagnostics"
-enabled = true
-permissions = ["network:outbound", "runs:read", "ai:read"]
+`pulseops.plugin.yaml` 示例：
 
-[[task_templates]]
-id = "steam-price-diagnose-template"
-kind = "ai_analyze"
-title = "Steam 价格异常诊断"
-description = "基于上游价格检查结果、历史运行和历史 AI 分析生成诊断结论"
+```yaml
+schema_version: pulseops.plugin/v1
+id: steam-price-diagnostics
+name: Steam 价格诊断
+version: 1.0.0
+description: 提供 Steam 价格异常诊断任务模板和 AI 数据源
+author: YYM
+homepage: https://internal.example.com/pulseops/plugins/steam-price-diagnostics
+enabled: true
+permissions:
+  - network:outbound
+  - runs:read
+  - ai:read
 
-[task_templates.defaults]
-trigger = "on_run"
-timeout = "45s"
+config_classes:
+  RetryPolicy:
+    title: 重试策略
+    fields:
+      enabled:
+        type: bool
+        default: false
+        ui:
+          label: 启用重试
+          widget: switch
+          order: 10
+      max_attempts:
+        type: number
+        default: 2
+        validation:
+          min: 1
+          max: 5
+        ui:
+          label: 最大重试次数
+          widget: number
+          order: 20
 
-[task_templates.params]
-analysis_type = "diagnose"
+config:
+  title: 插件公共配置
+  validate_action: validate_config
+  fields:
+    api_base_url:
+      type: string
+      required: true
+      overridable: false
+      validation:
+        pattern: "^https?://"
+      ui:
+        group: connection
+        label: API Base URL
+        widget: input
+        order: 10
+    api_token:
+      type: secret
+      required: true
+      overridable: false
+      ui:
+        group: auth
+        label: API Token
+        widget: secret
+        order: 20
+    retry:
+      type: object
+      class: RetryPolicy
+      default:
+        enabled: false
+      ui:
+        group: runtime
+        label: 重试
+        widget: object
+        order: 30
 
-[[data_sources]]
-name = "grpc_game_inventory"
-title = "gRPC 游戏库存查询"
-protocol = "grpc"
-runtime = "builtin"
-permissions = ["network:outbound", "grpc:call"]
+task_templates:
+  - id: steam-price-diagnose-template
+    kind: ai_analyze
+    title: Steam 价格异常诊断
+    description: 基于上游价格检查结果、历史运行和历史 AI 分析生成诊断结论
+    defaults:
+      trigger: on_run
+      timeout: 45s
+    params:
+      analysis_type: diagnose
 
-[data_sources.schema]
-endpoint = { type = "string", required = true, description = "gRPC 服务地址，如 inventory.service:9090" }
-service = { type = "string", required = true, description = "完整服务名，如 yym.inventory.v1.InventoryService" }
-method = { type = "string", required = true, description = "Unary 方法名，如 GetInventory" }
-request = { type = "object", required = true, description = "请求体 JSON，将按 proto schema 转换" }
+data_sources:
+  - name: grpc_game_inventory
+    title: gRPC 游戏库存查询
+    protocol: grpc
+    runtime: builtin
+    permissions:
+      - network:outbound
+      - grpc:call
+    config:
+      title: 库存查询配置
+      allow_plugin_config_ref: true
+      validate_action: validate_config
+      fields:
+        service:
+          type: string
+          required: true
+          overridable: true
+          ui:
+            group: call
+            label: Service
+            widget: input
+            order: 10
+        method:
+          type: string
+          required: true
+          overridable: true
+          ui:
+            group: call
+            label: Method
+            widget: input
+            order: 20
+        request:
+          type: object
+          class: JSONObject
+          required: true
+          overridable: true
+          ui:
+            group: call
+            label: 请求 JSON
+            widget: json
+            order: 30
 
-[[ai_data_sources]]
-name = "steam_price_context"
-title = "Steam 价格上下文"
-runtime = "process"
-entrypoint = "bin/steam-price-context"
-permissions = ["runs:read", "network:outbound"]
+ai_data_sources:
+  - name: steam_price_context
+    title: Steam 价格上下文
+    runtime: process
+    entrypoint: bin/steam-price-context
+    permissions:
+      - runs:read
+      - network:outbound
 
-[[ui_extensions]]
-id = "steam-price-help"
-title = "Steam 价格诊断说明"
-path = "/plugins/steam-price-diagnostics/help"
+ui_extensions:
+  - id: steam-price-help
+    title: Steam 价格诊断说明
+    path: /plugins/steam-price-diagnostics/help
 ```
 
 ## 6. 能力模型
@@ -168,7 +262,7 @@ path = "/plugins/steam-price-diagnostics/help"
 | `task_template` | 给任务创建向导提供模板、默认参数、表单 schema | 支持 |
 | `task_driver` | 新增任务执行类型 | 第二阶段支持 process/http |
 | `data_source` | 平台通用数据源，供 `data_process`、`ai_analyze`、后续 `scenario_check` 复用 | 第二阶段 |
-| `ai_data_source` | AI 专用数据源扩展；保留现有 `ai_analyze` 兼容能力 | 支持 manifest 展示，第二阶段运行时接入 |
+| `ai_data_source` | AI 专用数据源扩展；供现有 `ai_analyze` 任务类型消费 | 支持 manifest 展示，第二阶段运行时接入 |
 | `output_writer` | 扩展 AI 输出写入方式 | 第二阶段 |
 | `evaluator` | 扩展 `scenario_check` 业务评估器 | 第二阶段 |
 | `trace_sink` | 扩展留痕/通知目标 | 第三阶段 |
@@ -212,12 +306,12 @@ path = "/plugins/steam-price-diagnostics/help"
 
 ```text
 internal/plugin/bundled/
-  core-tasks/pulseops.plugin.toml
-  scenario/pulseops.plugin.toml
-  data-process/pulseops.plugin.toml
-  ai/pulseops.plugin.toml
-  trace-sinks/pulseops.plugin.toml
-  grpc-source/pulseops.plugin.toml
+  core-tasks/pulseops.plugin.yaml
+  scenario/pulseops.plugin.yaml
+  data-process/pulseops.plugin.yaml
+  ai/pulseops.plugin.yaml
+  trace-sinks/pulseops.plugin.yaml
+  grpc-source/pulseops.plugin.yaml
 ```
 
 也可以把 manifest embed 到 Go 二进制中，但 catalog 中仍然要展示 manifest 内容、版本、能力和状态。
@@ -258,16 +352,460 @@ new:
   runtime.Manager 使用 activeGeneration.DriverRegistry()
 ```
 
-## 7. 外部运行时协议
+## 7. 插件配置系统
+
+插件配置系统是 V1 的核心能力，不只服务 gRPC 数据源。它负责把插件声明的配置模型转成可编辑、可校验、可加密、可版本化、可被任务引用和覆盖的运行时配置。
+
+核心边界：
+
+- 插件只在 `pulseops.plugin.yaml` 中声明配置 schema、class、约束和 UI，不直接保存配置值。
+- PulseOps 负责配置实例、配置版本、资产版本、secret 加密、审计和运行时合并。
+- 前端只渲染声明式 UI schema，不执行插件提供的任意 JavaScript。
+- run 启动时绑定明确的 `plugin_generation_id`、配置版本和实际资产版本，保证历史可追溯。
+
+### 7.1 配置归属
+
+配置分两层：
+
+| 层级 | 用途 | 示例 |
+| --- | --- | --- |
+| 插件级配置 | 同一个插件内多个能力共享的连接、安全和默认运行参数 | API base URL、endpoint、TLS、通用 metadata、认证方式、默认超时 |
+| capability 级配置 | 某个具体能力自己的配置 | gRPC data source 的 proto/descriptor、service、method、request 模板 |
+
+`capability` 是插件暴露给 PulseOps 的具体能力，例如 `@pulseops/grpc-source / data_source / grpc`。一个插件可以有多个 capability，每个 capability 都可以有自己的配置 schema。
+
+capability 配置可以引用一个插件级配置实例。执行时合并顺序固定为：
+
+```text
+schema defaults
++ plugin config active version
++ capability config active version
++ task overrides
+```
+
+任务覆盖默认禁止，只有字段显式声明 `overridable: true` 时才能在任务中覆盖。连接地址、TLS、认证这类字段可以声明为可覆盖，但默认必须保守关闭。
+
+### 7.2 Manifest 结构
+
+插件内可复用类型写在 `config_classes` 中，只允许当前插件内部引用：
+
+```yaml
+config_classes:
+  TLSConfig:
+    title: TLS 配置
+    fields:
+      enabled:
+        type: bool
+        default: false
+        ui:
+          label: 启用 TLS
+          widget: switch
+          order: 10
+      server_name:
+        type: string
+        ui:
+          label: Server Name
+          widget: input
+          order: 20
+      ca_cert:
+        type: file
+        asset_kind: certificate
+        asset_scope: config_instance
+        accept:
+          - .crt
+          - .pem
+        ui:
+          label: CA 证书
+          widget: file
+          order: 30
+```
+
+插件级配置写在顶层 `config`：
+
+```yaml
+config:
+  title: gRPC 公共连接配置
+  description: 整个 gRPC 插件共享的连接、鉴权和默认调用配置
+  validate_action: validate_config
+  fields:
+    endpoint:
+      type: string
+      required: true
+      overridable: true
+      validation:
+        min_len: 3
+        max_len: 255
+        pattern: "^[^:]+:[0-9]+$"
+      ui:
+        group: connection
+        label: 服务地址
+        widget: input
+        placeholder: inventory.service:9090
+        order: 10
+    tls:
+      type: object
+      class: TLSConfig
+      default:
+        enabled: false
+      overridable: true
+      ui:
+        group: connection
+        label: TLS
+        widget: object
+        order: 20
+    authorization:
+      type: secret
+      required: false
+      overridable: true
+      ui:
+        group: auth
+        label: Authorization
+        widget: secret
+        order: 30
+```
+
+capability 级配置写在对应 capability 下的 `config`：
+
+```yaml
+data_sources:
+  - name: grpc
+    title: gRPC Unary
+    protocol: grpc
+    runtime: builtin
+    permissions:
+      - network:outbound
+      - grpc:call
+    config:
+      title: gRPC 数据源配置
+      description: 定义 proto、默认 service/method 和请求模板
+      allow_plugin_config_ref: true
+      validate_action: validate_config
+      fields:
+        schema_mode:
+          type: select
+          required: true
+          default: reflection
+          overridable: true
+          options:
+            - value: reflection
+              label: 服务端 Reflection
+            - value: descriptor_set
+              label: Descriptor Set
+            - value: proto_files
+              label: Proto 文件
+          ui:
+            group: schema
+            label: Schema 来源
+            widget: select
+            order: 10
+        descriptor:
+          type: file
+          asset_kind: proto_descriptor_set
+          asset_scope: capability_shared
+          accept:
+            - .pb
+            - .protoset
+            - .desc
+          overridable: true
+          ui:
+            group: schema
+            label: Descriptor 文件
+            widget: file
+            visible_when:
+              field: schema_mode
+              op: eq
+              value: descriptor_set
+            order: 20
+        proto_files:
+          type: array
+          items:
+            type: file
+            asset_kind: proto_file
+            asset_scope: capability_shared
+            accept:
+              - .proto
+          overridable: true
+          ui:
+            group: schema
+            label: Proto 文件
+            widget: file_list
+            visible_when:
+              field: schema_mode
+              op: eq
+              value: proto_files
+            order: 25
+        service:
+          type: string
+          required: true
+          overridable: true
+          ui:
+            group: call
+            label: Service
+            widget: input
+            order: 30
+        method:
+          type: string
+          required: true
+          overridable: true
+          ui:
+            group: call
+            label: Method
+            widget: input
+            order: 40
+        request:
+          type: object
+          class: JSONObject
+          required: true
+          overridable: true
+          ui:
+            group: call
+            label: 请求 JSON
+            widget: json
+            order: 50
+```
+
+### 7.3 类型系统
+
+字段类型必须严格声明：
+
+| 类型 | 说明 | 关键约束 |
+| --- | --- | --- |
+| `string` | 字符串 | 支持 `min_len`、`max_len`、`pattern` |
+| `number` | 数值 | 支持 `min`、`max`、`step` |
+| `bool` | 布尔值 | UI 通常为 switch/checkbox |
+| `select` | 单选 | 必须声明 `options` |
+| `multi_select` | 多选 | 必须声明 `options` |
+| `object` | 结构对象 | 必须声明 `class` |
+| `array` | 数组 | 必须声明 `items` |
+| `file` | 文件资产引用 | 必须声明 `asset_kind` 和 `asset_scope`，可声明 `accept` |
+| `secret` | 加密密钥引用 | DB 仅保存密文，API 只返回 masked 值 |
+
+`object` 不能默认为任意 JSON，必须引用当前插件内的 class。少量需要动态结构的官方 adapter 可以显式引用系统保留 class `JSONObject`，但必须配合 `validate_action` 做领域校验，例如 gRPC request 需要根据 proto schema 校验。`array` 不能是任意数组，必须指定元素类型：
+
+```yaml
+config_classes:
+  HeaderItem:
+    fields:
+      key:
+        type: string
+        required: true
+      value:
+        type: secret
+        required: true
+
+config:
+  fields:
+    headers:
+      type: array
+      items:
+        type: object
+        class: HeaderItem
+      ui:
+        label: 请求头
+        widget: table
+```
+
+class 可以引用同一插件内的其他 class，但不能跨插件引用。加载 manifest 时必须检查循环引用、未知 class、未知字段类型、缺失 `items`、缺失 `options`、缺失或非法 `asset_scope` 等错误。
+
+### 7.4 声明式 UI
+
+字段可以通过 `ui` 描述前端表现：
+
+| 字段 | 说明 |
+| --- | --- |
+| `label` | 显示名称 |
+| `widget` | 控件类型，如 `input`、`textarea`、`number`、`switch`、`select`、`multi_select`、`json`、`file`、`file_list`、`secret`、`object`、`table` |
+| `group` | 所属分组 |
+| `order` | 展示顺序 |
+| `placeholder` | 占位提示 |
+| `help` | 辅助说明 |
+| `advanced` | 是否放入高级配置区域 |
+| `collapsed` | 分组默认是否折叠 |
+| `visible_when` | 条件展示 |
+
+条件展示只支持受控表达式：
+
+```yaml
+visible_when:
+  field: tls.enabled
+  op: eq
+  value: true
+```
+
+V1 支持的 `op`：`eq`、`ne`、`in`、`not_in`、`exists`、`empty`。不支持任意表达式和插件自定义前端代码。
+
+### 7.5 配置实例和版本
+
+用户基于 schema 创建配置实例。实例只是稳定身份，配置值保存在版本中：
+
+```text
+plugin_config_instance
+  id = grpc-prod-common
+  plugin_id = @pulseops/grpc-source
+
+plugin_config_version
+  instance_id = grpc-prod-common
+  version = 3
+  status = active
+  values = {...}
+```
+
+状态流转：
+
+```text
+draft -> validated -> active
+active -> retired
+draft -> failed
+validated -> failed
+```
+
+规则：
+
+- 修改 active 配置时不原地覆盖，必须创建新的 draft version。
+- draft 可反复编辑；进入 validated 后不可修改。
+- activate 成功后，新 run 使用新配置版本，已开始的 run 继续使用启动时绑定的版本。
+- disabled 的配置实例不能被新任务引用，但历史 run 仍可追溯。
+- run record 需要记录插件 generation、插件级配置版本、capability 配置版本、任务覆盖摘要和实际资产版本。
+
+### 7.6 文件资产
+
+文件资产用于保存 proto、descriptor、证书等不能直接塞进配置 JSON 的内容。V1 支持两类资产，但不做跨插件的平台级共享：
+
+| 作用域 | manifest 值 | 用途 | 示例 |
+| --- | --- | --- | --- |
+| 插件/能力共享资产 | `plugin_shared`、`capability_shared` | 同一个插件或同一个 capability 内多个配置实例复用 | gRPC proto files、descriptor set、公共 CA 证书 |
+| 配置实例私有资产 | `config_instance` | 只服务某个配置实例，避免误共享敏感或临时文件 | 某个环境的客户端证书、私有 proto 包 |
+
+配置值只保存资产引用，不保存文件内容：
+
+```text
+plugin_asset
+  id = inventory-proto
+  plugin_id = @pulseops/grpc-source
+  capability_id = grpc
+  config_instance_id = null
+  scope = capability_shared
+  kind = proto_files
+
+plugin_asset_version
+  asset_id = inventory-proto
+  version = 4
+  status = active
+  storage = db
+  checksum = sha256:...
+```
+
+规则：
+
+- 共享资产可以被同一插件或 capability 下的多个配置实例和多个配置版本引用。
+- 配置实例私有资产只能被所属配置实例引用，不能被其他实例选择。
+- 更新资产不要求重新创建配置版本；配置版本引用稳定的 `asset_id`，运行时解析到当前 active asset version。
+- 资产版本也必须走 validate/activate；新 run 解析到当前 active asset version。
+- run 启动时记录实际使用的 asset version，避免资产更新后历史运行不可解释。
+- 资产删除前必须确认没有配置版本或历史 run 引用。
+- 小文件资产可以直接存入数据库；如果后续迁移到对象存储，DB 仍保存资产版本、checksum、大小、存储位置和状态，配置引用语义不变。
+- 跨插件共享资产不进入 V1，避免权限和生命周期边界变复杂；确需共享时由各插件各自创建资产引用。
+
+gRPC 插件的 `.proto`、descriptor set、CA 证书、客户端证书都走资产模型。
+
+### 7.7 Secret
+
+`secret` 是一等字段类型。前端保存 secret 后，DB 存密文，API 读回只返回 masked 视图：
+
+```json
+{
+  "secret_id": "sec_01J...",
+  "masked": "********",
+  "updated_at": "2026-06-28T10:00:00Z"
+}
+```
+
+规则：
+
+- 普通配置 JSON 中只保存 `secret_id`，不保存明文。
+- 后端在 validate/run 调用前解析 secret，并只在内存中生成最终配置。
+- 插件中心、任务详情、运行详情默认展示 masked 值。
+- 任务覆盖 secret 时也必须引用 secret，不能直接提交明文到任务定义。
+- V1 的 secret 加密材料和密文都由 PulseOps 持久化到数据库；这满足产品内加密和误读防护，但不是 KMS 级安全隔离。
+
+### 7.8 配置校验
+
+配置发布前必须两级校验：
+
+1. PulseOps schema 校验：类型、必填、范围、枚举、正则、class 引用、资产引用、secret 引用、任务覆盖权限。
+2. 插件自定义校验：若 schema 声明 `validate_action`，PulseOps 调用插件的 `validate_config`。
+
+`validate_config` 请求使用同一套 runtime envelope：
+
+```json
+{
+  "protocol": "pulseops.plugin/v1",
+  "plugin_id": "@pulseops/grpc-source",
+  "capability": "grpc",
+  "action": "validate_config",
+  "config": {
+    "endpoint": "inventory.service:9090",
+    "schema_mode": "proto_files",
+    "service": "yym.inventory.v1.InventoryService"
+  },
+  "input": {
+    "scope": "capability_config",
+    "assets": [
+      {
+        "field": "proto_files",
+        "asset_id": "inventory-proto",
+        "version": 4
+      }
+    ]
+  }
+}
+```
+
+gRPC 官方插件必须在 `validate_config` 中支持：
+
+- endpoint dial 检查。
+- reflection 可用性检查。
+- descriptor set 解析。
+- proto files 编译。
+- service/method 查找。
+- 可选的 request dry-run 或真实试调用。
+
+### 7.9 任务引用和覆盖
+
+任务中引用配置实例，而不是重复填写整套连接配置：
+
+```json
+{
+  "type": "grpc",
+  "alias": "inventory",
+  "plugin_config_ref": "grpc-prod-common",
+  "capability_config_ref": "inventory-query",
+  "overrides": {
+    "method": "GetInventory",
+    "request": {
+      "user_id": "{{ .Run.Labels.user_id }}"
+    }
+  },
+  "on_error": "fail"
+}
+```
+
+后端保存任务时必须校验：
+
+- 引用的配置实例存在且有 active version。
+- override 字段在 schema 中存在。
+- override 字段显式 `overridable: true`。
+- override 值通过相同类型系统校验。
+- secret/file override 使用引用，不内嵌明文或文件内容。
+
+## 8. 外部运行时协议
 
 外部插件推荐两种运行时：
 
 - `process`：PulseOps 启动子进程，通过 stdin/stdout 传 JSON envelope。适合内部插件、私有部署、低延迟任务。
 - `http`：PulseOps 调用插件服务 HTTP endpoint。适合独立部署、跨语言、资源隔离更强的插件。
 
-现有 AI `.so` 作为兼容运行时：
-
-- `c_abi`：仅用于 AI 数据源，保持当前 `plugin_name` / `plugin_fetch` / `plugin_free` 协议。
+旧 AI `.so` 不作为 V1 插件运行时。V1 不直接加载旧 `plugin_name` / `plugin_fetch` / `plugin_free` C ABI 插件；存量能力需要重新包装为 `process`、`http` 或官方 bundled adapter，并通过 `pulseops.plugin.yaml` 声明 capability、权限和配置 schema。
 
 Process 协议请求：
 
@@ -324,7 +862,7 @@ Process 协议响应：
 }
 ```
 
-### 7.1 数据源协议适配器
+### 8.1 数据源协议适配器
 
 `data_source` 是平台通用能力，负责把外部系统数据标准化为 JSON-like 数据对象，供 `data_process`、`ai_analyze` 和后续 `scenario_check` 复用。
 
@@ -338,30 +876,36 @@ Process 协议响应：
 | `process` | 调插件子进程，由插件自行采集数据 | process runtime |
 | `http_plugin` | 调插件服务 HTTP endpoint，由插件自行采集数据 | http runtime |
 
-gRPC 数据源不要求插件作者写 Go 代码。插件可以只声明一个 `protocol = "grpc"` 的 `data_source`，PulseOps 使用内置 gRPC adapter 执行调用。
+gRPC 数据源不要求插件作者写 Go 代码。插件可以只声明一个 `protocol: grpc` 的 `data_source`，PulseOps 使用内置 gRPC adapter 执行调用。
 
-gRPC 数据源最小配置：
+gRPC 数据源 manifest 最小示例：
 
-```toml
-[[data_sources]]
-name = "grpc_game_inventory"
-title = "gRPC 游戏库存查询"
-protocol = "grpc"
-runtime = "builtin"
-permissions = ["network:outbound", "grpc:call"]
-
-[data_sources.defaults]
-timeout = "5s"
-max_receive_bytes = 1048576
-use_reflection = true
-
-[data_sources.schema]
-endpoint = { type = "string", required = true }
-service = { type = "string", required = true }
-method = { type = "string", required = true }
-request = { type = "object", required = true }
-metadata = { type = "object", required = false }
-tls = { type = "object", required = false }
+```yaml
+data_sources:
+  - name: grpc_game_inventory
+    title: gRPC 游戏库存查询
+    protocol: grpc
+    runtime: builtin
+    permissions:
+      - network:outbound
+      - grpc:call
+    config:
+      title: gRPC 调用配置
+      validate_action: validate_config
+      fields:
+        service:
+          type: string
+          required: true
+          overridable: true
+        method:
+          type: string
+          required: true
+          overridable: true
+        request:
+          type: object
+          class: JSONObject
+          required: true
+          overridable: true
 ```
 
 任务中引用示例：
@@ -370,17 +914,13 @@ tls = { type = "object", required = false }
 {
   "type": "grpc_game_inventory",
   "alias": "inventory",
-  "config": {
-    "endpoint": "inventory.service:9090",
-    "service": "yym.inventory.v1.InventoryService",
+  "plugin_config_ref": "grpc-prod-common",
+  "capability_config_ref": "inventory-query",
+  "overrides": {
     "method": "GetInventory",
     "request": {
       "user_id": "{{ .Run.Labels.user_id }}"
-    },
-    "metadata": {
-      "x-env": "prod"
-    },
-    "timeout": "3s"
+    }
   },
   "on_error": "fail"
 }
@@ -389,14 +929,14 @@ tls = { type = "object", required = false }
 gRPC adapter 约束：
 
 - 第一阶段只支持 Unary RPC；server streaming、client streaming、bidirectional streaming 后续单独设计。
-- 优先使用 gRPC reflection；生产环境也允许配置 `proto_descriptor_set` 或 `proto_files`，避免依赖线上 reflection。
+- 优先使用 gRPC reflection；生产环境也允许通过配置资产引用 descriptor set 或 proto files，避免依赖线上 reflection。
 - 请求体用 JSON 表达，adapter 根据 proto schema 转换为 protobuf message。
 - 响应统一转为 JSON object，写入 `DataSources.<alias>`。
 - 支持 TLS、mTLS、metadata、deadline、max receive bytes。
-- metadata 中的 token、authorization 等敏感字段必须走 secret reference，不直接落 manifest。
+- metadata 中的 token、authorization 等敏感字段必须走 `secret` 字段和 secret 引用，不直接落 manifest 或任务定义。
 - gRPC 调用错误需要标准化为 `{code,message,retryable,details}`，并遵守数据源的 `on_error` 策略。
 
-## 8. 权限和安全
+## 9. 权限和安全
 
 插件 manifest 必须声明权限。PulseOps 启动、validate、activate 时校验权限是否被允许。
 
@@ -420,13 +960,13 @@ gRPC adapter 约束：
 隔离策略：
 
 - 默认不向插件透传环境变量，只透传 allowlist。
-- 插件不直接读取主配置中的密钥，使用 secret reference。
+- 插件不直接读取主配置中的密钥，使用插件配置系统中的 `secret` 字段和 secret 引用。
 - 每次调用都有 timeout 和最大输出字节数。
 - process 插件工作目录固定在插件包目录。
 - 插件 stdout/stderr 纳入运行留痕，但需要截断。
 - 插件加载失败只标记 plugin/capability error，不阻断平台启动，除非 `[plugins].strict = true`。
 
-## 9. 全局配置
+## 10. 全局配置
 
 建议新增：
 
@@ -457,13 +997,13 @@ env_allowlist = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"]
 | `max_output_bytes` | 单次插件响应最大字节数 |
 | `env_allowlist` | 允许传给 process 插件的环境变量 |
 
-兼容策略：
+迁移策略：
 
-- `[ai].plugin_dir` 保留一个版本周期。
+- 插件系统 V1 不兼容 `pulseops.plugin.toml`，只扫描和加载 `pulseops.plugin.yaml`。
+- 旧 AI C ABI 插件不作为兼容目标；若业务必须保留，按新插件模型重新包装成 `ai_data_source` 或通用 `data_source` capability。
 - 若 `[plugins].dir` 未配置，默认仍使用 `plugins`。
-- AI C ABI 插件先从 `[ai].plugin_dir` 加载，后续迁移到 manifest 的 `ai_data_sources.runtime = "c_abi"`。
 
-## 10. 后端 API
+## 11. 后端 API
 
 新增 API：
 
@@ -481,6 +1021,27 @@ env_allowlist = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"]
 | `POST` | `/api/plugins/reload` | 重新扫描插件目录，只构建候选 catalog，不直接覆盖 active version |
 | `GET` | `/api/plugin-capabilities` | 按 type/kind 查询能力 |
 | `POST` | `/api/plugins/gc` | 清理无引用的 retired release 和过期 generation |
+
+插件配置 API：
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `GET` | `/api/plugins/{id}/config-schema` | 获取插件级配置 schema、class 和 UI schema |
+| `GET` | `/api/plugin-capabilities/{capability_id}/config-schema` | 获取 capability 级配置 schema |
+| `GET` | `/api/plugin-configs` | 按 plugin/capability 查询配置实例 |
+| `POST` | `/api/plugin-configs` | 创建插件级或 capability 级配置实例 |
+| `GET` | `/api/plugin-configs/{instance_id}` | 获取配置实例详情、active version 和版本列表 |
+| `POST` | `/api/plugin-configs/{instance_id}/versions` | 基于当前 active 或空白 schema 创建 draft version |
+| `PUT` | `/api/plugin-configs/{instance_id}/versions/{version}` | 更新 draft version 的配置值 |
+| `POST` | `/api/plugin-configs/{instance_id}/versions/{version}/validate` | 执行 schema 校验和插件 `validate_config` |
+| `POST` | `/api/plugin-configs/{instance_id}/versions/{version}/activate` | 激活配置版本 |
+| `POST` | `/api/plugin-configs/{instance_id}/disable` | 禁用配置实例，阻止新任务引用 |
+| `POST` | `/api/plugin-assets` | 创建文件资产，需指定 `scope`、`plugin_id`、可选 `capability_id` 或 `config_instance_id` |
+| `POST` | `/api/plugin-assets/{asset_id}/versions` | 上传新的资产版本 |
+| `POST` | `/api/plugin-assets/{asset_id}/versions/{version}/validate` | 校验资产版本，例如 proto 编译、证书解析 |
+| `POST` | `/api/plugin-assets/{asset_id}/versions/{version}/activate` | 激活资产版本 |
+| `POST` | `/api/plugin-secrets` | 创建或更新 secret，返回 masked 引用 |
+| `GET` | `/api/plugin-secrets/{secret_id}` | 获取 secret masked 元数据，不返回明文 |
 
 Catalog 响应示例：
 
@@ -510,10 +1071,17 @@ Catalog 响应示例：
 | `plugin_generations` | 每次 registry 构建生成的不可变 generation |
 | `plugin_generation_refs` | generation 被运行中 run 引用的计数和最后释放时间 |
 | `plugin_events` | install、validate、activate、disable、rollback、gc 的审计事件 |
+| `plugin_config_instances` | 插件级或 capability 级配置实例身份、归属、状态 |
+| `plugin_config_versions` | 配置版本、状态、配置值、校验结果、active/retired 时间 |
+| `plugin_assets` | 文件资产身份、kind、scope、插件/capability/配置实例归属、状态 |
+| `plugin_asset_versions` | 资产版本、存储位置、checksum、状态、校验结果 |
+| `plugin_secrets` | secret 身份、归属、masked 元数据 |
+| `plugin_secret_values` | secret 密文、加密元数据、更新时间 |
+| `plugin_config_events` | 配置、资产、secret 的 create/update/validate/activate/disable 审计事件 |
 
 `kv_metadata` 只可用于早期本地开发或 catalog-only 原型；只要要求不停机更新，就必须有 release/generation 级别的持久状态。
 
-## 11. 前端设计
+## 12. 前端设计
 
 新增一级页面：`插件中心`。
 
@@ -522,6 +1090,9 @@ Catalog 响应示例：
 - 概览：总插件数、启用数、错误数、能力数。
 - 插件列表：名称、active version、状态、draining 数、能力数量、权限、最近错误。
 - 插件详情：manifest 信息、release 列表、generation 引用、能力列表、权限、入口文件、默认配置。
+- 配置实例：插件级配置和 capability 级配置的创建、编辑、校验、激活、禁用、版本对比。
+- 资产管理：上传共享资产和配置实例私有资产，展示资产版本、checksum、引用关系和校验结果。
+- Secret 管理：录入、更新、masked 展示和引用 secret，不展示明文。
 - 操作：安装 release、校验、激活、回滚、禁用、卸载、GC。
 - 能力视图：按 `task_template`、`task_driver`、`data_source`、`ai_data_source`、`hook` 分组。
 - 发布状态：展示当前 active generation、旧 generation refcount、release 是否可删除。
@@ -530,18 +1101,21 @@ Catalog 响应示例：
 
 - 模板卡片从内置 `KIND_OPTIONS` 扩展为后端返回的 `task_template`。
 - 通用数据源类型从硬编码数组扩展为 `/api/plugin-capabilities?type=data_source`。
-- `ai_analyze` 继续兼容 `/api/plugin-capabilities?type=ai_data_source`，但优先复用通用 `data_source`。
-- 插件提供的参数表单优先使用 JSON Schema 渲染，不执行插件 JS。
+- `ai_analyze` 继续读取 `/api/plugin-capabilities?type=ai_data_source`，但优先复用通用 `data_source`。
+- 插件提供的配置和参数表单使用 `pulseops.plugin.yaml` 中的声明式 UI schema 渲染，不执行插件 JS。
 - 插件模板可声明推荐触发方式、默认 labels、默认 params 和是否支持依赖触发。
+- 数据源类任务优先选择配置实例，再填写 schema 允许覆盖的字段。
+- 保存任务时后端校验配置实例、active version、覆盖字段和 secret/file 引用。
 
 平台设置页改造：
 
 - AI 配置中的“插件目录”迁移到插件中心。
 - 设置页只保留全局开关和运行安全配置。
+- 插件配置、资产、secret 归入插件中心或独立“插件配置”页，不放在平台全局设置页。
 
-## 12. 零停机上下架与更新方案
+## 13. 零停机上下架与更新方案
 
-### 12.1 零停机不变量
+### 13.1 零停机不变量
 
 插件系统必须满足以下不变量：
 
@@ -553,8 +1127,10 @@ Catalog 响应示例：
 6. 只有当旧 release 的引用计数为 0，且超过最小保留时间后，才允许 GC 删除。
 7. 插件下架不等于立即杀死运行中插件进程；默认行为是停止新流量并等待 draining。
 8. 所有 activate、disable、rollback 都必须有审计事件，并可在插件中心看到结果。
+9. 配置版本 activate 不重启 PulseOps；新 run 使用新的 active 配置版本，运行中的 run 使用启动时绑定的旧配置版本。
+10. 资产版本 activate 不要求重新保存配置；新 run 解析到新的 active 资产版本，但必须记录实际使用的 asset version。
 
-### 12.2 状态机
+### 13.2 状态机
 
 插件 release 状态：
 
@@ -597,7 +1173,7 @@ draining -> active      # 回滚时可重新激活仍保留的旧 release
 | `degraded` | active release 存在，但部分能力或 readiness 异常 |
 | `not_installed` | 无任何 release |
 
-### 12.3 Registry Generation
+### 13.3 Registry Generation
 
 每次插件 catalog 成功构建后生成一个不可变 `generation_id`：
 
@@ -621,7 +1197,7 @@ capabilities:
 
 这保证更新时不会抢占正在运行的任务，也不会把运行中的调用切到新插件版本。
 
-### 12.4 上架流程
+### 13.4 上架流程
 
 上架指引入一个新插件或一个新 release，但不影响线上流量。
 
@@ -629,7 +1205,7 @@ capabilities:
 
 1. 将插件写入临时目录：`plugins/.staging/<plugin-id>/<version>/`。
 2. 计算 checksum，校验目录完整性。
-3. 解析 `pulseops.plugin.toml`，校验 `id`、`version`、schema version、能力唯一性。
+3. 解析 `pulseops.plugin.yaml`，校验 `id`、`version`、schema version、能力唯一性。
 4. 原子重命名到 `plugins/<plugin-id>/releases/<version>/`。
 5. 写入 `plugin_releases`，状态为 `staged`。
 6. 运行 validate：manifest、权限、入口文件、process 可执行位、http endpoint 格式、schema。
@@ -638,7 +1214,7 @@ capabilities:
 
 上架完成后，新 release 只出现在插件中心，不会自动承接新 run。必须显式 activate 才会上线。
 
-### 12.5 更新流程
+### 13.5 更新流程
 
 更新指把同一个插件从旧 active release 切到新 release。
 
@@ -670,7 +1246,7 @@ capabilities:
 - 步骤 5 CAS 失败：说明有并发发布，放弃本次 activate 并要求重新读取状态。
 - 步骤 6 后发现新版本健康检查失败：触发人工或自动 rollback，生成新的 generation 指回旧 release。
 
-### 12.6 下架流程
+### 13.6 下架流程
 
 下架分两种：
 
@@ -699,7 +1275,7 @@ uninstall 流程：
 3. 没有任务定义仍引用该插件能力；若有引用，必须先删除任务或确认强制卸载。
 4. 删除 release 文件，写入 `plugin_events.uninstall`。
 
-### 12.7 回滚流程
+### 13.7 回滚流程
 
 回滚是一次特殊 activate，不是恢复旧目录：
 
@@ -712,17 +1288,18 @@ uninstall 流程：
 
 回滚要求旧 release 在 `retention` 内不被 GC。默认建议保留最近 3 个 release 或至少保留 7 天。
 
-### 12.8 C ABI 插件约束
+### 13.8 旧 C ABI 迁移约束
 
-现有 AI `.so` 插件只能作为兼容能力，不能作为强零停机更新的推荐路径：
+旧 AI `.so` 插件不进入 V1 标准运行时，也不承诺旧插件包原样可用。原因是 `.so` 动态加载和卸载无法提供稳定的零停机、隔离和资源回收语义。
 
-- 不允许原地覆盖已加载 `.so` 文件。
-- `.so` release 必须放在版本目录中，文件名可带版本或 checksum。
-- 新 `.so` 只允许在新 generation 中加载。
-- 旧 `.so` 是否能卸载取决于运行时和库自身行为；即使调用 `Dlclose`，也不能把它作为稳定资源回收保证。
-- 需要强零停机和可回收能力的插件，应使用 process/http runtime。
+迁移要求：
 
-### 12.9 并发和一致性
+- 旧能力需要按 `pulseops.plugin.yaml` 重新声明身份、权限、能力和配置 schema。
+- 推荐改造成 `process` 或 `http` runtime。
+- 若确需保留 native 代码，只能作为 PulseOps 官方 bundled adapter 的内部实现细节，不暴露为第三方插件兼容协议。
+- 需要强零停机和可回收能力的插件，必须使用 process/http runtime。
+
+### 13.9 并发和一致性
 
 发布操作必须串行化到插件级别：
 
@@ -735,9 +1312,10 @@ uninstall 流程：
 
 - run record 中记录 `plugin_generation_id`。
 - 插件调用日志中记录 `plugin_id`、`plugin_version`、`capability_id`。
+- run record 中记录插件级配置版本、capability 配置版本和实际资产版本。
 - 任务详情页能展示“当前任务引用的插件能力是否仍 active”。
 
-### 12.10 场景矩阵
+### 13.10 场景矩阵
 
 | 场景 | 入口操作 | 对新 run 的影响 | 对运行中 run 的影响 | 失败处理 |
 | --- | --- | --- | --- | --- |
@@ -748,7 +1326,7 @@ uninstall 流程：
 | 回滚 | rollback | 新 run 切回旧 release 的新 generation | 已开始的坏版本 run 不被强杀，按策略自然结束或任务级取消 | 旧 release readiness 失败则拒绝回滚 |
 | 插件目录 reload | reload | 不切流，只刷新可见 release/catalog | 无影响 | 只记录 catalog error |
 
-## 13. 生命周期
+## 14. 生命周期
 
 启动流程：
 
@@ -783,7 +1361,7 @@ Reload 流程：
 6. 已存在任务若依赖被禁用能力，状态展示为 `plugin_disabled` 或 validate 失败。
 7. 旧 generation draining 完成后 release 才可 retired。
 
-## 14. 运行观测
+## 15. 运行观测
 
 新增指标：
 
@@ -810,25 +1388,26 @@ Reload 流程：
 
 UI 中每个插件显示最近加载错误和最近调用错误。
 
-## 15. 与现有模块的关系
+## 16. 与现有模块的关系
 
 | 现有模块 | 改造方式 |
 | --- | --- |
 | `internal/task` | 保持 `Driver` 接口；当前内置 driver 迁入 `@pulseops/core-tasks`、`@pulseops/scenario`、`@pulseops/data-process` 官方插件 |
-| `internal/ai` | 迁入 `@pulseops/ai` 官方插件；保留 C ABI 数据源兼容；新增从 plugin catalog 注册数据源 |
+| `internal/ai` | 迁入 `@pulseops/ai` 官方插件；移除旧 C ABI 插件直接加载入口；新增从 plugin catalog 注册数据源 |
 | `internal/evaluator` | 将 evaluator 注册表纳入 capability registry；官方 evaluator 归入 `@pulseops/scenario` |
 | `internal/trace` | `postgres`、`webhook` sink 归入 `@pulseops/trace-sinks` 官方插件 |
 | `internal/app` | 不再直接拼 `driverList` 注册；只注册 bundled official 插件并从 active generation 取得 driver/evaluator/source registry |
-| `internal/api` | 新增 plugin catalog API，不改变现有任务 API |
-| `web/src/components/task-form` | 从 API 读取模板和 `data_source` 能力，内置选项作为 fallback |
-| `web/src/pages/Settings.tsx` | 插件目录迁移到插件中心或平台配置摘要 |
+| `internal/api` | 新增 plugin catalog、配置实例、配置版本、资产和 secret API，不改变现有任务 API 的基础路径 |
+| `internal/store` | 新增插件 release/generation 表，以及配置实例、配置版本、资产版本、secret 密文和审计表 |
+| `web/src/components/task-form` | 从 API 读取模板、`data_source` 能力和配置实例；只允许编辑 schema 声明可覆盖的字段 |
+| `web/src/pages/Settings.tsx` | 插件目录迁移到插件中心或平台配置摘要；插件配置、资产、secret 不放在平台设置页 |
 
-## 16. 实施计划
+## 17. 实施计划
 
 ### 阶段 1：Catalog 和插件中心
 
 - 新增 `internal/plugin` 包。
-- 支持扫描 `plugins/*/releases/*/pulseops.plugin.toml`。
+- 支持扫描 `plugins/*/releases/*/pulseops.plugin.yaml`。
 - 新增 `plugin_packages`、`plugin_releases`、`plugin_active_versions`、`plugin_generations`、`plugin_generation_refs`、`plugin_events`。
 - 当前内置任务驱动迁移为 bundled official 插件：`@pulseops/core-tasks`、`@pulseops/scenario`、`@pulseops/data-process`。
 - AI、trace sink、官方 gRPC 数据源分别注册为 `@pulseops/ai`、`@pulseops/trace-sinks`、`@pulseops/grpc-source` 官方插件。
@@ -848,24 +1427,46 @@ UI 中每个插件显示最近加载错误和最近调用错误。
 - disable 插件后，新任务不可再选择该插件能力，旧 generation 进入 draining。
 - rollback 能把 active version 指回旧 release，并生成新的 generation。
 
-### 阶段 2：模板和数据源接入
+### 阶段 2：插件配置服务
+
+- `pulseops.plugin.yaml` parser 支持 `config_classes`、插件级 `config`、capability 级 `config`。
+- 实现严格类型系统：`string`、`number`、`bool`、`select`、`multi_select`、`object`、`array`、`file`、`secret`。
+- `object` 支持 class，`array` 支持 `items`，class 只允许插件内复用。
+- 实现声明式 UI schema 渲染，不执行插件 JS。
+- 新增配置实例、配置版本、资产、资产版本、secret 加密存储和审计表。
+- 配置版本支持 `draft -> validated -> active`，修改 active 时创建新 draft。
+- 支持 `validate_config` runtime action，先 schema 校验，再插件自定义校验。
+- 任务保存时校验配置实例引用、active version、任务覆盖权限和 override 类型。
+
+验收：
+
+- 插件可以只通过 YAML 声明配置页面，前端能渲染字段、分组、条件展示和校验提示。
+- 创建配置实例后，保存为 draft，validate 通过后才能 activate。
+- secret 只在保存时提交明文，后续 API 只返回 masked 值。
+- 共享文件资产上传后可被多个配置实例和多个配置版本引用；配置实例私有资产只能被所属实例引用。
+- 资产更新不要求重新保存配置，新 run 使用 active asset version，并记录实际 asset version。
+- run 记录实际使用的配置版本和资产版本。
+- gRPC 插件能通过配置实例上传/引用 proto 或 descriptor，并在 `validate_config` 中完成编译或解析校验。
+
+### 阶段 3：模板和数据源接入
 
 - 任务创建向导消费 `task_template`。
-- 数据源下拉消费 `data_source`，AI 分析继续兼容 `ai_data_source`。
+- 数据源下拉消费 `data_source` 和配置实例，AI 分析继续消费 `ai_data_source` capability。
 - 新增内置 `grpc` 数据源 adapter，支持 Unary RPC、reflection/descriptor、TLS、metadata、deadline。
-- 支持 `c_abi` AI 数据源 manifest 化。
+- 旧 C ABI AI 数据源不作为兼容目标；如确需保留，另做官方迁移 adapter。
 - 支持 process/http AI 数据源 adapter。
 - process/http runtime 接入 readiness check 和 worker pool draining。
 
 验收：
 
 - 插件新增通用数据源后，任务表单可选择。
-- 配置 `protocol = "grpc"` 的数据源后，`data_process` 和 `ai_analyze` 都可以通过 alias 读取 gRPC 响应 JSON。
+- 配置 `protocol: grpc` 的数据源后，`data_process` 和 `ai_analyze` 都可以通过 alias 读取 gRPC 响应 JSON。
+- 任务可以引用 gRPC 插件配置实例，并覆盖 schema 允许覆盖的 `service`、`method`、`request` 等字段。
 - 禁用插件后，新建/保存依赖该数据源的任务会校验失败。
 - 升级 AI 数据源插件时，正在执行的 `ai_analyze` run 继续使用旧 generation，新 run 使用新 generation。
 - 新版本 readiness 失败时，不改变当前 active version。
 
-### 阶段 3：外部任务驱动
+### 阶段 4：外部任务驱动
 
 - 新增 process/http task driver adapter。
 - 外部 driver 支持 `validate` 和 `run` 两个 action。
@@ -880,7 +1481,7 @@ UI 中每个插件显示最近加载错误和最近调用错误。
 - 插件崩溃不会影响 PulseOps 主进程。
 - 升级外部 driver 时，旧版本运行中的任务不被中断，新任务切到新版本。
 
-### 阶段 4：Hook、Evaluator、Output Writer
+### 阶段 5：Hook、Evaluator、Output Writer
 
 - 引入事件总线：`run.started`、`run.finished`、`task.updated`、`plugin.loaded`。
 - 支持外部 evaluator。
@@ -892,37 +1493,41 @@ UI 中每个插件显示最近加载错误和最近调用错误。
 - 插件可监听 run finished 并发送通知。
 - 插件 evaluator 可被 `scenario_check` 引用。
 
-### 阶段 5：治理增强
+### 阶段 6：治理增强
 
 - 插件签名和 checksum。
 - 插件安装/升级审计表。
-- 插件配置页面和 secret reference。
 - 插件调用限流。
 - 插件包导入/导出。
 
-## 17. 关键风险
+## 18. 关键风险
 
 | 风险 | 处理 |
 | --- | --- |
-| 插件破坏主进程稳定性 | 默认 process/http 隔离；`.so` 仅兼容 AI 数据源 |
-| 插件权限过大 | manifest 权限声明 + allowlist + secret reference |
-| 插件表单不可维护 | 第一阶段只支持 JSON Schema/模板，不执行任意前端 JS |
+| 插件破坏主进程稳定性 | 默认 process/http 隔离；`.so` 不作为 V1 第三方插件运行时 |
+| 插件权限过大 | manifest 权限声明 + allowlist + 配置系统 secret 引用 |
+| 插件表单不可维护 | 使用 `pulseops.plugin.yaml` 的声明式 UI schema，不执行任意前端 JS |
+| YAML 表达过于自由 | 只支持受限 YAML 数据子集；加载后 normalize，再做 manifest/schema 校验 |
+| 配置变更影响历史 run | 配置实例版本化，run 绑定配置版本；资产独立版本化并记录实际 asset version |
+| secret 泄露 | DB 只保存密文，API 默认返回 masked 值；明文只在 validate/run 内存流程出现 |
 | 插件 reload 影响运行中任务 | registry generation 不可变，run 启动时绑定 generation，旧 release draining 后再回收 |
 | 插件更新时原地覆盖文件 | release 目录不可变，新版本必须写入新目录，active version 通过 DB CAS 切换 |
 | bundled official 插件被误认为可单独热更新代码 | 文档和 UI 明确区分 `bundled_official` 与 `external_official`；需要独立发版的官方能力迁移到 external release 包 |
-| C ABI `.so` 无法可靠卸载 | 仅作为兼容路径；强零停机能力使用 process/http runtime |
+| C ABI `.so` 无法可靠卸载 | 不提供旧插件兼容入口；强零停机能力使用 process/http runtime |
 | 插件能力冲突 | capability id 全局唯一，冲突进入 error 状态 |
 | 目录不存在导致启动失败 | 默认 warning，不阻断；strict=true 才失败 |
 
-## 18. 推荐决策
+## 19. 推荐决策
 
 建议按以下决策推进：
 
-1. 插件系统第一阶段先做 catalog、manifest、API 和插件中心，不直接执行外部插件代码。
+1. 插件系统 V1 只支持 `pulseops.plugin.yaml`，不提供 `pulseops.plugin.toml` 兼容层。
 2. 第一阶段必须同时落下 release/generation/draining 状态底座，否则后续零停机更新会返工。
 3. 现有内置任务先迁为 `bundled_official` 官方插件，从 catalog 和 active generation 注册。
 4. 需要独立零停机更新代码的官方能力，再迁为 `external_official`。
 5. 外部运行时优先支持 `process` 和 `http`，不要扩展通用 Go `.so`。
-6. 任务创建向导优先接入 `task_template` 和通用 `data_source`，AI 分析复用同一套数据源能力。
-7. 现有 `[ai].plugin_dir` 保留兼容，但新插件能力统一迁移到 `[plugins]`。
-8. 插件加载失败默认 degraded，不阻断核心平台启动。
+6. 插件配置系统必须作为 V1 核心能力：插件级配置、capability 级配置、class 类型系统、声明式 UI、版本化配置、共享/私有资产版本和 DB 加密 secret。
+7. 任务创建向导优先接入 `task_template`、通用 `data_source` 和配置实例，AI 分析复用同一套数据源能力。
+8. 配置覆盖默认禁止，只允许 schema 显式 `overridable: true` 的字段被任务覆盖。
+9. V1 支持插件/能力共享资产和配置实例私有资产，但不做跨插件平台级共享资产；资产独立版本化并由配置版本引用，配置版本 activate 和资产版本 activate 互不强绑定。
+10. 插件加载失败默认 degraded，不阻断核心平台启动。

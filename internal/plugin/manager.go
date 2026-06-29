@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"pulseops/internal/config"
+	"pulseops/internal/datasource"
 	"pulseops/internal/evaluator"
 	"pulseops/internal/pluginruntime"
 	"pulseops/internal/task"
@@ -44,6 +45,10 @@ type Manager struct {
 
 type releaseProtectionStore interface {
 	PluginReleaseProtected(ctx context.Context, pluginID, version string, retention time.Duration) (bool, error)
+}
+
+type expiredGenerationStore interface {
+	DeleteExpiredPluginGenerations(ctx context.Context, activeGenerationID string, retention time.Duration) (int, error)
 }
 
 func NewManager(opts Options) *Manager {
@@ -105,7 +110,7 @@ func (m *Manager) Initialize(ctx context.Context) error {
 	if err := m.persistGenerationLocked(ctx, gen, "startup", "", "", "ready"); err != nil {
 		return err
 	}
-	m.active = gen
+	m.setActiveGenerationLocked(gen)
 	m.notifyGenerationListenersLocked(gen)
 	return nil
 }
@@ -139,6 +144,15 @@ func (m *Manager) ActiveEvaluatorRegistry() (*evaluator.Registry, string) {
 		return evaluator.NewRegistry(), ""
 	}
 	return m.active.EvaluatorRegistry, m.active.ID
+}
+
+func (m *Manager) ActiveCapabilities() ([]Capability, string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.active == nil {
+		return []Capability{}, ""
+	}
+	return append([]Capability(nil), m.active.Capabilities...), m.active.ID
 }
 
 func (m *Manager) ActiveGeneration() *Generation {
@@ -190,6 +204,68 @@ func (m *Manager) Capabilities(ctx context.Context, typ, kind string) ([]Capabil
 	}
 	sortCapabilities(caps)
 	return caps, nil
+}
+
+func (m *Manager) ValidateConfig(ctx context.Context, req ConfigValidationRequest) error {
+	action := strings.TrimSpace(req.Action)
+	if action == "" {
+		return nil
+	}
+	capabilityID := strings.TrimSpace(req.CapabilityID)
+	if capabilityID == "" {
+		return nil
+	}
+	gen := m.ActiveGeneration()
+	if gen == nil {
+		return fmt.Errorf("plugin catalog has no active generation")
+	}
+	for _, cap := range gen.Capabilities {
+		if cap.ID != capabilityID {
+			continue
+		}
+		if !isPluginRuntime(cap.Runtime) {
+			return m.validateBuiltinConfig(ctx, cap, req)
+		}
+		client := pluginruntime.NewClient(cap, m.cfg)
+		if err := client.ValidateAvailable(); err != nil {
+			return fmt.Errorf("%s validate_config unavailable: %w", cap.ID, err)
+		}
+		input := cloneAnyMap(req.Input)
+		if input == nil {
+			input = map[string]any{}
+		}
+		if req.Scope != "" {
+			input["scope"] = req.Scope
+		}
+		resp, err := client.Call(ctx, pluginruntime.Request{
+			Action: action,
+			Config: cloneAnyMap(req.Config),
+			Input:  input,
+		}, pluginruntime.Deps{})
+		if err != nil {
+			return fmt.Errorf("%s %s: %w", cap.ID, action, err)
+		}
+		data, _ := resp.Data.(map[string]any)
+		if valid, ok := data["valid"].(bool); ok && !valid {
+			message, _ := data["message"].(string)
+			if strings.TrimSpace(message) == "" {
+				message = "plugin config validation failed"
+			}
+			return fmt.Errorf("%s %s: %s", cap.ID, action, message)
+		}
+		return nil
+	}
+	return fmt.Errorf("plugin capability %s not found", capabilityID)
+}
+
+func (m *Manager) validateBuiltinConfig(ctx context.Context, cap Capability, req ConfigValidationRequest) error {
+	if req.Action != "validate_config" {
+		return nil
+	}
+	if cap.PluginID == "@pulseops/grpc-source" && cap.Type == CapabilityDataSource && cap.Protocol == "grpc" {
+		return datasource.NewPluginSource(cap, m.cfg).ValidateConfig(ctx, cloneAnyMap(req.Config))
+	}
+	return nil
 }
 
 func (m *Manager) Reload(ctx context.Context) (Catalog, error) {
@@ -320,7 +396,7 @@ func (m *Manager) ActivateRelease(ctx context.Context, pluginID, version string)
 	}); err != nil {
 		return Catalog{}, err
 	}
-	m.active = gen
+	m.setActiveGenerationLocked(gen)
 	m.notifyGenerationListenersLocked(gen)
 	return m.catalogLocked(ctx, true)
 }
@@ -349,7 +425,7 @@ func (m *Manager) DisablePlugin(ctx context.Context, pluginID string) (Catalog, 
 	}); err != nil {
 		return Catalog{}, err
 	}
-	m.active = gen
+	m.setActiveGenerationLocked(gen)
 	m.notifyGenerationListenersLocked(gen)
 	return m.catalogLocked(ctx, true)
 }
@@ -405,7 +481,7 @@ func (m *Manager) EnablePlugin(ctx context.Context, pluginID string) (Catalog, e
 	}); err != nil {
 		return Catalog{}, err
 	}
-	m.active = gen
+	m.setActiveGenerationLocked(gen)
 	m.notifyGenerationListenersLocked(gen)
 	return m.catalogLocked(ctx, true)
 }
@@ -434,27 +510,27 @@ func (m *Manager) RollbackPlugin(ctx context.Context, pluginID string) (Catalog,
 			target = release
 		}
 	}
-		if target.Version == "" {
-			return Catalog{}, fmt.Errorf("plugin %s has no rollback release", pluginID)
-		}
-		if err := ValidateManifest(target.Manifest); err != nil {
-			return Catalog{}, err
-		}
-		if err := m.validateManifestPermissions(target.Manifest); err != nil {
-			return Catalog{}, err
-		}
-		if err := m.validateReleaseChecksum(target); err != nil {
-			return Catalog{}, err
-		}
-		if err := m.validateReleaseEntrypoints(target); err != nil {
-			return Catalog{}, err
-		}
-		if err := m.validateReleaseRuntime(ctx, target); err != nil {
-			return Catalog{}, err
-		}
-		gen, err := m.buildGenerationLocked(ctx, map[string]string{pluginID: PackageStatusEnabled}, map[string]string{pluginID: target.Version})
-		if err != nil {
-			return Catalog{}, err
+	if target.Version == "" {
+		return Catalog{}, fmt.Errorf("plugin %s has no rollback release", pluginID)
+	}
+	if err := ValidateManifest(target.Manifest); err != nil {
+		return Catalog{}, err
+	}
+	if err := m.validateManifestPermissions(target.Manifest); err != nil {
+		return Catalog{}, err
+	}
+	if err := m.validateReleaseChecksum(target); err != nil {
+		return Catalog{}, err
+	}
+	if err := m.validateReleaseEntrypoints(target); err != nil {
+		return Catalog{}, err
+	}
+	if err := m.validateReleaseRuntime(ctx, target); err != nil {
+		return Catalog{}, err
+	}
+	gen, err := m.buildGenerationLocked(ctx, map[string]string{pluginID: PackageStatusEnabled}, map[string]string{pluginID: target.Version})
+	if err != nil {
+		return Catalog{}, err
 	}
 	if err := m.store.CommitPluginGeneration(ctx, GenerationCommit{
 		PackageID:             pluginID,
@@ -474,7 +550,7 @@ func (m *Manager) RollbackPlugin(ctx context.Context, pluginID string) (Catalog,
 	}); err != nil {
 		return Catalog{}, err
 	}
-	m.active = gen
+	m.setActiveGenerationLocked(gen)
 	m.notifyGenerationListenersLocked(gen)
 	return m.catalogLocked(ctx, true)
 }
@@ -485,6 +561,18 @@ func (m *Manager) GC(ctx context.Context) (Catalog, error) {
 	activeVersions, err := m.store.GetActivePluginVersions(ctx)
 	if err != nil {
 		return Catalog{}, err
+	}
+	retention := m.cfg.GenerationRetention.Duration
+	activeGenerationID := ""
+	if m.active != nil {
+		activeGenerationID = m.active.ID
+	}
+	removedGenerations := 0
+	if cleaner, ok := m.store.(expiredGenerationStore); ok {
+		removedGenerations, err = cleaner.DeleteExpiredPluginGenerations(ctx, activeGenerationID, retention)
+		if err != nil {
+			return Catalog{}, err
+		}
 	}
 	packages, err := m.store.ListPluginPackages(ctx)
 	if err != nil {
@@ -497,13 +585,14 @@ func (m *Manager) GC(ctx context.Context) (Catalog, error) {
 			return Catalog{}, err
 		}
 		for _, release := range releases {
-			if release.Bundled || release.Path == "" || activeVersions[pkg.ID] == release.Version {
+			if release.Bundled || release.Path == "" || release.Status == ReleaseStatusActive ||
+				(pkg.Status == PackageStatusEnabled && activeVersions[pkg.ID] == release.Version) {
 				continue
 			}
 			protected := false
 			if guard, ok := m.store.(releaseProtectionStore); ok {
 				var err error
-				protected, err = guard.PluginReleaseProtected(ctx, release.PluginID, release.Version, m.cfg.GenerationRetention.Duration)
+				protected, err = guard.PluginReleaseProtected(ctx, release.PluginID, release.Version, retention)
 				if err != nil {
 					return Catalog{}, err
 				}
@@ -511,6 +600,9 @@ func (m *Manager) GC(ctx context.Context) (Catalog, error) {
 			if release.Status == ReleaseStatusDraining {
 				if protected {
 					continue
+				}
+				if err := pluginruntime.WaitReleaseDrained(ctx, release.PluginID, release.Version, release.Path); err != nil {
+					return Catalog{}, fmt.Errorf("wait release %s@%s drained: %w", release.PluginID, release.Version, err)
 				}
 				_ = m.store.UpdatePluginReleaseStatus(ctx, release.PluginID, release.Version, ReleaseStatusRetired, "")
 				continue
@@ -528,7 +620,7 @@ func (m *Manager) GC(ctx context.Context) (Catalog, error) {
 			_ = m.store.UpdatePluginReleaseStatus(ctx, release.PluginID, release.Version, ReleaseStatusDeleted, "")
 		}
 	}
-	if err := m.store.InsertPluginEvent(ctx, EventRecord{Action: "gc", Status: "ok", Message: fmt.Sprintf("removed %d release directories", removed)}); err != nil {
+	if err := m.store.InsertPluginEvent(ctx, EventRecord{Action: "gc", Status: "ok", Message: fmt.Sprintf("removed %d release directories and %d expired generations", removed, removedGenerations)}); err != nil {
 		return Catalog{}, err
 	}
 	return m.catalogLocked(ctx, true)
@@ -556,6 +648,9 @@ func (m *Manager) ImportRelease(ctx context.Context, reader io.Reader) (ReleaseR
 	}
 	defer os.RemoveAll(tempDir)
 	if err := ExtractReleaseArchive(reader, tempDir); err != nil {
+		return ReleaseRecord{}, err
+	}
+	if err := ValidateReleaseManifestFiles(tempDir); err != nil {
 		return ReleaseRecord{}, err
 	}
 	manifestPath := filepath.Join(tempDir, ManifestFilename)
@@ -801,6 +896,7 @@ func (m *Manager) buildGenerationLocked(ctx context.Context, statusOverrides, ac
 		caps := ManifestCapabilities(release.Manifest, pkg.Official, pkg.Bundled, true)
 		for _, cap := range caps {
 			cap.ReleasePath = release.Path
+			cap.GenerationID = gen.ID
 			if _, exists := seenCapabilities[cap.ID]; exists {
 				errs = append(errs, fmt.Errorf("capability conflict: %s", cap.ID))
 				continue
@@ -813,7 +909,7 @@ func (m *Manager) buildGenerationLocked(ctx context.Context, statusOverrides, ac
 				}
 			}
 			if cap.Type == CapabilityEvaluator && isPluginRuntime(cap.Runtime) {
-				if err := evaluators.Register(evaluator.NewPluginEvaluator(cap, m.cfg)); err != nil {
+				if err := evaluators.Register(evaluator.NewPluginEvaluator(cap, m.cfg, m.store, nil)); err != nil {
 					errs = append(errs, fmt.Errorf("plugin %s evaluator %s: %w", pkg.ID, cap.Name, err))
 				}
 			}
@@ -855,7 +951,7 @@ func (m *Manager) validateReleaseEntrypoints(release ReleaseRecord) error {
 	}
 	var errs []error
 	check := func(runtime, entrypoint, name string) {
-		if runtime != "process" && runtime != "c_abi" {
+		if runtime != "process" {
 			return
 		}
 		if entrypoint == "" {
@@ -908,6 +1004,18 @@ func (m *Manager) validateReleaseEntrypoints(release ReleaseRecord) error {
 	for _, item := range release.Manifest.TaskDrivers {
 		check(item.Runtime, item.Entrypoint, CapabilityID(release.PluginID, CapabilityTaskDriver, item.Name))
 	}
+	for _, item := range release.Manifest.OutputWriters {
+		check(item.Runtime, item.Entrypoint, CapabilityID(release.PluginID, CapabilityOutputWriter, item.Name))
+	}
+	for _, item := range release.Manifest.Evaluators {
+		check(item.Runtime, item.Entrypoint, CapabilityID(release.PluginID, CapabilityEvaluator, item.Name))
+	}
+	for _, item := range release.Manifest.TraceSinks {
+		check(item.Runtime, item.Entrypoint, CapabilityID(release.PluginID, CapabilityTraceSink, item.Name))
+	}
+	for _, item := range release.Manifest.Hooks {
+		check(item.Runtime, item.Entrypoint, CapabilityID(release.PluginID, CapabilityHook, item.Name))
+	}
 	return errors.Join(errs...)
 }
 
@@ -939,6 +1047,7 @@ func (m *Manager) validateReleaseRuntime(ctx context.Context, release ReleaseRec
 			continue
 		}
 		cap.ReleasePath = release.Path
+		cap.GenerationID = "validate:" + release.PluginID + ":" + release.Version
 		client := pluginruntime.NewClient(cap, m.cfg)
 		if err := client.ValidateAvailable(); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", cap.ID, err))
@@ -1064,6 +1173,13 @@ func (m *Manager) persistGenerationLocked(ctx context.Context, gen *Generation, 
 	return nil
 }
 
+func (m *Manager) setActiveGenerationLocked(gen *Generation) {
+	if m.active != nil {
+		pluginruntime.DrainCapabilities(drainingCapabilities(m.active, gen), m.cfg.MaxConcurrentCalls)
+	}
+	m.active = gen
+}
+
 func generationRecord(gen *Generation) GenerationRecord {
 	return GenerationRecord{
 		ID:             gen.ID,
@@ -1145,4 +1261,24 @@ func cloneGeneration(input *Generation) *Generation {
 		DriverRegistry:    input.DriverRegistry,
 		EvaluatorRegistry: input.EvaluatorRegistry,
 	}
+}
+
+func drainingCapabilities(oldGen, newGen *Generation) []Capability {
+	if oldGen == nil {
+		return nil
+	}
+	active := map[string]struct{}{}
+	if newGen != nil {
+		for _, cap := range newGen.Capabilities {
+			active[cap.GenerationID+"|"+cap.ID] = struct{}{}
+		}
+	}
+	var out []Capability
+	for _, cap := range oldGen.Capabilities {
+		if _, ok := active[cap.GenerationID+"|"+cap.ID]; ok {
+			continue
+		}
+		out = append(out, cap)
+	}
+	return out
 }

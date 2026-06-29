@@ -7,11 +7,14 @@ import (
 )
 
 type Input struct {
-	TaskID       string
-	TaskParams   map[string]any
-	SourceItems  []map[string]any
-	SampledItems []map[string]any
-	FanoutItems  []FanoutItem
+	TaskID              string
+	TaskParams          map[string]any
+	PluginConfigRef     string
+	CapabilityConfigRef string
+	Overrides           map[string]any
+	SourceItems         []map[string]any
+	SampledItems        []map[string]any
+	FanoutItems         []FanoutItem
 }
 
 type FanoutItem struct {
@@ -21,9 +24,12 @@ type FanoutItem struct {
 }
 
 type Result struct {
-	CheckStatus string           `json:"check_status"`
-	Summary     map[string]any   `json:"summary"`
-	Findings    []map[string]any `json:"findings"`
+	CheckStatus          string           `json:"check_status"`
+	Summary              map[string]any   `json:"summary"`
+	Findings             []map[string]any `json:"findings"`
+	PluginConfigVersions map[string]any   `json:"plugin_config_versions,omitempty"`
+	PluginAssetVersions  map[string]any   `json:"plugin_asset_versions,omitempty"`
+	PluginTaskOverrides  map[string]any   `json:"plugin_task_overrides,omitempty"`
 }
 
 type ScenarioEvaluator interface {

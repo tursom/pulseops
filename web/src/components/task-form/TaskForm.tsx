@@ -25,7 +25,7 @@ import {
   SettingOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
-import type { PluginCapability, RunRecord, TaskDefinition, TaskValidationResponse } from '../../api/types'
+import type { PluginCapability, PluginSchemaField, RunRecord, TaskDefinition, TaskValidationResponse } from '../../api/types'
 import {
   dryRunTaskDefinition,
   fetchPluginCapabilities,
@@ -35,6 +35,7 @@ import {
   validateTaskDefinition,
 } from '../../api/client'
 import { driverForms } from './DriverParamsForms'
+import PluginConfigRefFields from './DriverParamsForms/PluginConfigRefFields'
 import { safeJson } from '../../utils/pulseops'
 import {
   buildTopologyDependency,
@@ -70,12 +71,14 @@ const KIND_LABELS: Record<string, string> = {
 
 const AI_BUILTIN_ALIASES = new Set(['run_context', 'run_history', 'previous_analysis', 'http_call'])
 
-type KindOption = { value: string; label: string; desc: string }
+type KindOption = { value: string; label: string; desc: string; schema?: Record<string, PluginSchemaField>; capability?: PluginCapability }
 type TemplateOption = KindOption & {
   templateId: string
   pluginName?: string
+  pluginVersion?: string
   defaults?: Record<string, unknown>
   params?: Record<string, unknown>
+  capability?: PluginCapability
 }
 
 type StepKey = 'template' | 'basic' | 'trigger' | 'params' | 'data_sources' | 'observability' | 'preview'
@@ -117,20 +120,40 @@ function buildTemplateOptions(templateCaps: PluginCapability[], kindOptions: Kin
       const fallback = kinds.get(cap.kind || cap.name)
       return {
         value: cap.kind || cap.name,
-        templateId: cap.name,
+        templateId: cap.id,
         label: cap.title || fallback?.label || cap.kind || cap.name,
         desc: cap.description || fallback?.desc || `${cap.plugin_name} · ${cap.plugin_version}`,
         pluginName: cap.plugin_name,
+        pluginVersion: cap.plugin_version,
         defaults: isPlainRecord(cap.defaults) ? cap.defaults : undefined,
         params: isPlainRecord(cap.params) ? cap.params : undefined,
+        schema: cap.schema || fallback?.schema,
+        capability: cap,
       }
     })
-  if (templates.length > 0) return templates
-  return kindOptions.map((item) => ({ ...item, templateId: item.value }))
+  return [
+    ...kindOptions.map((item) => ({ ...item, templateId: item.value })),
+    ...templates,
+  ]
 }
 
 function cloneRecord(value: Record<string, unknown>): Record<string, unknown> {
   return JSON.parse(JSON.stringify(value || {})) as Record<string, unknown>
+}
+
+function pluginTemplateRef(capability: PluginCapability): Record<string, unknown> {
+  return {
+    capability_id: capability.id,
+    plugin_id: capability.plugin_id,
+    name: capability.name,
+    kind: capability.kind,
+  }
+}
+
+function pluginTemplateRefID(params: unknown): string {
+  if (!isPlainRecord(params) || !isPlainRecord(params.plugin_template_ref)) return ''
+  const raw = params.plugin_template_ref.capability_id
+  return typeof raw === 'string' ? raw : ''
 }
 
 function parseJSONField(value: unknown): unknown {
@@ -343,6 +366,7 @@ export default function TaskForm({ initialValues, mode, creationContext, onSubmi
   const [templateOptions, setTemplateOptions] = useState<TemplateOption[]>(
     DEFAULT_KIND_OPTIONS.map((item) => ({ ...item, templateId: item.value })),
   )
+  const [selectedTemplateID, setSelectedTemplateID] = useState<string>(pluginTemplateRefID(initialValues?.params))
 
   const kind = useWatchedFormValue<string>(form, 'kind', initialValues?.kind as string | undefined)
   const trigger = useWatchedFormValue<string>(form, 'trigger', initialValues?.trigger as string | undefined)
@@ -353,6 +377,7 @@ export default function TaskForm({ initialValues, mode, creationContext, onSubmi
   const capability = TASK_CAPABILITIES[kind || ''] || { dependency: false, dataSources: false }
   const lockTopologyUpstream = Boolean(creationContext?.lockedUpstreamTaskId && capability.dependency)
   const selectedKind = kindOptions.find((item) => item.value === kind)
+  const selectedTemplate = templateOptions.find((item) => item.templateId === selectedTemplateID && item.value === kind)
   const DriverForm = kind && !capability.dataSources ? driverForms[kind] : null
 
   const steps = useMemo<WizardStep[]>(() => [
@@ -389,7 +414,7 @@ export default function TaskForm({ initialValues, mode, creationContext, onSubmi
     ])
       .then(([driverCaps, templateCaps]) => {
         const defaults = new Map(DEFAULT_KIND_OPTIONS.map((item) => [item.value, item]))
-        const nextKinds = driverCaps
+        const pluginKinds = driverCaps
           .filter((cap) => cap.enabled)
           .map((cap) => {
             const fallback = defaults.get(cap.name)
@@ -397,12 +422,26 @@ export default function TaskForm({ initialValues, mode, creationContext, onSubmi
               value: cap.name,
               label: cap.title || fallback?.label || cap.name,
               desc: cap.description || fallback?.desc || `${cap.plugin_name} · ${cap.plugin_version}`,
+              schema: cap.schema,
             }
           })
-        if (nextKinds.length > 0) setKindOptions(nextKinds)
+        const mergedKinds = [...DEFAULT_KIND_OPTIONS]
+        for (const item of pluginKinds) {
+          const index = mergedKinds.findIndex((kindItem) => kindItem.value === item.value)
+          if (index >= 0) {
+            mergedKinds[index] = { ...mergedKinds[index], ...item }
+          } else {
+            mergedKinds.push(item)
+          }
+        }
+        setKindOptions(mergedKinds)
 
-        const nextTemplates = buildTemplateOptions(templateCaps, nextKinds.length > 0 ? nextKinds : DEFAULT_KIND_OPTIONS)
+        const nextTemplates = buildTemplateOptions(templateCaps, mergedKinds)
         if (nextTemplates.length > 0) setTemplateOptions(nextTemplates)
+        const refID = pluginTemplateRefID(form.getFieldValue('params') || initialValues?.params)
+        if (refID && nextTemplates.some((item) => item.templateId === refID)) {
+          setSelectedTemplateID(refID)
+        }
       })
       .catch(() => {
         setKindOptions(DEFAULT_KIND_OPTIONS)
@@ -413,6 +452,7 @@ export default function TaskForm({ initialValues, mode, creationContext, onSubmi
   useEffect(() => {
     if (!initialValues) return
     form.setFieldsValue(initialValues)
+    setSelectedTemplateID(pluginTemplateRefID(initialValues.params))
   }, [form, initialValues])
 
   useEffect(() => {
@@ -545,6 +585,7 @@ export default function TaskForm({ initialValues, mode, creationContext, onSubmi
   const selectTemplate = (option: TemplateOption) => {
     const applyKind = () => {
       const value = option.value
+      setSelectedTemplateID(option.templateId)
       const nextCapability = TASK_CAPABILITIES[value] || { dependency: false, dataSources: false }
       const existingDeps = form.getFieldValue('dependencies')
       const existingDepsList = Array.isArray(existingDeps) ? existingDeps : []
@@ -561,6 +602,9 @@ export default function TaskForm({ initialValues, mode, creationContext, onSubmi
             upstreamName: creationContext?.lockedUpstreamName,
           }) }
         : cloneRecord(option.params || {})
+      if (option.capability) {
+        nextParams.plugin_template_ref = pluginTemplateRef(option.capability)
+      }
       const defaults = option.defaults || {}
       const defaultTrigger = typeof defaults.trigger === 'string' ? defaults.trigger : ''
       const defaultTimeout = typeof defaults.timeout === 'string' ? defaults.timeout : ''
@@ -628,6 +672,7 @@ export default function TaskForm({ initialValues, mode, creationContext, onSubmi
         capability,
         lockTopologyUpstream,
         selectedKind,
+        selectedTemplate,
         kindOptions,
         templateOptions,
         DriverForm,
@@ -707,7 +752,8 @@ function renderStepContent(props: {
   trigger?: string
   capability: { dependency: boolean; dataSources: boolean }
   lockTopologyUpstream: boolean
-  selectedKind?: { value: string; label: string; desc: string }
+  selectedKind?: KindOption
+  selectedTemplate?: TemplateOption
   kindOptions: KindOption[]
   templateOptions: TemplateOption[]
   DriverForm: React.ComponentType<{ form?: ReturnType<typeof Form.useForm>[0] }> | null
@@ -723,7 +769,15 @@ function renderStepContent(props: {
 }) {
   switch (props.key) {
     case 'template':
-      return <TemplateStep kind={props.kind} templateOptions={props.templateOptions} creationContext={props.creationContext} onSelectTemplate={props.onSelectTemplate} />
+      return (
+        <TemplateStep
+          kind={props.kind}
+          selectedTemplateID={props.selectedTemplate?.templateId}
+          templateOptions={props.templateOptions}
+          creationContext={props.creationContext}
+          onSelectTemplate={props.onSelectTemplate}
+        />
+      )
     case 'basic':
       return <BasicInfoStep mode={props.mode} kindOptions={props.kindOptions} creationContext={props.creationContext} />
     case 'trigger':
@@ -743,6 +797,7 @@ function renderStepContent(props: {
           kind={props.kind}
           capability={props.capability}
           selectedKind={props.selectedKind}
+          selectedTemplate={props.selectedTemplate}
           DriverForm={props.DriverForm}
           form={props.form}
         />
@@ -768,11 +823,13 @@ function renderStepContent(props: {
 
 function TemplateStep({
   kind,
+  selectedTemplateID,
   templateOptions,
   creationContext,
   onSelectTemplate,
 }: {
   kind?: string
+  selectedTemplateID?: string
   templateOptions: TemplateOption[]
   creationContext?: TaskCreationContext
   onSelectTemplate: (template: TemplateOption) => void
@@ -786,7 +843,7 @@ function TemplateStep({
           return (
             <Button
               key={item.templateId}
-              type={kind === item.value ? 'primary' : 'default'}
+              type={selectedTemplateID === item.templateId || (!selectedTemplateID && kind === item.value) ? 'primary' : 'default'}
               style={{ height: 100, textAlign: 'left', justifyContent: 'flex-start' }}
               onClick={() => onSelectTemplate(item)}
             >
@@ -982,15 +1039,20 @@ function DriverParamsStep({
   kind,
   capability,
   selectedKind,
+  selectedTemplate,
   DriverForm,
   form,
 }: {
   kind?: string
   capability: { dependency: boolean; dataSources: boolean }
-  selectedKind?: { value: string; label: string; desc: string }
+  selectedKind?: KindOption
+  selectedTemplate?: TemplateOption
   DriverForm: React.ComponentType<{ form?: ReturnType<typeof Form.useForm>[0] }> | null
   form: ReturnType<typeof Form.useForm>[0]
 }) {
+  const schema = selectedTemplate?.schema && Object.keys(selectedTemplate.schema).length > 0
+    ? selectedTemplate.schema
+    : selectedKind?.schema
   return (
     <Card
       className="ops-card"
@@ -1000,6 +1062,8 @@ function DriverParamsStep({
     >
       {!kind ? (
         <Alert type="info" showIcon message="请先选择任务模板" />
+      ) : selectedTemplate?.capability ? (
+        <PluginTaskTemplateParamsForm schema={schema} capability={selectedTemplate.capability} />
       ) : capability.dataSources ? (
         <Alert
           type="info"
@@ -1009,10 +1073,83 @@ function DriverParamsStep({
         />
       ) : DriverForm ? (
         <DriverForm form={form} />
+      ) : schema && Object.keys(schema).length > 0 ? (
+        <PluginTaskDriverParamsForm schema={schema} />
       ) : (
-        <Alert type="warning" showIcon message="当前任务类型暂无参数表单" />
+        <Alert type="info" showIcon message="当前任务类型没有声明参数 schema" />
       )}
     </Card>
+  )
+}
+
+function PluginTaskDriverParamsForm({ schema }: { schema: Record<string, PluginSchemaField> }) {
+  return (
+    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+      {Object.entries(schema).map(([field, fieldSchema]) => (
+        <PluginTaskDriverSchemaField key={field} field={field} schema={fieldSchema} />
+      ))}
+    </Space>
+  )
+}
+
+function PluginTaskTemplateParamsForm({
+  schema,
+  capability,
+}: {
+  schema?: Record<string, PluginSchemaField>
+  capability?: PluginCapability
+}) {
+  return (
+    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+      {schema && Object.entries(schema).map(([field, fieldSchema]) => (
+        <PluginTaskDriverSchemaField key={field} field={field} schema={fieldSchema} />
+      ))}
+      {capability?.config ? (
+        <PluginConfigRefFields capability={capability} baseName={['params']} absoluteBaseName={['params']} />
+      ) : null}
+    </Space>
+  )
+}
+
+function PluginTaskDriverSchemaField({ field, schema }: { field: string; schema: PluginSchemaField }) {
+  const rules = schema.required ? [{ required: true, message: `需填 ${field}` }] : undefined
+  const commonProps = {
+    name: ['params', field],
+    label: field,
+    rules,
+    tooltip: schema.description,
+  }
+  if (schema.type === 'object' || schema.type === 'array') {
+    return (
+      <Form.Item
+        {...commonProps}
+        getValueFromEvent={(event) => parseJSONField(event.target.value)}
+        getValueProps={(value) => ({
+          value: value && typeof value === 'object' ? JSON.stringify(value, null, 2) : value,
+        })}
+      >
+        <Input.TextArea rows={3} placeholder={schema.description || (schema.type === 'array' ? '[]' : '{}')} />
+      </Form.Item>
+    )
+  }
+  if (schema.type === 'number') {
+    return (
+      <Form.Item {...commonProps}>
+        <InputNumber style={{ width: '100%' }} />
+      </Form.Item>
+    )
+  }
+  if (schema.type === 'bool') {
+    return (
+      <Form.Item {...commonProps} valuePropName="checked">
+        <Switch />
+      </Form.Item>
+    )
+  }
+  return (
+    <Form.Item {...commonProps}>
+      <Input placeholder={schema.description || field} />
+    </Form.Item>
   )
 }
 

@@ -6,14 +6,18 @@ import (
 	"fmt"
 
 	"pulseops/internal/config"
+	"pulseops/internal/pluginconfig"
 	"pulseops/internal/pluginmodel"
 	"pulseops/internal/pluginruntime"
 	"pulseops/internal/store"
 )
 
 type pluginOutputWriter struct {
-	cap pluginmodel.Capability
-	cfg config.PluginsConfig
+	cap           pluginmodel.Capability
+	cfg           config.PluginsConfig
+	configReader  pluginconfig.ConfigReader
+	runtimeStore  pluginconfig.RuntimeStore
+	artifactStore store.ArtifactStore
 }
 
 type pluginOutputPayload struct {
@@ -26,19 +30,27 @@ func (w *pluginOutputWriter) Name() string {
 }
 
 func (w *pluginOutputWriter) Validate(spec OutputSpec) error {
-	configMap := mergeOutputConfig(w.cap.Defaults, spec.Config)
-	for name, field := range w.cap.Schema {
-		if field.Required && configMap[name] == nil {
-			return fmt.Errorf("output writer %q requires config.%s", w.cap.Name, name)
-		}
+	resolved, err := w.resolveSpec(context.Background(), spec)
+	if resolved.Cleanup != nil {
+		defer resolved.Cleanup()
+	}
+	if err != nil {
+		return err
 	}
 	return pluginruntime.NewClient(w.cap, w.cfg).ValidateAvailable()
 }
 
 func (w *pluginOutputWriter) Write(ctx context.Context, spec OutputSpec, deps OutputDeps, input OutputInput) (*OutputResult, error) {
+	resolved, err := w.resolveSpec(ctx, spec)
+	if resolved.Cleanup != nil {
+		defer resolved.Cleanup()
+	}
+	if err != nil {
+		return nil, err
+	}
 	resp, err := pluginruntime.NewClient(w.cap, w.cfg).Call(ctx, pluginruntime.Request{
 		Action: "write",
-		Config: mergeOutputConfig(w.cap.Defaults, spec.Config),
+		Config: resolved.Config,
 		Input: map[string]any{
 			"raw_response": input.RawResponse,
 			"parsed_json":  input.ParsedJSON,
@@ -56,7 +68,32 @@ func (w *pluginOutputWriter) Write(ctx context.Context, spec OutputSpec, deps Ou
 	if err != nil {
 		return nil, err
 	}
-	return pluginResponseToOutputResult(resp, deps), nil
+	result := pluginResponseToOutputResult(resp, deps)
+	result.PluginConfigVersions = resolved.ConfigVersions
+	result.PluginAssetVersions = resolved.AssetVersions
+	result.PluginTaskOverrides = resolved.TaskOverrides
+	return result, nil
+}
+
+func (w *pluginOutputWriter) resolveSpec(ctx context.Context, spec OutputSpec) (pluginconfig.ResolveCapabilityResult, error) {
+	result, err := pluginconfig.ResolveCapabilityConfig(ctx, w.configReader, w.cap, pluginconfig.ResolveCapabilityOptions{
+		PluginConfigRef:     spec.PluginConfigRef,
+		CapabilityConfigRef: spec.CapabilityConfigRef,
+		Config:              spec.Config,
+		Overrides:           spec.Overrides,
+		RuntimeStore:        w.runtimeStore,
+		ArtifactStore:       w.artifactStore,
+	})
+	if err != nil {
+		return result, err
+	}
+	configMap := result.Config
+	for name, field := range w.cap.Schema {
+		if field.Required && configMap[name] == nil {
+			return result, fmt.Errorf("output writer %q requires config.%s", w.cap.Name, name)
+		}
+	}
+	return result, nil
 }
 
 func pluginResponseToOutputResult(resp pluginruntime.Response, deps OutputDeps) *OutputResult {
@@ -85,17 +122,6 @@ func pluginResponseToOutputResult(resp pluginruntime.Response, deps OutputDeps) 
 	}
 	result.Findings = payload.Findings
 	return result
-}
-
-func mergeOutputConfig(defaults, configMap map[string]any) map[string]any {
-	out := make(map[string]any, len(defaults)+len(configMap))
-	for key, value := range defaults {
-		out[key] = value
-	}
-	for key, value := range configMap {
-		out[key] = value
-	}
-	return out
 }
 
 func cloneOutputMap(input map[string]any) map[string]any {

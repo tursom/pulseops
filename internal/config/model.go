@@ -493,10 +493,9 @@ func (cfg *Config) Normalize() {
 		if cfg.AI.MaxTokens == 0 {
 			cfg.AI.MaxTokens = 4096
 		}
-		if cfg.AI.PluginDir == "" {
-			cfg.AI.PluginDir = "plugins"
+		if cfg.AI.PluginDir != "" {
+			cfg.AI.PluginDir = ResolvePath(cfg.BaseDir, cfg.AI.PluginDir)
 		}
-		cfg.AI.PluginDir = ResolvePath(cfg.BaseDir, cfg.AI.PluginDir)
 	}
 	if cfg.Plugins.Dir == "" {
 		cfg.Plugins.Dir = "plugins"

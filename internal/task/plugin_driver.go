@@ -144,11 +144,59 @@ func pluginResponseToTaskResult(resp pluginruntime.Response, cfg config.PluginsC
 
 func validatePluginSchema(cap pluginmodel.Capability, params map[string]any) error {
 	for name, field := range cap.Schema {
-		if field.Required && params[name] == nil {
+		value := params[name]
+		if field.Required && value == nil {
 			return fmt.Errorf("%s requires params.%s", cap.Name, name)
+		}
+		if value == nil {
+			continue
+		}
+		if err := validatePluginSchemaValue(cap.Name, name, field.Type, value); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func validatePluginSchemaValue(capabilityName, fieldName, typ string, value any) error {
+	switch typ {
+	case "", "any":
+		return nil
+	case "string":
+		if _, ok := value.(string); !ok {
+			return fmt.Errorf("%s params.%s must be a string", capabilityName, fieldName)
+		}
+	case "number":
+		if !isPluginSchemaNumber(value) {
+			return fmt.Errorf("%s params.%s must be a number", capabilityName, fieldName)
+		}
+	case "bool":
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("%s params.%s must be a bool", capabilityName, fieldName)
+		}
+	case "object":
+		if _, ok := value.(map[string]any); !ok {
+			return fmt.Errorf("%s params.%s must be an object", capabilityName, fieldName)
+		}
+	case "array":
+		if _, ok := value.([]any); !ok {
+			return fmt.Errorf("%s params.%s must be an array", capabilityName, fieldName)
+		}
+	default:
+		return fmt.Errorf("%s params.%s has unsupported schema type %q", capabilityName, fieldName, typ)
+	}
+	return nil
+}
+
+func isPluginSchemaNumber(value any) bool {
+	switch value.(type) {
+	case int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64, json.Number:
+		return true
+	default:
+		return false
+	}
 }
 
 func mergePluginParams(defaults, params map[string]any) map[string]any {
@@ -157,6 +205,9 @@ func mergePluginParams(defaults, params map[string]any) map[string]any {
 		out[key] = value
 	}
 	for key, value := range params {
+		if key == "plugin_template_ref" {
+			continue
+		}
 		out[key] = value
 	}
 	return out

@@ -30,8 +30,11 @@ type OutputInput struct {
 }
 
 type OutputResult struct {
-	Findings []store.Finding
-	Summary  map[string]any
+	Findings             []store.Finding
+	Summary              map[string]any
+	PluginConfigVersions map[string]any
+	PluginAssetVersions  map[string]any
+	PluginTaskOverrides  map[string]any
 }
 
 type OutputWriter interface {

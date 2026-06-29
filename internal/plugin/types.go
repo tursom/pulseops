@@ -35,6 +35,10 @@ const (
 	ReleaseStatusRetired    = pluginmodel.ReleaseStatusRetired
 	ReleaseStatusDeleted    = pluginmodel.ReleaseStatusDeleted
 	ReleaseStatusFailed     = pluginmodel.ReleaseStatusFailed
+
+	AssetScopePluginShared     = pluginmodel.AssetScopePluginShared
+	AssetScopeCapabilityShared = pluginmodel.AssetScopeCapabilityShared
+	AssetScopeConfigInstance   = pluginmodel.AssetScopeConfigInstance
 )
 
 type Manifest = pluginmodel.Manifest
@@ -45,15 +49,39 @@ type DataSourceManifest = pluginmodel.DataSourceManifest
 type UIExtensionManifest = pluginmodel.UIExtensionManifest
 type Schema = pluginmodel.Schema
 type SchemaField = pluginmodel.SchemaField
+type ConfigClass = pluginmodel.ConfigClass
+type ConfigSchema = pluginmodel.ConfigSchema
+type ConfigField = pluginmodel.ConfigField
+type ConfigOption = pluginmodel.ConfigOption
+type ConfigValidation = pluginmodel.ConfigValidation
+type ConfigUI = pluginmodel.ConfigUI
+type ConfigCondition = pluginmodel.ConfigCondition
 type Capability = pluginmodel.Capability
 type PackageRecord = pluginmodel.PackageRecord
 type ReleaseRecord = pluginmodel.ReleaseRecord
 type GenerationRecord = pluginmodel.GenerationRecord
 type EventRecord = pluginmodel.EventRecord
+type ConfigInstanceRecord = pluginmodel.ConfigInstanceRecord
+type ConfigVersionRecord = pluginmodel.ConfigVersionRecord
+type AssetRecord = pluginmodel.AssetRecord
+type AssetVersionRecord = pluginmodel.AssetVersionRecord
+type SecretRecord = pluginmodel.SecretRecord
+type SecretValueRecord = pluginmodel.SecretValueRecord
+type ConfigEventRecord = pluginmodel.ConfigEventRecord
 type GenerationCommit = pluginmodel.GenerationCommit
 type Catalog = pluginmodel.Catalog
 type CatalogStats = pluginmodel.CatalogStats
 type PluginView = pluginmodel.PluginView
+
+type ConfigValidationRequest struct {
+	PluginID       string
+	CapabilityID   string
+	CapabilityName string
+	Scope          string
+	Action         string
+	Config         map[string]any
+	Input          map[string]any
+}
 
 type RuntimeRegistration struct {
 	Drivers    []task.Driver

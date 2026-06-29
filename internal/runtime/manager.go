@@ -16,7 +16,9 @@ import (
 	"pulseops/internal/config"
 	"pulseops/internal/ctxkey"
 	"pulseops/internal/evaluator"
+	"pulseops/internal/pluginconfig"
 	"pulseops/internal/pluginhook"
+	"pulseops/internal/pluginmodel"
 	"pulseops/internal/store"
 	"pulseops/internal/task"
 	"pulseops/internal/trace"
@@ -43,11 +45,17 @@ type Manager struct {
 type PluginGenerationProvider interface {
 	ActiveDriverRegistry() (*task.Registry, string)
 	ActiveEvaluatorRegistry() (*evaluator.Registry, string)
+	ActiveCapabilities() ([]pluginmodel.Capability, string)
 }
 
 type pluginGenerationRefStore interface {
 	AcquirePluginGeneration(ctx context.Context, generationID string) error
 	ReleasePluginGeneration(ctx context.Context, generationID string) error
+}
+
+type pluginConfigReader interface {
+	GetPluginConfigInstance(ctx context.Context, instanceID string) (pluginmodel.ConfigInstanceRecord, error)
+	GetActivePluginConfigVersion(ctx context.Context, instanceID string) (pluginmodel.ConfigVersionRecord, error)
 }
 
 type managedDependency struct {
@@ -255,10 +263,246 @@ func (m *Manager) ValidateTaskDefinition(def config.TaskDefinition) (config.Task
 	if !ok {
 		return spec, fmt.Errorf("task %s driver %q not found", spec.ID, spec.Kind)
 	}
+	if err := m.validateTaskTemplate(spec); err != nil {
+		return spec, fmt.Errorf("validate task %s template: %w", spec.ID, err)
+	}
 	if err := driver.Validate(spec); err != nil {
 		return spec, fmt.Errorf("validate task %s: %w", spec.ID, err)
 	}
 	return spec, nil
+}
+
+func (m *Manager) validateTaskTemplate(spec config.TaskSpec) error {
+	templateID := taskTemplateCapabilityID(spec.Params)
+	if templateID == "" {
+		return nil
+	}
+	capability, ok := m.activeTaskTemplateCapability(templateID)
+	if !ok {
+		return fmt.Errorf("task_template capability %q not found or not active", templateID)
+	}
+	if capability.Kind != "" && capability.Kind != spec.Kind {
+		return fmt.Errorf("task_template %q targets kind %q, got %q", capability.Name, capability.Kind, spec.Kind)
+	}
+	params := filteredTaskTemplateParams(spec.Params)
+	templateParams := mergeAnyMap(cloneAnyMap(capability.Params), params)
+	if err := validatePluginTaskSchema(capability, templateParams); err != nil {
+		return err
+	}
+	if err := m.validateTaskTemplateConfigRefs(capability, params); err != nil {
+		return err
+	}
+	return nil
+}
+
+func taskTemplateCapabilityID(params map[string]any) string {
+	ref, ok := params["plugin_template_ref"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	value, _ := ref["capability_id"].(string)
+	return strings.TrimSpace(value)
+}
+
+func filteredTaskTemplateParams(params map[string]any) map[string]any {
+	out := make(map[string]any, len(params))
+	for key, value := range params {
+		if key == "plugin_template_ref" {
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+func (m *Manager) activeTaskTemplateCapability(capabilityID string) (pluginmodel.Capability, bool) {
+	m.mu.RLock()
+	provider := m.plugins
+	m.mu.RUnlock()
+	if provider == nil {
+		return pluginmodel.Capability{}, false
+	}
+	caps, _ := provider.ActiveCapabilities()
+	for _, cap := range caps {
+		if cap.ID == capabilityID && cap.Type == pluginmodel.CapabilityTaskTemplate && cap.Enabled && cap.Status == "active" {
+			return cap, true
+		}
+	}
+	return pluginmodel.Capability{}, false
+}
+
+func validatePluginTaskSchema(cap pluginmodel.Capability, params map[string]any) error {
+	for name, field := range cap.Schema {
+		value := params[name]
+		if field.Required && value == nil {
+			return fmt.Errorf("%s requires params.%s", cap.Name, name)
+		}
+		if value == nil {
+			continue
+		}
+		if err := validatePluginTaskSchemaValue(cap.Name, name, field.Type, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validatePluginTaskSchemaValue(capabilityName, fieldName, typ string, value any) error {
+	switch typ {
+	case "", "any":
+		return nil
+	case "string":
+		if _, ok := value.(string); !ok {
+			return fmt.Errorf("%s params.%s must be a string", capabilityName, fieldName)
+		}
+	case "number":
+		if !isPluginTaskSchemaNumber(value) {
+			return fmt.Errorf("%s params.%s must be a number", capabilityName, fieldName)
+		}
+	case "bool":
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("%s params.%s must be a bool", capabilityName, fieldName)
+		}
+	case "object":
+		if _, ok := value.(map[string]any); !ok {
+			return fmt.Errorf("%s params.%s must be an object", capabilityName, fieldName)
+		}
+	case "array":
+		if _, ok := value.([]any); !ok {
+			return fmt.Errorf("%s params.%s must be an array", capabilityName, fieldName)
+		}
+	default:
+		return fmt.Errorf("%s params.%s has unsupported schema type %q", capabilityName, fieldName, typ)
+	}
+	return nil
+}
+
+func isPluginTaskSchemaNumber(value any) bool {
+	switch value.(type) {
+	case int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64, json.Number:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *Manager) validateTaskTemplateConfigRefs(capability pluginmodel.Capability, params map[string]any) error {
+	if capability.Config == nil {
+		if hasTaskTemplateConfigRefs(params) {
+			return fmt.Errorf("task_template %q does not declare config schema", capability.ID)
+		}
+		return nil
+	}
+	values := taskTemplateConfigDefaults(capability.Config)
+	pluginRef := stringParam(params, "plugin_config_ref")
+	capabilityRef := stringParam(params, "capability_config_ref")
+	var reader pluginConfigReader
+	if pluginRef != "" || capabilityRef != "" {
+		var ok bool
+		reader, ok = m.store.(pluginConfigReader)
+		if !ok {
+			return fmt.Errorf("plugin config store is unavailable")
+		}
+	}
+	if pluginRef != "" {
+		if !capability.Config.AllowPluginConfigRef {
+			return fmt.Errorf("task_template %q does not allow plugin_config_ref", capability.ID)
+		}
+		configValues, _, err := activePluginConfigValues(context.Background(), reader, pluginRef, capability, "plugin")
+		if err != nil {
+			return err
+		}
+		mergeAnyMap(values, configValues)
+	}
+	if capabilityRef != "" {
+		configValues, _, err := activePluginConfigValues(context.Background(), reader, capabilityRef, capability, "capability")
+		if err != nil {
+			return err
+		}
+		mergeAnyMap(values, configValues)
+	}
+	overrides := mapParam(params, "overrides")
+	if len(overrides) > 0 {
+		if err := pluginconfig.ValidateValues(capability.Config, capability.ConfigClasses, overrides, pluginconfig.ValidationOptions{Overrides: true}); err != nil {
+			return fmt.Errorf("validate task_template overrides: %w", err)
+		}
+		mergeAnyMap(values, overrides)
+	}
+	if err := pluginconfig.ValidateValues(capability.Config, capability.ConfigClasses, values, pluginconfig.ValidationOptions{}); err != nil {
+		return fmt.Errorf("validate task_template config: %w", err)
+	}
+	return nil
+}
+
+func hasTaskTemplateConfigRefs(params map[string]any) bool {
+	return stringParam(params, "plugin_config_ref") != "" ||
+		stringParam(params, "capability_config_ref") != "" ||
+		len(mapParam(params, "overrides")) > 0
+}
+
+func taskTemplateConfigDefaults(schema *pluginmodel.ConfigSchema) map[string]any {
+	out := map[string]any{}
+	if schema == nil {
+		return out
+	}
+	for key, field := range schema.Fields {
+		if field.Default != nil {
+			out[key] = field.Default
+		}
+	}
+	return out
+}
+
+func activePluginConfigValues(ctx context.Context, reader pluginConfigReader, instanceID string, capability pluginmodel.Capability, wantScope string) (map[string]any, int, error) {
+	instance, err := reader.GetPluginConfigInstance(ctx, instanceID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("load plugin config instance %q: %w", instanceID, err)
+	}
+	if instance.Status != "active" {
+		return nil, 0, fmt.Errorf("plugin config instance %q is not active", instanceID)
+	}
+	if instance.Scope != wantScope {
+		return nil, 0, fmt.Errorf("plugin config instance %q scope is %q, want %q", instanceID, instance.Scope, wantScope)
+	}
+	if capability.PluginID != "" && instance.PluginID != capability.PluginID {
+		return nil, 0, fmt.Errorf("plugin config instance %q belongs to plugin %q", instanceID, instance.PluginID)
+	}
+	if wantScope == "capability" && capability.ID != "" && instance.CapabilityID != capability.ID {
+		return nil, 0, fmt.Errorf("plugin config instance %q belongs to capability %q", instanceID, instance.CapabilityID)
+	}
+	version, err := reader.GetActivePluginConfigVersion(ctx, instanceID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("load active plugin config version for %q: %w", instanceID, err)
+	}
+	if version.Status != "active" {
+		return nil, 0, fmt.Errorf("plugin config instance %q active version is %q", instanceID, version.Status)
+	}
+	return version.Values, version.Version, nil
+}
+
+func stringParam(params map[string]any, key string) string {
+	value, _ := params[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func mapParam(params map[string]any, key string) map[string]any {
+	value, ok := params[key].(map[string]any)
+	if !ok {
+		return map[string]any{}
+	}
+	return value
+}
+
+func mergeAnyMap(dst map[string]any, src map[string]any) map[string]any {
+	if dst == nil {
+		dst = map[string]any{}
+	}
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
 }
 
 func (m *Manager) TestRunTaskDefinition(ctx context.Context, def config.TaskDefinition) (store.RunRecord, error) {
@@ -314,23 +558,26 @@ func (m *Manager) TestRunTaskDefinition(ctx context.Context, def config.TaskDefi
 		runStatus = "failed"
 	}
 	return store.RunRecord{
-		RunID:              runID,
-		TaskID:             spec.ID,
-		TaskKind:           spec.Kind,
-		PluginGenerationID: generationID,
-		TriggerType:        "dry_run",
-		RunStatus:          runStatus,
-		CheckStatus:        checkStatus,
-		StartedAt:          startedAt,
-		EndedAt:            endedAt,
-		DurationMS:         endedAt.Sub(startedAt).Milliseconds(),
-		ErrorMessage:       errString(runErr),
-		Summary:            cloneAnyMap(result.Summary),
-		Payload:            payload,
-		Findings:           cloneFindings(result.Findings),
-		Stdout:             result.Stdout,
-		Stderr:             result.Stderr,
-		Labels:             cloneLabels(spec.Labels),
+		RunID:                runID,
+		TaskID:               spec.ID,
+		TaskKind:             spec.Kind,
+		PluginGenerationID:   generationID,
+		TriggerType:          "dry_run",
+		RunStatus:            runStatus,
+		CheckStatus:          checkStatus,
+		StartedAt:            startedAt,
+		EndedAt:              endedAt,
+		DurationMS:           endedAt.Sub(startedAt).Milliseconds(),
+		ErrorMessage:         errString(runErr),
+		Summary:              cloneAnyMap(result.Summary),
+		Payload:              payload,
+		Findings:             cloneFindings(result.Findings),
+		PluginConfigVersions: cloneAnyMap(result.PluginConfigVersions),
+		PluginAssetVersions:  cloneAnyMap(result.PluginAssetVersions),
+		PluginTaskOverrides:  cloneAnyMap(result.PluginTaskOverrides),
+		Stdout:               result.Stdout,
+		Stderr:               result.Stderr,
+		Labels:               cloneLabels(spec.Labels),
 	}, runErr
 }
 
@@ -1011,23 +1258,26 @@ func (t *managedTask) execute(trigger task.TriggerType, sourceRecord *store.RunR
 		runStatus = "failed"
 	}
 	record := store.RunRecord{
-		RunID:              runID,
-		TaskID:             t.spec.ID,
-		TaskKind:           t.spec.Kind,
-		PluginGenerationID: generationID,
-		TriggerType:        string(trigger),
-		RunStatus:          runStatus,
-		CheckStatus:        checkStatus,
-		StartedAt:          startedAt,
-		EndedAt:            endedAt,
-		DurationMS:         endedAt.Sub(startedAt).Milliseconds(),
-		ErrorMessage:       errString(err),
-		Summary:            cloneAnyMap(result.Summary),
-		Payload:            payload,
-		Findings:           cloneFindings(result.Findings),
-		Stdout:             result.Stdout,
-		Stderr:             result.Stderr,
-		Labels:             cloneLabels(t.spec.Labels),
+		RunID:                runID,
+		TaskID:               t.spec.ID,
+		TaskKind:             t.spec.Kind,
+		PluginGenerationID:   generationID,
+		TriggerType:          string(trigger),
+		RunStatus:            runStatus,
+		CheckStatus:          checkStatus,
+		StartedAt:            startedAt,
+		EndedAt:              endedAt,
+		DurationMS:           endedAt.Sub(startedAt).Milliseconds(),
+		ErrorMessage:         errString(err),
+		Summary:              cloneAnyMap(result.Summary),
+		Payload:              payload,
+		Findings:             cloneFindings(result.Findings),
+		PluginConfigVersions: cloneAnyMap(result.PluginConfigVersions),
+		PluginAssetVersions:  cloneAnyMap(result.PluginAssetVersions),
+		PluginTaskOverrides:  cloneAnyMap(result.PluginTaskOverrides),
+		Stdout:               result.Stdout,
+		Stderr:               result.Stderr,
+		Labels:               cloneLabels(t.spec.Labels),
 	}
 
 	t.updateState(context.Background(), func(state *store.TaskState) {

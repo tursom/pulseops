@@ -28,7 +28,16 @@ import type {
   TracePolicy,
   PluginCatalog,
   PluginCapability,
+  PluginAsset,
+  PluginAssetVersion,
+  PluginConfigEvent,
+  PluginConfigInstance,
+  PluginConfigInstanceDetail,
+  PluginConfigSchemaResponse,
+  PluginConfigValidationResponse,
+  PluginConfigVersion,
   PluginRelease,
+  PluginSecret,
   PluginView,
 } from './types'
 
@@ -101,6 +110,9 @@ function normalizeRunRecord(run: RunRecord): RunRecord {
     ...run,
     labels: stringRecordOrEmpty(run.labels),
     artifact_refs: listOrEmpty(run.artifact_refs),
+    plugin_config_versions: recordOrEmpty(run.plugin_config_versions),
+    plugin_asset_versions: recordOrEmpty(run.plugin_asset_versions),
+    plugin_task_overrides: recordOrEmpty(run.plugin_task_overrides),
     findings: listOrEmpty(run.findings),
   }
 }
@@ -193,6 +205,21 @@ function normalizePluginView(plugin: PluginView): PluginView {
     capabilities: listOrEmpty(plugin.capabilities),
     permissions: listOrEmpty(plugin.permissions),
     releases: listOrEmpty(plugin.releases),
+  }
+}
+
+function normalizePluginConfigVersion(version: PluginConfigVersion): PluginConfigVersion {
+  return {
+    ...version,
+    values: recordOrEmpty(version.values),
+  }
+}
+
+function normalizePluginConfigDetail(data: PluginConfigInstanceDetail): PluginConfigInstanceDetail {
+  return {
+    ...data,
+    versions: listOrEmpty(data.versions).map(normalizePluginConfigVersion),
+    active: data.active ? normalizePluginConfigVersion(data.active) : undefined,
   }
 }
 
@@ -579,6 +606,162 @@ export async function fetchPluginCapabilities(type?: string, kind?: string): Pro
   const qs = params.toString()
   const data = await request<PluginCapability[] | null>(`/api/plugin-capabilities${qs ? `?${qs}` : ''}`)
   return listOrEmpty(data)
+}
+
+export async function fetchPluginConfigSchema(id: string): Promise<PluginConfigSchemaResponse> {
+  return request<PluginConfigSchemaResponse>(`/api/plugins/${encodeURIComponent(id)}/config-schema`)
+}
+
+export async function fetchCapabilityConfigSchema(capabilityId: string): Promise<PluginConfigSchemaResponse> {
+  return request<PluginConfigSchemaResponse>(`/api/plugin-capabilities/${encodeURIComponent(capabilityId)}/config-schema`)
+}
+
+export async function fetchPluginConfigs(params: { plugin_id?: string; capability_id?: string }): Promise<PluginConfigInstance[]> {
+  const qs = new URLSearchParams()
+  if (params.plugin_id) qs.set('plugin_id', params.plugin_id)
+  if (params.capability_id) qs.set('capability_id', params.capability_id)
+  const data = await request<PluginConfigInstance[] | null>(`/api/plugin-configs${qs.toString() ? `?${qs.toString()}` : ''}`)
+  return listOrEmpty(data)
+}
+
+export async function fetchPluginConfigEvents(params: {
+  plugin_id?: string
+  resource_type?: string
+  resource_id?: string
+  limit?: number
+}): Promise<PluginConfigEvent[]> {
+  const qs = new URLSearchParams()
+  if (params.plugin_id) qs.set('plugin_id', params.plugin_id)
+  if (params.resource_type) qs.set('resource_type', params.resource_type)
+  if (params.resource_id) qs.set('resource_id', params.resource_id)
+  if (params.limit) qs.set('limit', String(params.limit))
+  const data = await request<PluginConfigEvent[] | null>(`/api/plugin-config-events${qs.toString() ? `?${qs.toString()}` : ''}`)
+  return listOrEmpty(data)
+}
+
+export async function createPluginConfig(input: {
+  id: string
+  plugin_id: string
+  capability_id?: string
+  scope?: string
+  title?: string
+}): Promise<PluginConfigInstance> {
+  return request<PluginConfigInstance>('/api/plugin-configs', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export async function fetchPluginConfig(instanceId: string): Promise<PluginConfigInstanceDetail> {
+  const data = await request<PluginConfigInstanceDetail>(`/api/plugin-configs/${encodeURIComponent(instanceId)}`)
+  return normalizePluginConfigDetail(data)
+}
+
+export async function createPluginConfigVersion(instanceId: string, values?: Record<string, unknown>): Promise<PluginConfigVersion> {
+  const data = await request<PluginConfigVersion>(`/api/plugin-configs/${encodeURIComponent(instanceId)}/versions`, {
+    method: 'POST',
+    body: JSON.stringify({ values: values || {} }),
+  })
+  return normalizePluginConfigVersion(data)
+}
+
+export async function updatePluginConfigVersion(instanceId: string, version: number, values: Record<string, unknown>): Promise<PluginConfigVersion> {
+  const data = await request<PluginConfigVersion>(`/api/plugin-configs/${encodeURIComponent(instanceId)}/versions/${version}`, {
+    method: 'PUT',
+    body: JSON.stringify({ values }),
+  })
+  return normalizePluginConfigVersion(data)
+}
+
+export async function validatePluginConfigVersion(instanceId: string, version: number): Promise<PluginConfigValidationResponse> {
+  const data = await request<PluginConfigValidationResponse>(`/api/plugin-configs/${encodeURIComponent(instanceId)}/versions/${version}/validate`, { method: 'POST' })
+  return {
+    ...data,
+    errors: listOrEmpty(data.errors),
+    version: normalizePluginConfigVersion(data.version),
+  }
+}
+
+export async function activatePluginConfigVersion(instanceId: string, version: number): Promise<PluginConfigInstanceDetail> {
+  const data = await request<PluginConfigInstanceDetail>(`/api/plugin-configs/${encodeURIComponent(instanceId)}/versions/${version}/activate`, { method: 'POST' })
+  return normalizePluginConfigDetail(data)
+}
+
+export async function disablePluginConfig(instanceId: string): Promise<PluginConfigInstanceDetail> {
+  const data = await request<PluginConfigInstanceDetail>(`/api/plugin-configs/${encodeURIComponent(instanceId)}/disable`, { method: 'POST' })
+  return normalizePluginConfigDetail(data)
+}
+
+export async function fetchPluginAssets(params: { plugin_id?: string; capability_id?: string; config_instance_id?: string; scope?: string; kind?: string }): Promise<PluginAsset[]> {
+  const qs = new URLSearchParams()
+  if (params.plugin_id) qs.set('plugin_id', params.plugin_id)
+  if (params.capability_id) qs.set('capability_id', params.capability_id)
+  if (params.config_instance_id) qs.set('config_instance_id', params.config_instance_id)
+  if (params.scope) qs.set('scope', params.scope)
+  if (params.kind) qs.set('kind', params.kind)
+  const data = await request<PluginAsset[] | null>(`/api/plugin-assets${qs.toString() ? `?${qs.toString()}` : ''}`)
+  return listOrEmpty(data)
+}
+
+export async function createPluginAsset(input: {
+  id: string
+  plugin_id: string
+  capability_id?: string
+  config_instance_id?: string
+  scope: string
+  kind: string
+  title?: string
+}): Promise<PluginAsset> {
+  return request<PluginAsset>('/api/plugin-assets', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export async function uploadPluginAssetVersion(assetId: string, file: File): Promise<PluginAssetVersion> {
+  const body = new FormData()
+  body.set('file', file)
+  const res = await fetch(`/api/plugin-assets/${encodeURIComponent(assetId)}/versions`, {
+    method: 'POST',
+    body,
+    cache: 'no-store',
+  })
+  if (!res.ok) {
+    const errorBody = await res.json().catch((): APIError => ({ error: res.statusText }))
+    const bodyRecord = isRecord(errorBody) ? errorBody : {}
+    const errorMessage = typeof bodyRecord.error === 'string' ? bodyRecord.error : ''
+    throw new PulseOpsAPIError(errorMessage || `HTTP ${res.status}`, listOrEmpty(bodyRecord.errors as string[] | null | undefined), errorBody)
+  }
+  return res.json()
+}
+
+export async function validatePluginAssetVersion(assetId: string, version: number): Promise<PluginAssetVersion> {
+  return request<PluginAssetVersion>(`/api/plugin-assets/${encodeURIComponent(assetId)}/versions/${version}/validate`, { method: 'POST' })
+}
+
+export async function activatePluginAssetVersion(assetId: string, version: number): Promise<PluginAsset> {
+  return request<PluginAsset>(`/api/plugin-assets/${encodeURIComponent(assetId)}/versions/${version}/activate`, { method: 'POST' })
+}
+
+export async function fetchPluginSecrets(params: { plugin_id?: string; scope?: string }): Promise<PluginSecret[]> {
+  const qs = new URLSearchParams()
+  if (params.plugin_id) qs.set('plugin_id', params.plugin_id)
+  if (params.scope) qs.set('scope', params.scope)
+  const data = await request<PluginSecret[] | null>(`/api/plugin-secrets${qs.toString() ? `?${qs.toString()}` : ''}`)
+  return listOrEmpty(data)
+}
+
+export async function upsertPluginSecret(input: {
+  id: string
+  plugin_id: string
+  scope?: string
+  title?: string
+  value: string
+}): Promise<PluginSecret> {
+  return request<PluginSecret>('/api/plugin-secrets', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
 }
 
 export async function reloadPlugins(): Promise<PluginCatalog> {

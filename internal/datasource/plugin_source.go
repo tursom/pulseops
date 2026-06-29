@@ -1,17 +1,12 @@
 package datasource
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -34,6 +29,7 @@ import (
 
 	"pulseops/internal/config"
 	"pulseops/internal/pluginmodel"
+	"pulseops/internal/pluginruntime"
 )
 
 const Protocol = "pulseops.plugin/v1"
@@ -75,6 +71,10 @@ func NewPluginSource(cap pluginmodel.Capability, cfg config.PluginsConfig) *Plug
 
 func (s *PluginSource) Name() string {
 	return s.cap.Name
+}
+
+func (s *PluginSource) Capability() pluginmodel.Capability {
+	return s.cap
 }
 
 func (s *PluginSource) ValidateSpec(spec Spec) error {
@@ -139,6 +139,59 @@ func (s *PluginSource) Fetch(ctx context.Context, spec Spec, deps FetchDeps) (an
 	}
 }
 
+func (s *PluginSource) ValidateConfig(ctx context.Context, configMap map[string]any) error {
+	merged := mergeConfig(s.cap.Defaults, configMap)
+	if err := s.ValidateSpec(Spec{Type: s.protocol(), Config: merged}); err != nil {
+		return err
+	}
+	if s.protocol() != "grpc" {
+		return nil
+	}
+	timeout := sourceTimeout(s.cfg, merged)
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	endpoint := stringValue(merged, "endpoint")
+	service := stringValue(merged, "service")
+	method := stringValue(merged, "method")
+	maxReceiveBytes := intValue(merged, "max_receive_bytes", 1024*1024)
+
+	conn, err := s.dialGRPC(callCtx, endpoint, maxReceiveBytes, merged)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	files, err := s.grpcFiles(callCtx, conn, service, merged)
+	if err != nil {
+		return err
+	}
+	methodDesc, err := findMethod(files, service, method)
+	if err != nil {
+		return err
+	}
+
+	reqMsg := dynamicpb.NewMessage(methodDesc.Input())
+	requestRaw, err := json.Marshal(merged["request"])
+	if err != nil {
+		return fmt.Errorf("marshal grpc request json: %w", err)
+	}
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(requestRaw, reqMsg); err != nil {
+		return fmt.Errorf("decode grpc request for %s/%s: %w", service, method, err)
+	}
+	if dryRun, _ := boolValue(merged, "validate_invoke", false); dryRun {
+		outMsg := dynamicpb.NewMessage(methodDesc.Output())
+		invokeCtx := callCtx
+		if md := metadataFromConfig(merged); len(md) > 0 {
+			invokeCtx = metadata.NewOutgoingContext(invokeCtx, md)
+		}
+		if err := conn.Invoke(invokeCtx, "/"+service+"/"+method, reqMsg, outMsg, grpc.MaxCallRecvMsgSize(maxReceiveBytes)); err != nil {
+			return fmt.Errorf("grpc data source %q validation call %s/%s: %w", s.cap.Name, service, method, err)
+		}
+	}
+	return nil
+}
+
 func (s *PluginSource) protocol() string {
 	if s.cap.Protocol != "" {
 		return s.cap.Protocol
@@ -166,79 +219,36 @@ func (s *PluginSource) envelope(configMap map[string]any, deps FetchDeps) plugin
 }
 
 func (s *PluginSource) fetchHTTP(ctx context.Context, configMap map[string]any, deps FetchDeps) (any, error) {
-	timeout := sourceTimeout(s.cfg, configMap)
-	callCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	body, err := json.Marshal(s.envelope(configMap, deps))
-	if err != nil {
-		return nil, fmt.Errorf("marshal plugin request: %w", err)
-	}
-	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, s.cap.Endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("build plugin request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := deps.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("call http plugin data source %q: %w", s.cap.Name, err)
-	}
-	defer resp.Body.Close()
-
-	raw, err := readLimited(resp.Body, maxOutputBytes(s.cfg))
-	if err != nil {
-		return nil, fmt.Errorf("read http plugin response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("http plugin data source %q returned status %d: %s", s.cap.Name, resp.StatusCode, strings.TrimSpace(string(raw)))
-	}
-	return decodePluginResponse(s.cap.Name, raw)
-}
-
-func (s *PluginSource) fetchProcess(ctx context.Context, configMap map[string]any, deps FetchDeps) (any, error) {
-	entrypoint, err := resolveEntrypoint(s.cap.ReleasePath, s.cap.Entrypoint)
+	resp, err := pluginruntime.NewClient(s.cap, s.cfg).Call(ctx, pluginruntime.Request{
+		Action: "fetch",
+		Config: configMap,
+		Input:  map[string]any{},
+	}, pluginruntime.Deps{
+		HTTPClient:    deps.HTTPClient,
+		CurrentRunID:  deps.CurrentRunID,
+		CurrentTaskID: deps.CurrentTaskID,
+		TriggerType:   deps.TriggerType,
+	})
 	if err != nil {
 		return nil, err
 	}
-	timeout := sourceTimeout(s.cfg, configMap)
-	callCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	return resp.Data, nil
+}
 
-	body, err := json.Marshal(s.envelope(configMap, deps))
+func (s *PluginSource) fetchProcess(ctx context.Context, configMap map[string]any, deps FetchDeps) (any, error) {
+	resp, err := pluginruntime.NewClient(s.cap, s.cfg).Call(ctx, pluginruntime.Request{
+		Action: "fetch",
+		Config: configMap,
+		Input:  map[string]any{},
+	}, pluginruntime.Deps{
+		CurrentRunID:  deps.CurrentRunID,
+		CurrentTaskID: deps.CurrentTaskID,
+		TriggerType:   deps.TriggerType,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("marshal plugin request: %w", err)
+		return nil, err
 	}
-	cmd := exec.CommandContext(callCtx, entrypoint)
-	cmd.Dir = s.cap.ReleasePath
-	cmd.Env = filteredEnv(s.cfg.EnvAllowlist)
-	cmd.Stdin = bytes.NewReader(body)
-
-	limit := maxOutputBytes(s.cfg)
-	stdout := &limitedBuffer{limit: limit}
-	stderr := &limitedBuffer{limit: limit}
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-
-	runErr := cmd.Run()
-	if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
-		return nil, fmt.Errorf("process data source %q timed out after %s", s.cap.Name, timeout)
-	}
-	if stdout.Overflow() || stderr.Overflow() {
-		return nil, fmt.Errorf("process data source %q output exceeded %d bytes", s.cap.Name, limit)
-	}
-	if runErr != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = runErr.Error()
-		}
-		return nil, fmt.Errorf("process data source %q failed: %s", s.cap.Name, msg)
-	}
-	return decodePluginResponse(s.cap.Name, stdout.Bytes())
+	return resp.Data, nil
 }
 
 func (s *PluginSource) fetchGRPC(ctx context.Context, configMap map[string]any) (any, error) {
@@ -362,6 +372,9 @@ func (s *PluginSource) grpcFiles(ctx context.Context, conn *grpc.ClientConn, ser
 	if path := stringValue(configMap, "descriptor_set"); path != "" {
 		return filesFromDescriptorSet(resolveReleasePath(s.cap.ReleasePath, path))
 	}
+	if path := stringValue(configMap, "descriptor"); path != "" {
+		return filesFromDescriptorSet(resolveReleasePath(s.cap.ReleasePath, path))
+	}
 	if protoFiles, ok := stringListValue(configMap["proto_files"]); ok && len(protoFiles) > 0 {
 		return filesFromProtoFiles(ctx, s.cap.ReleasePath, protoFiles, configMap)
 	}
@@ -387,7 +400,9 @@ func filesFromProtoFiles(ctx context.Context, releasePath string, protoFiles []s
 			continue
 		}
 		if filepath.IsAbs(file) {
-			return nil, fmt.Errorf("grpc proto_files entries must be relative to plugin release path")
+			importPaths = append(importPaths, filepath.Dir(file))
+			files = append(files, filepath.Base(file))
+			continue
 		}
 		files = append(files, filepath.ToSlash(file))
 	}
@@ -478,23 +493,6 @@ func findMethod(files *protoregistry.Files, serviceName, methodName string) (pro
 	return method, nil
 }
 
-func decodePluginResponse(name string, raw []byte) (any, error) {
-	var resp pluginResponse
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		return nil, fmt.Errorf("parse plugin data source %q response: %w", name, err)
-	}
-	if !resp.OK {
-		if resp.Error == nil {
-			return nil, fmt.Errorf("plugin data source %q returned ok=false", name)
-		}
-		if resp.Error.Code != "" {
-			return nil, fmt.Errorf("plugin data source %q error %s: %s", name, resp.Error.Code, resp.Error.Message)
-		}
-		return nil, fmt.Errorf("plugin data source %q error: %s", name, resp.Error.Message)
-	}
-	return resp.Data, nil
-}
-
 func mergeConfig(defaults, override map[string]any) map[string]any {
 	out := make(map[string]any, len(defaults)+len(override))
 	for key, value := range defaults {
@@ -518,74 +516,11 @@ func sourceTimeout(cfg config.PluginsConfig, configMap map[string]any) time.Dura
 	return 30 * time.Second
 }
 
-func maxOutputBytes(cfg config.PluginsConfig) int {
-	if cfg.MaxOutputBytes > 0 {
-		return cfg.MaxOutputBytes
-	}
-	return 1024 * 1024
-}
-
-func readLimited(reader io.Reader, limit int) ([]byte, error) {
-	raw, err := io.ReadAll(io.LimitReader(reader, int64(limit)+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(raw) > limit {
-		return nil, fmt.Errorf("response exceeded %d bytes", limit)
-	}
-	return raw, nil
-}
-
-func resolveEntrypoint(releasePath, entrypoint string) (string, error) {
-	if filepath.IsAbs(entrypoint) {
-		return "", fmt.Errorf("process entrypoint must be relative to the plugin release path")
-	}
-	absRelease, err := filepath.Abs(releasePath)
-	if err != nil {
-		return "", fmt.Errorf("resolve release path: %w", err)
-	}
-	absEntry, err := filepath.Abs(filepath.Join(absRelease, entrypoint))
-	if err != nil {
-		return "", fmt.Errorf("resolve process entrypoint: %w", err)
-	}
-	rel, err := filepath.Rel(absRelease, absEntry)
-	if err != nil || strings.HasPrefix(rel, "..") || rel == "." || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("process entrypoint must stay inside the plugin release path")
-	}
-	info, err := os.Stat(absEntry)
-	if err != nil {
-		return "", fmt.Errorf("stat process entrypoint: %w", err)
-	}
-	if info.Mode().Perm()&0111 == 0 {
-		return "", fmt.Errorf("process entrypoint %q is not executable", entrypoint)
-	}
-	return absEntry, nil
-}
-
 func resolveReleasePath(releasePath, path string) string {
 	if path == "" || filepath.IsAbs(path) || releasePath == "" {
 		return path
 	}
 	return filepath.Join(releasePath, path)
-}
-
-func filteredEnv(allowlist []string) []string {
-	env := make([]string, 0, len(allowlist))
-	seen := map[string]struct{}{}
-	for _, key := range allowlist {
-		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
-		}
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		if value, ok := os.LookupEnv(key); ok {
-			env = append(env, key+"="+value)
-		}
-	}
-	return env
 }
 
 func metadataFromConfig(configMap map[string]any) metadata.MD {
@@ -682,40 +617,4 @@ func stringListValue(value any) ([]string, bool) {
 	default:
 		return nil, false
 	}
-}
-
-type limitedBuffer struct {
-	buf      bytes.Buffer
-	limit    int
-	overflow bool
-}
-
-func (b *limitedBuffer) Write(p []byte) (int, error) {
-	if b.limit <= 0 {
-		return len(p), nil
-	}
-	remaining := b.limit - b.buf.Len()
-	if remaining > 0 {
-		if len(p) <= remaining {
-			_, _ = b.buf.Write(p)
-		} else {
-			_, _ = b.buf.Write(p[:remaining])
-			b.overflow = true
-		}
-	} else {
-		b.overflow = true
-	}
-	return len(p), nil
-}
-
-func (b *limitedBuffer) Bytes() []byte {
-	return b.buf.Bytes()
-}
-
-func (b *limitedBuffer) String() string {
-	return b.buf.String()
-}
-
-func (b *limitedBuffer) Overflow() bool {
-	return b.overflow
 }

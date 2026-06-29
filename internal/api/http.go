@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"pulseops/internal/appctx"
 	"pulseops/internal/config"
 	pluginmgr "pulseops/internal/plugin"
+	"pulseops/internal/pluginconfig"
 	"pulseops/internal/store"
 	"pulseops/internal/task"
 )
@@ -54,12 +56,89 @@ type PluginManager interface {
 	EnablePlugin(ctx context.Context, pluginID string) (pluginmgr.Catalog, error)
 	RollbackPlugin(ctx context.Context, pluginID string) (pluginmgr.Catalog, error)
 	GC(ctx context.Context) (pluginmgr.Catalog, error)
+	ValidateConfig(ctx context.Context, req pluginmgr.ConfigValidationRequest) error
 	ExportRelease(ctx context.Context, pluginID, version string) (string, []byte, error)
 	ImportRelease(ctx context.Context, reader io.Reader) (pluginmgr.ReleaseRecord, error)
 }
 
+type PluginConfigStore interface {
+	UpsertPluginConfigInstance(ctx context.Context, record pluginmgr.ConfigInstanceRecord) error
+	UpdatePluginConfigInstanceStatus(ctx context.Context, instanceID, status string) error
+	UpsertPluginConfigVersion(ctx context.Context, record pluginmgr.ConfigVersionRecord) error
+	InsertPluginConfigEvent(ctx context.Context, record pluginmgr.ConfigEventRecord) error
+	ListPluginConfigEvents(ctx context.Context, pluginID, resourceType, resourceID string, limit int) ([]pluginmgr.ConfigEventRecord, error)
+	ActivatePluginConfigVersion(ctx context.Context, instanceID string, version int) error
+	ListPluginConfigInstances(ctx context.Context, pluginID, capabilityID string) ([]pluginmgr.ConfigInstanceRecord, error)
+	GetPluginConfigInstance(ctx context.Context, instanceID string) (pluginmgr.ConfigInstanceRecord, error)
+	ListPluginConfigVersions(ctx context.Context, instanceID string) ([]pluginmgr.ConfigVersionRecord, error)
+	GetPluginConfigVersion(ctx context.Context, instanceID string, version int) (pluginmgr.ConfigVersionRecord, error)
+	GetActivePluginConfigVersion(ctx context.Context, instanceID string) (pluginmgr.ConfigVersionRecord, error)
+	UpsertPluginAsset(ctx context.Context, record pluginmgr.AssetRecord) error
+	UpsertPluginAssetVersion(ctx context.Context, record pluginmgr.AssetVersionRecord) error
+	ActivatePluginAssetVersion(ctx context.Context, assetID string, version int) error
+	ListPluginAssets(ctx context.Context, pluginID, capabilityID, configInstanceID, scope, kind string) ([]pluginmgr.AssetRecord, error)
+	GetPluginAsset(ctx context.Context, assetID string) (pluginmgr.AssetRecord, error)
+	ListPluginAssetVersions(ctx context.Context, assetID string) ([]pluginmgr.AssetVersionRecord, error)
+	GetPluginAssetVersion(ctx context.Context, assetID string, version int) (pluginmgr.AssetVersionRecord, error)
+	GetActivePluginAssetVersion(ctx context.Context, assetID string) (pluginmgr.AssetVersionRecord, error)
+	UpsertPluginSecret(ctx context.Context, secret pluginmgr.SecretRecord, value pluginmgr.SecretValueRecord) error
+	ListPluginSecrets(ctx context.Context, pluginID, scope string) ([]pluginmgr.SecretRecord, error)
+	GetPluginSecret(ctx context.Context, secretID string) (pluginmgr.SecretRecord, error)
+	GetPluginSecretValue(ctx context.Context, secretID string) (pluginmgr.SecretValueRecord, error)
+}
+
 type PluginStatusRefresher interface {
 	RefreshPluginStatus(ctx context.Context)
+}
+
+type pluginConfigSchemaResponse struct {
+	PluginID       string                           `json:"plugin_id"`
+	PluginVersion  string                           `json:"plugin_version,omitempty"`
+	CapabilityID   string                           `json:"capability_id,omitempty"`
+	CapabilityType string                           `json:"capability_type,omitempty"`
+	CapabilityName string                           `json:"capability_name,omitempty"`
+	ConfigClasses  map[string]pluginmgr.ConfigClass `json:"config_classes,omitempty"`
+	Config         *pluginmgr.ConfigSchema          `json:"config,omitempty"`
+}
+
+type pluginConfigInstanceResponse struct {
+	Instance pluginmgr.ConfigInstanceRecord  `json:"instance"`
+	Versions []pluginmgr.ConfigVersionRecord `json:"versions"`
+	Active   *pluginmgr.ConfigVersionRecord  `json:"active,omitempty"`
+}
+
+type pluginAssetResponse struct {
+	Asset    pluginmgr.AssetRecord          `json:"asset"`
+	Versions []pluginmgr.AssetVersionRecord `json:"versions"`
+	Active   *pluginmgr.AssetVersionRecord  `json:"active,omitempty"`
+}
+
+type pluginAssetRequest struct {
+	ID               string `json:"id"`
+	PluginID         string `json:"plugin_id"`
+	CapabilityID     string `json:"capability_id,omitempty"`
+	ConfigInstanceID string `json:"config_instance_id,omitempty"`
+	Scope            string `json:"scope"`
+	Kind             string `json:"kind"`
+	Title            string `json:"title,omitempty"`
+}
+
+type pluginConfigInstanceRequest struct {
+	ID           string `json:"id"`
+	PluginID     string `json:"plugin_id"`
+	CapabilityID string `json:"capability_id,omitempty"`
+	Scope        string `json:"scope,omitempty"`
+	Title        string `json:"title,omitempty"`
+}
+
+type pluginConfigVersionRequest struct {
+	Values map[string]any `json:"values"`
+}
+
+type pluginConfigValidationResponse struct {
+	Valid   bool                          `json:"valid"`
+	Errors  []string                      `json:"errors,omitempty"`
+	Version pluginmgr.ConfigVersionRecord `json:"version"`
 }
 
 type settingsResponse struct {
@@ -279,6 +358,43 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		}
 		writeJSON(w, http.StatusOK, caps)
 	})
+	mux.HandleFunc("GET /api/plugin-capabilities/{capability_id}/config-schema", func(w http.ResponseWriter, r *http.Request) {
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		capabilityID := r.PathValue("capability_id")
+		caps, err := pluginManager.Capabilities(r.Context(), "", "")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for _, cap := range caps {
+			if cap.ID != capabilityID {
+				continue
+			}
+			item, err := pluginManager.Plugin(r.Context(), cap.PluginID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			classes := map[string]pluginmgr.ConfigClass{}
+			if item.Release != nil {
+				classes = item.Release.Manifest.ConfigClasses
+			}
+			writeJSON(w, http.StatusOK, pluginConfigSchemaResponse{
+				PluginID:       cap.PluginID,
+				PluginVersion:  cap.PluginVersion,
+				CapabilityID:   cap.ID,
+				CapabilityType: cap.Type,
+				CapabilityName: cap.Name,
+				ConfigClasses:  classes,
+				Config:         cap.Config,
+			})
+			return
+		}
+		writeError(w, http.StatusNotFound, "plugin capability not found")
+	})
 	mux.HandleFunc("GET /api/plugins/{id}", func(w http.ResponseWriter, r *http.Request) {
 		if pluginManager == nil {
 			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
@@ -294,6 +410,31 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 			return
 		}
 		writeJSON(w, http.StatusOK, item)
+	})
+	mux.HandleFunc("GET /api/plugins/{id}/config-schema", func(w http.ResponseWriter, r *http.Request) {
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		item, err := pluginManager.Plugin(r.Context(), r.PathValue("id"))
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "plugin not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if item.Release == nil {
+			writeError(w, http.StatusNotFound, "plugin active release not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, pluginConfigSchemaResponse{
+			PluginID:      item.Package.ID,
+			PluginVersion: item.Release.Version,
+			ConfigClasses: item.Release.Manifest.ConfigClasses,
+			Config:        item.Release.Manifest.Config,
+		})
 	})
 	mux.HandleFunc("GET /api/plugins/{id}/releases", func(w http.ResponseWriter, r *http.Request) {
 		if pluginManager == nil {
@@ -384,6 +525,733 @@ func Routes(staticDir string, manager TaskManager, repository store.Repository, 
 		}
 		refreshPluginStatus(r.Context(), manager)
 		writeJSON(w, http.StatusOK, catalog)
+	})
+	mux.HandleFunc("GET /api/plugin-configs", func(w http.ResponseWriter, r *http.Request) {
+		configStore, ok := repository.(PluginConfigStore)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "plugin config store is unavailable")
+			return
+		}
+		records, err := configStore.ListPluginConfigInstances(r.Context(), r.URL.Query().Get("plugin_id"), r.URL.Query().Get("capability_id"))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if records == nil {
+			records = []pluginmgr.ConfigInstanceRecord{}
+		}
+		writeJSON(w, http.StatusOK, records)
+	})
+	mux.HandleFunc("GET /api/plugin-config-events", func(w http.ResponseWriter, r *http.Request) {
+		configStore, ok := repository.(PluginConfigStore)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "plugin config store is unavailable")
+			return
+		}
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		records, err := configStore.ListPluginConfigEvents(
+			r.Context(),
+			r.URL.Query().Get("plugin_id"),
+			r.URL.Query().Get("resource_type"),
+			r.URL.Query().Get("resource_id"),
+			limit,
+		)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if records == nil {
+			records = []pluginmgr.ConfigEventRecord{}
+		}
+		writeJSON(w, http.StatusOK, records)
+	})
+	mux.HandleFunc("POST /api/plugin-configs", func(w http.ResponseWriter, r *http.Request) {
+		configStore, ok := repository.(PluginConfigStore)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "plugin config store is unavailable")
+			return
+		}
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		var req pluginConfigInstanceRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+			return
+		}
+		instance, err := buildPluginConfigInstance(r.Context(), pluginManager, req)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := configStore.UpsertPluginConfigInstance(r.Context(), instance); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := recordPluginConfigEvent(r.Context(), configStore, "config_instance", instance.ID, instance.PluginID, "create", "success", ""); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, instance)
+	})
+	mux.HandleFunc("POST /api/plugin-configs/{instance_id}/versions", func(w http.ResponseWriter, r *http.Request) {
+		configStore, ok := repository.(PluginConfigStore)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "plugin config store is unavailable")
+			return
+		}
+		instanceID := r.PathValue("instance_id")
+		instance, err := configStore.GetPluginConfigInstance(r.Context(), instanceID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "plugin config instance not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		var req pluginConfigVersionRequest
+		if r.Body != nil {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+				return
+			}
+		}
+		values := req.Values
+		if values == nil && instance.ActiveVersion > 0 {
+			active, err := configStore.GetActivePluginConfigVersion(r.Context(), instanceID)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if err == nil {
+				values = active.Values
+			}
+		}
+		if values == nil {
+			values = map[string]any{}
+		}
+		versions, err := configStore.ListPluginConfigVersions(r.Context(), instanceID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		nextVersion := nextPluginConfigVersion(versions)
+		record := pluginmgr.ConfigVersionRecord{
+			InstanceID: instance.ID,
+			Version:    nextVersion,
+			Status:     "draft",
+			Values:     values,
+		}
+		if err := configStore.UpsertPluginConfigVersion(r.Context(), record); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := recordPluginConfigEvent(r.Context(), configStore, "config_version", pluginConfigVersionEventID(record.InstanceID, record.Version), instance.PluginID, "create", "success", ""); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, record)
+	})
+	mux.HandleFunc("PUT /api/plugin-configs/{instance_id}/versions/{version}", func(w http.ResponseWriter, r *http.Request) {
+		configStore, ok := repository.(PluginConfigStore)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "plugin config store is unavailable")
+			return
+		}
+		version, ok := parsePositivePathInt(w, r, "version")
+		if !ok {
+			return
+		}
+		instanceID := r.PathValue("instance_id")
+		existing, err := configStore.GetPluginConfigVersion(r.Context(), instanceID, version)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "plugin config version not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if existing.Status != "draft" && existing.Status != "failed" {
+			writeError(w, http.StatusConflict, "only draft or failed plugin config versions can be edited")
+			return
+		}
+		var req pluginConfigVersionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+			return
+		}
+		if req.Values == nil {
+			req.Values = map[string]any{}
+		}
+		existing.Status = "draft"
+		existing.Values = req.Values
+		existing.ValidationError = ""
+		if err := configStore.UpsertPluginConfigVersion(r.Context(), existing); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		instance, err := configStore.GetPluginConfigInstance(r.Context(), instanceID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := recordPluginConfigEvent(r.Context(), configStore, "config_version", pluginConfigVersionEventID(existing.InstanceID, existing.Version), instance.PluginID, "update", "success", ""); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, existing)
+	})
+	mux.HandleFunc("POST /api/plugin-configs/{instance_id}/versions/{version}/validate", func(w http.ResponseWriter, r *http.Request) {
+		configStore, ok := repository.(PluginConfigStore)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "plugin config store is unavailable")
+			return
+		}
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		version, ok := parsePositivePathInt(w, r, "version")
+		if !ok {
+			return
+		}
+		instanceID := r.PathValue("instance_id")
+		instance, err := configStore.GetPluginConfigInstance(r.Context(), instanceID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "plugin config instance not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		record, err := configStore.GetPluginConfigVersion(r.Context(), instanceID, version)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "plugin config version not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		schema, classes, err := resolvePluginConfigSchema(r.Context(), pluginManager, instance)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := pluginmgr.ValidateConfigValues(schema, classes, record.Values, pluginmgr.ConfigValueValidationOptions{}); err != nil {
+			record.Status = "failed"
+			record.ValidationError = err.Error()
+			if upsertErr := configStore.UpsertPluginConfigVersion(r.Context(), record); upsertErr != nil {
+				writeError(w, http.StatusInternalServerError, upsertErr.Error())
+				return
+			}
+			if eventErr := recordPluginConfigEvent(r.Context(), configStore, "config_version", pluginConfigVersionEventID(record.InstanceID, record.Version), instance.PluginID, "validate", "failed", err.Error()); eventErr != nil {
+				writeError(w, http.StatusInternalServerError, eventErr.Error())
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, pluginConfigValidationResponse{Valid: false, Errors: []string{err.Error()}, Version: record})
+			return
+		}
+		runtimeConfig, _, assetRefs, cleanup, err := pluginconfig.ResolveRuntimeValuesWithOptions(r.Context(), configStore, artifactStore, schema, classes, record.Values, pluginconfig.RuntimeResolveOptions{
+			PluginID:          instance.PluginID,
+			CapabilityID:      instance.CapabilityID,
+			ConfigInstanceIDs: []string{instance.ID},
+		})
+		if err != nil {
+			record.Status = "failed"
+			record.ValidationError = err.Error()
+			if upsertErr := configStore.UpsertPluginConfigVersion(r.Context(), record); upsertErr != nil {
+				writeError(w, http.StatusInternalServerError, upsertErr.Error())
+				return
+			}
+			if eventErr := recordPluginConfigEvent(r.Context(), configStore, "config_version", pluginConfigVersionEventID(record.InstanceID, record.Version), instance.PluginID, "validate", "failed", err.Error()); eventErr != nil {
+				writeError(w, http.StatusInternalServerError, eventErr.Error())
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, pluginConfigValidationResponse{Valid: false, Errors: []string{err.Error()}, Version: record})
+			return
+		}
+		defer cleanup()
+		if schema.ValidateAction != "" {
+			if err := pluginManager.ValidateConfig(r.Context(), pluginmgr.ConfigValidationRequest{
+				PluginID:       instance.PluginID,
+				CapabilityID:   instance.CapabilityID,
+				CapabilityName: instance.CapabilityName,
+				Scope:          instance.Scope,
+				Action:         schema.ValidateAction,
+				Config:         runtimeConfig,
+				Input: map[string]any{
+					"instance_id": instance.ID,
+					"version":     record.Version,
+					"assets":      assetRefs,
+				},
+			}); err != nil {
+				record.Status = "failed"
+				record.ValidationError = err.Error()
+				if upsertErr := configStore.UpsertPluginConfigVersion(r.Context(), record); upsertErr != nil {
+					writeError(w, http.StatusInternalServerError, upsertErr.Error())
+					return
+				}
+				if eventErr := recordPluginConfigEvent(r.Context(), configStore, "config_version", pluginConfigVersionEventID(record.InstanceID, record.Version), instance.PluginID, "validate", "failed", err.Error()); eventErr != nil {
+					writeError(w, http.StatusInternalServerError, eventErr.Error())
+					return
+				}
+				writeJSON(w, http.StatusBadRequest, pluginConfigValidationResponse{Valid: false, Errors: []string{err.Error()}, Version: record})
+				return
+			}
+		}
+		record.Status = "validated"
+		record.ValidationError = ""
+		now := time.Now().UTC()
+		record.ValidatedAt = &now
+		if err := configStore.UpsertPluginConfigVersion(r.Context(), record); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := recordPluginConfigEvent(r.Context(), configStore, "config_version", pluginConfigVersionEventID(record.InstanceID, record.Version), instance.PluginID, "validate", "success", ""); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, pluginConfigValidationResponse{Valid: true, Version: record})
+	})
+	mux.HandleFunc("POST /api/plugin-configs/{instance_id}/versions/{version}/activate", func(w http.ResponseWriter, r *http.Request) {
+		configStore, ok := repository.(PluginConfigStore)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "plugin config store is unavailable")
+			return
+		}
+		version, ok := parsePositivePathInt(w, r, "version")
+		if !ok {
+			return
+		}
+		instanceID := r.PathValue("instance_id")
+		record, err := configStore.GetPluginConfigVersion(r.Context(), instanceID, version)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "plugin config version not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if record.Status != "validated" && record.Status != "active" {
+			writeError(w, http.StatusConflict, "plugin config version must be validated before activation")
+			return
+		}
+		if err := configStore.ActivatePluginConfigVersion(r.Context(), instanceID, version); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "plugin config version not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		updated, err := configStore.GetPluginConfigInstance(r.Context(), instanceID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		versions, err := configStore.ListPluginConfigVersions(r.Context(), instanceID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if versions == nil {
+			versions = []pluginmgr.ConfigVersionRecord{}
+		}
+		active, err := configStore.GetActivePluginConfigVersion(r.Context(), instanceID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := recordPluginConfigEvent(r.Context(), configStore, "config_version", pluginConfigVersionEventID(instanceID, version), updated.PluginID, "activate", "success", ""); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, pluginConfigInstanceResponse{Instance: updated, Versions: versions, Active: &active})
+	})
+	mux.HandleFunc("POST /api/plugin-configs/{instance_id}/disable", func(w http.ResponseWriter, r *http.Request) {
+		configStore, ok := repository.(PluginConfigStore)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "plugin config store is unavailable")
+			return
+		}
+		instanceID := r.PathValue("instance_id")
+		if err := configStore.UpdatePluginConfigInstanceStatus(r.Context(), instanceID, "disabled"); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "plugin config instance not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		instance, err := configStore.GetPluginConfigInstance(r.Context(), instanceID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := recordPluginConfigEvent(r.Context(), configStore, "config_instance", instance.ID, instance.PluginID, "disable", "success", ""); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		versions, err := configStore.ListPluginConfigVersions(r.Context(), instanceID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if versions == nil {
+			versions = []pluginmgr.ConfigVersionRecord{}
+		}
+		var active *pluginmgr.ConfigVersionRecord
+		if instance.ActiveVersion > 0 {
+			activeVersion, err := configStore.GetActivePluginConfigVersion(r.Context(), instanceID)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if err == nil {
+				active = &activeVersion
+			}
+		}
+		writeJSON(w, http.StatusOK, pluginConfigInstanceResponse{Instance: instance, Versions: versions, Active: active})
+	})
+	mux.HandleFunc("GET /api/plugin-configs/{instance_id}", func(w http.ResponseWriter, r *http.Request) {
+		configStore, ok := repository.(PluginConfigStore)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "plugin config store is unavailable")
+			return
+		}
+		instanceID := r.PathValue("instance_id")
+		instance, err := configStore.GetPluginConfigInstance(r.Context(), instanceID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "plugin config instance not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		versions, err := configStore.ListPluginConfigVersions(r.Context(), instanceID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if versions == nil {
+			versions = []pluginmgr.ConfigVersionRecord{}
+		}
+		var active *pluginmgr.ConfigVersionRecord
+		if instance.ActiveVersion > 0 {
+			activeVersion, err := configStore.GetActivePluginConfigVersion(r.Context(), instanceID)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if err == nil {
+				active = &activeVersion
+			}
+		}
+		writeJSON(w, http.StatusOK, pluginConfigInstanceResponse{Instance: instance, Versions: versions, Active: active})
+	})
+	mux.HandleFunc("GET /api/plugin-assets", func(w http.ResponseWriter, r *http.Request) {
+		configStore, ok := repository.(PluginConfigStore)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "plugin config store is unavailable")
+			return
+		}
+		records, err := configStore.ListPluginAssets(
+			r.Context(),
+			r.URL.Query().Get("plugin_id"),
+			r.URL.Query().Get("capability_id"),
+			r.URL.Query().Get("config_instance_id"),
+			r.URL.Query().Get("scope"),
+			r.URL.Query().Get("kind"),
+		)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if records == nil {
+			records = []pluginmgr.AssetRecord{}
+		}
+		writeJSON(w, http.StatusOK, records)
+	})
+	mux.HandleFunc("POST /api/plugin-assets", func(w http.ResponseWriter, r *http.Request) {
+		configStore, ok := repository.(PluginConfigStore)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "plugin config store is unavailable")
+			return
+		}
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		var req pluginAssetRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+			return
+		}
+		asset, err := buildPluginAsset(r.Context(), pluginManager, configStore, req)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := configStore.UpsertPluginAsset(r.Context(), asset); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := recordPluginConfigEvent(r.Context(), configStore, "asset", asset.ID, asset.PluginID, "create", "success", ""); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, asset)
+	})
+	mux.HandleFunc("POST /api/plugin-assets/{asset_id}/versions", func(w http.ResponseWriter, r *http.Request) {
+		configStore, ok := repository.(PluginConfigStore)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "plugin config store is unavailable")
+			return
+		}
+		assetID := r.PathValue("asset_id")
+		asset, err := configStore.GetPluginAsset(r.Context(), assetID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "plugin asset not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		versions, err := configStore.ListPluginAssetVersions(r.Context(), assetID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		version := nextPluginAssetVersion(versions)
+		upload, err := readPluginAssetUpload(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		defer upload.Close()
+		record, err := buildPluginAssetVersionRecord(asset, version, upload)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := configStore.UpsertPluginAssetVersion(r.Context(), record); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := recordPluginConfigEvent(r.Context(), configStore, "asset_version", pluginConfigVersionEventID(record.AssetID, record.Version), asset.PluginID, "create", "success", ""); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, record)
+	})
+	mux.HandleFunc("POST /api/plugin-assets/{asset_id}/versions/{version}/validate", func(w http.ResponseWriter, r *http.Request) {
+		configStore, ok := repository.(PluginConfigStore)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "plugin config store is unavailable")
+			return
+		}
+		version, ok := parsePositivePathInt(w, r, "version")
+		if !ok {
+			return
+		}
+		assetID := r.PathValue("asset_id")
+		record, err := configStore.GetPluginAssetVersion(r.Context(), assetID, version)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "plugin asset version not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := validatePluginAssetVersion(record); err != nil {
+			record.Status = "failed"
+			record.ValidationError = err.Error()
+			if upsertErr := configStore.UpsertPluginAssetVersion(r.Context(), record); upsertErr != nil {
+				writeError(w, http.StatusInternalServerError, upsertErr.Error())
+				return
+			}
+			asset, assetErr := configStore.GetPluginAsset(r.Context(), assetID)
+			if assetErr != nil {
+				writeError(w, http.StatusInternalServerError, assetErr.Error())
+				return
+			}
+			if eventErr := recordPluginConfigEvent(r.Context(), configStore, "asset_version", pluginConfigVersionEventID(record.AssetID, record.Version), asset.PluginID, "validate", "failed", err.Error()); eventErr != nil {
+				writeError(w, http.StatusInternalServerError, eventErr.Error())
+				return
+			}
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		record.Status = "validated"
+		record.ValidationError = ""
+		now := time.Now().UTC()
+		record.ValidatedAt = &now
+		if err := configStore.UpsertPluginAssetVersion(r.Context(), record); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		asset, err := configStore.GetPluginAsset(r.Context(), assetID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := recordPluginConfigEvent(r.Context(), configStore, "asset_version", pluginConfigVersionEventID(record.AssetID, record.Version), asset.PluginID, "validate", "success", ""); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, record)
+	})
+	mux.HandleFunc("POST /api/plugin-assets/{asset_id}/versions/{version}/activate", func(w http.ResponseWriter, r *http.Request) {
+		configStore, ok := repository.(PluginConfigStore)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "plugin config store is unavailable")
+			return
+		}
+		version, ok := parsePositivePathInt(w, r, "version")
+		if !ok {
+			return
+		}
+		assetID := r.PathValue("asset_id")
+		record, err := configStore.GetPluginAssetVersion(r.Context(), assetID, version)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "plugin asset version not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if record.Status != "validated" && record.Status != "active" {
+			writeError(w, http.StatusConflict, "plugin asset version must be validated before activation")
+			return
+		}
+		if err := configStore.ActivatePluginAssetVersion(r.Context(), assetID, version); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "plugin asset version not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		asset, err := configStore.GetPluginAsset(r.Context(), assetID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := recordPluginConfigEvent(r.Context(), configStore, "asset_version", pluginConfigVersionEventID(assetID, version), asset.PluginID, "activate", "success", ""); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, asset)
+	})
+	mux.HandleFunc("GET /api/plugin-assets/{asset_id}", func(w http.ResponseWriter, r *http.Request) {
+		configStore, ok := repository.(PluginConfigStore)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "plugin config store is unavailable")
+			return
+		}
+		assetID := r.PathValue("asset_id")
+		asset, err := configStore.GetPluginAsset(r.Context(), assetID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "plugin asset not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		versions, err := configStore.ListPluginAssetVersions(r.Context(), assetID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if versions == nil {
+			versions = []pluginmgr.AssetVersionRecord{}
+		}
+		var active *pluginmgr.AssetVersionRecord
+		if asset.ActiveVersion > 0 {
+			activeVersion, err := configStore.GetActivePluginAssetVersion(r.Context(), assetID)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if err == nil {
+				active = &activeVersion
+			}
+		}
+		writeJSON(w, http.StatusOK, pluginAssetResponse{Asset: asset, Versions: versions, Active: active})
+	})
+	mux.HandleFunc("GET /api/plugin-secrets", func(w http.ResponseWriter, r *http.Request) {
+		configStore, ok := repository.(PluginConfigStore)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "plugin config store is unavailable")
+			return
+		}
+		records, err := configStore.ListPluginSecrets(r.Context(), r.URL.Query().Get("plugin_id"), r.URL.Query().Get("scope"))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if records == nil {
+			records = []pluginmgr.SecretRecord{}
+		}
+		writeJSON(w, http.StatusOK, records)
+	})
+	mux.HandleFunc("POST /api/plugin-secrets", func(w http.ResponseWriter, r *http.Request) {
+		configStore, ok := repository.(PluginConfigStore)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "plugin config store is unavailable")
+			return
+		}
+		if pluginManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "plugin manager is unavailable")
+			return
+		}
+		var req pluginSecretRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+			return
+		}
+		secret, value, err := buildPluginSecret(r.Context(), pluginManager, req)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := configStore.UpsertPluginSecret(r.Context(), secret, value); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := recordPluginConfigEvent(r.Context(), configStore, "secret", secret.ID, secret.PluginID, "upsert", "success", ""); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, secret)
+	})
+	mux.HandleFunc("GET /api/plugin-secrets/{secret_id}", func(w http.ResponseWriter, r *http.Request) {
+		configStore, ok := repository.(PluginConfigStore)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "plugin config store is unavailable")
+			return
+		}
+		record, err := configStore.GetPluginSecret(r.Context(), r.PathValue("secret_id"))
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "plugin secret not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, record)
 	})
 	mux.HandleFunc("GET /api/dashboard/summary", func(w http.ResponseWriter, r *http.Request) {
 		since := parseDurationQuery(r, "since", 24*time.Hour)
@@ -1032,6 +1900,167 @@ func refreshPluginStatus(ctx context.Context, manager TaskManager) {
 	if refresher, ok := manager.(PluginStatusRefresher); ok {
 		refresher.RefreshPluginStatus(ctx)
 	}
+}
+
+func buildPluginConfigInstance(ctx context.Context, pluginManager PluginManager, req pluginConfigInstanceRequest) (pluginmgr.ConfigInstanceRecord, error) {
+	id := strings.TrimSpace(req.ID)
+	pluginID := strings.TrimSpace(req.PluginID)
+	capabilityID := strings.TrimSpace(req.CapabilityID)
+	scope := strings.TrimSpace(req.Scope)
+	title := strings.TrimSpace(req.Title)
+	if id == "" {
+		return pluginmgr.ConfigInstanceRecord{}, errors.New("id is required")
+	}
+	if pluginID == "" {
+		return pluginmgr.ConfigInstanceRecord{}, errors.New("plugin_id is required")
+	}
+	if scope == "" {
+		if capabilityID != "" {
+			scope = "capability"
+		} else {
+			scope = "plugin"
+		}
+	}
+	switch scope {
+	case "plugin":
+		item, err := pluginManager.Plugin(ctx, pluginID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return pluginmgr.ConfigInstanceRecord{}, fmt.Errorf("plugin %s not found", pluginID)
+			}
+			return pluginmgr.ConfigInstanceRecord{}, err
+		}
+		if item.Release == nil || item.Release.Manifest.Config == nil {
+			return pluginmgr.ConfigInstanceRecord{}, fmt.Errorf("plugin %s does not declare plugin config schema", pluginID)
+		}
+		if title == "" {
+			title = item.Release.Manifest.Config.Title
+		}
+		if title == "" {
+			title = item.Package.Name
+		}
+		return pluginmgr.ConfigInstanceRecord{
+			ID:       id,
+			PluginID: pluginID,
+			Scope:    scope,
+			Title:    title,
+			Status:   "draft",
+		}, nil
+	case "capability":
+		if capabilityID == "" {
+			return pluginmgr.ConfigInstanceRecord{}, errors.New("capability_id is required for capability config")
+		}
+		capability, err := findPluginCapability(ctx, pluginManager, capabilityID)
+		if err != nil {
+			return pluginmgr.ConfigInstanceRecord{}, err
+		}
+		if capability.PluginID != pluginID {
+			return pluginmgr.ConfigInstanceRecord{}, fmt.Errorf("capability %s belongs to plugin %s", capabilityID, capability.PluginID)
+		}
+		if capability.Config == nil {
+			return pluginmgr.ConfigInstanceRecord{}, fmt.Errorf("capability %s does not declare config schema", capabilityID)
+		}
+		if title == "" {
+			title = capability.Config.Title
+		}
+		if title == "" {
+			title = capability.Title
+		}
+		if title == "" {
+			title = capability.Name
+		}
+		return pluginmgr.ConfigInstanceRecord{
+			ID:             id,
+			PluginID:       pluginID,
+			CapabilityID:   capability.ID,
+			CapabilityType: capability.Type,
+			CapabilityName: capability.Name,
+			Scope:          scope,
+			Title:          title,
+			Status:         "draft",
+		}, nil
+	default:
+		return pluginmgr.ConfigInstanceRecord{}, fmt.Errorf("scope %q is not supported", scope)
+	}
+}
+
+func resolvePluginConfigSchema(ctx context.Context, pluginManager PluginManager, instance pluginmgr.ConfigInstanceRecord) (*pluginmgr.ConfigSchema, map[string]pluginmgr.ConfigClass, error) {
+	item, err := pluginManager.Plugin(ctx, instance.PluginID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil, fmt.Errorf("plugin %s not found", instance.PluginID)
+		}
+		return nil, nil, err
+	}
+	classes := map[string]pluginmgr.ConfigClass{}
+	if item.Release != nil {
+		classes = item.Release.Manifest.ConfigClasses
+	}
+	if instance.Scope == "capability" || instance.CapabilityID != "" {
+		capability, err := findPluginCapability(ctx, pluginManager, instance.CapabilityID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if capability.Config == nil {
+			return nil, nil, fmt.Errorf("capability %s does not declare config schema", instance.CapabilityID)
+		}
+		return capability.Config, classes, nil
+	}
+	if item.Release == nil || item.Release.Manifest.Config == nil {
+		return nil, nil, fmt.Errorf("plugin %s does not declare plugin config schema", instance.PluginID)
+	}
+	return item.Release.Manifest.Config, classes, nil
+}
+
+func recordPluginConfigEvent(ctx context.Context, configStore PluginConfigStore, resourceType, resourceID, pluginID, action, status, message string) error {
+	return configStore.InsertPluginConfigEvent(ctx, pluginmgr.ConfigEventRecord{
+		ResourceType: resourceType,
+		ResourceID:   resourceID,
+		PluginID:     pluginID,
+		Action:       action,
+		Status:       status,
+		Message:      message,
+	})
+}
+
+func pluginConfigVersionEventID(resourceID string, version int) string {
+	return fmt.Sprintf("%s:%d", resourceID, version)
+}
+
+func findPluginCapability(ctx context.Context, pluginManager PluginManager, capabilityID string) (pluginmgr.Capability, error) {
+	capabilityID = strings.TrimSpace(capabilityID)
+	if capabilityID == "" {
+		return pluginmgr.Capability{}, errors.New("capability_id is required")
+	}
+	caps, err := pluginManager.Capabilities(ctx, "", "")
+	if err != nil {
+		return pluginmgr.Capability{}, err
+	}
+	for _, cap := range caps {
+		if cap.ID == capabilityID {
+			return cap, nil
+		}
+	}
+	return pluginmgr.Capability{}, fmt.Errorf("plugin capability %s not found", capabilityID)
+}
+
+func nextPluginConfigVersion(records []pluginmgr.ConfigVersionRecord) int {
+	next := 1
+	for _, record := range records {
+		if record.Version >= next {
+			next = record.Version + 1
+		}
+	}
+	return next
+}
+
+func parsePositivePathInt(w http.ResponseWriter, r *http.Request, name string) (int, bool) {
+	value, err := strconv.Atoi(r.PathValue(name))
+	if err != nil || value <= 0 {
+		writeError(w, http.StatusBadRequest, name+" must be a positive integer")
+		return 0, false
+	}
+	return value, true
 }
 
 var jsonMarshalerType = reflect.TypeOf((*json.Marshaler)(nil)).Elem()

@@ -29,10 +29,13 @@ const (
 )
 
 type DataSourceSpec struct {
-	Type    string         `toml:"type" json:"type"`
-	Config  map[string]any `toml:"config" json:"config"`
-	Alias   string         `toml:"alias" json:"alias"`
-	OnError string         `toml:"on_error" json:"on_error"`
+	Type                string         `toml:"type" json:"type"`
+	Config              map[string]any `toml:"config" json:"config"`
+	Alias               string         `toml:"alias" json:"alias"`
+	PluginConfigRef     string         `toml:"plugin_config_ref" json:"plugin_config_ref"`
+	CapabilityConfigRef string         `toml:"capability_config_ref" json:"capability_config_ref"`
+	Overrides           map[string]any `toml:"overrides" json:"overrides"`
+	OnError             string         `toml:"on_error" json:"on_error"`
 }
 
 type PromptSpec struct {
@@ -40,8 +43,11 @@ type PromptSpec struct {
 }
 
 type OutputSpec struct {
-	Type   string         `toml:"type" json:"type"`
-	Config map[string]any `toml:"config" json:"config"`
+	Type                string         `toml:"type" json:"type"`
+	Config              map[string]any `toml:"config" json:"config"`
+	PluginConfigRef     string         `toml:"plugin_config_ref" json:"plugin_config_ref"`
+	CapabilityConfigRef string         `toml:"capability_config_ref" json:"capability_config_ref"`
+	Overrides           map[string]any `toml:"overrides" json:"overrides"`
 }
 
 type AIAnalyzeParams struct {

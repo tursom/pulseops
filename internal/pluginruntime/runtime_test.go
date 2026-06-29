@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,7 +15,7 @@ import (
 )
 
 func TestClientLimitsConcurrentCallsPerCapability(t *testing.T) {
-	t.Parallel()
+	resetPoolsForTest()
 
 	var mu sync.Mutex
 	inFlight := 0
@@ -56,6 +57,55 @@ func TestClientLimitsConcurrentCallsPerCapability(t *testing.T) {
 	wg.Wait()
 	if maxSeen != 1 {
 		t.Fatalf("expected max concurrency 1, got %d", maxSeen)
+	}
+}
+
+func TestDrainingRejectsNewCallsAndLetsStartedCallsFinish(t *testing.T) {
+	resetPoolsForTest()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "data": map[string]any{"done": true}})
+	}))
+	defer server.Close()
+	defer close(release)
+
+	capability := pluginmodel.Capability{
+		ID:            "external:task_driver:drain",
+		GenerationID:  "plugin-gen-old",
+		PluginID:      "external",
+		PluginVersion: "1.0.0",
+		Type:          pluginmodel.CapabilityTaskDriver,
+		Name:          "drain",
+		Runtime:       "http",
+		Endpoint:      server.URL,
+	}
+	client := NewClient(capability, config.PluginsConfig{MaxConcurrentCalls: 1})
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := client.Call(context.Background(), Request{Action: "run"}, Deps{HTTPClient: server.Client()})
+		errCh <- err
+	}()
+	<-started
+
+	DrainCapabilities([]pluginmodel.Capability{capability}, 1)
+	if _, err := client.Call(context.Background(), Request{Action: "run"}, Deps{HTTPClient: server.Client()}); err == nil ||
+		!strings.Contains(err.Error(), "draining") {
+		t.Fatalf("expected draining rejection, got %v", err)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("started call ended before release: %v", err)
+	default:
+	}
+	release <- struct{}{}
+	if err := <-errCh; err != nil {
+		t.Fatalf("started call should finish after draining: %v", err)
 	}
 }
 

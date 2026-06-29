@@ -59,10 +59,13 @@ func (r *scenarioCheckRunner) Run(ctx context.Context, _ TriggerType) (Result, e
 		return Result{}, err
 	}
 	return Result{
-		CheckStatus: output.CheckStatus,
-		Summary:     output.Summary,
-		Payload:     output.Payload,
-		Findings:    mapScenarioFindings(r.taskID, output.Findings),
+		CheckStatus:          output.CheckStatus,
+		Summary:              output.Summary,
+		Payload:              output.Payload,
+		Findings:             mapScenarioFindings(r.taskID, output.Findings),
+		PluginConfigVersions: output.PluginConfigVersions,
+		PluginAssetVersions:  output.PluginAssetVersions,
+		PluginTaskOverrides:  output.PluginTaskOverrides,
 	}, nil
 }
 

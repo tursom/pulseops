@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"pulseops/internal/config"
+	"pulseops/internal/pluginconfig"
 	"pulseops/internal/pluginmodel"
 	"pulseops/internal/pluginruntime"
 	"pulseops/internal/store"
@@ -32,11 +33,14 @@ type Event struct {
 }
 
 type Manager struct {
-	mu         sync.RWMutex
-	cfg        config.PluginsConfig
-	hooks      []pluginmodel.Capability
-	httpClient *http.Client
-	logger     *slog.Logger
+	mu            sync.RWMutex
+	cfg           config.PluginsConfig
+	hooks         []pluginmodel.Capability
+	httpClient    *http.Client
+	logger        *slog.Logger
+	configReader  pluginconfig.ConfigReader
+	runtimeStore  pluginconfig.RuntimeStore
+	artifactStore store.ArtifactStore
 }
 
 func NewManager(cfg config.PluginsConfig, httpClient *http.Client, logger *slog.Logger) *Manager {
@@ -44,6 +48,19 @@ func NewManager(cfg config.PluginsConfig, httpClient *http.Client, logger *slog.
 		logger = slog.Default()
 	}
 	return &Manager{cfg: cfg, httpClient: httpClient, logger: logger}
+}
+
+func (m *Manager) SetConfigStore(configStore any, artifactStore store.ArtifactStore) {
+	if m == nil {
+		return
+	}
+	reader, _ := configStore.(pluginconfig.ConfigReader)
+	runtimeStore, _ := configStore.(pluginconfig.RuntimeStore)
+	m.mu.Lock()
+	m.configReader = reader
+	m.runtimeStore = runtimeStore
+	m.artifactStore = artifactStore
+	m.mu.Unlock()
 }
 
 func (m *Manager) SyncPluginHooks(caps []pluginmodel.Capability, cfg config.PluginsConfig) {
@@ -67,11 +84,25 @@ func (m *Manager) Dispatch(ctx context.Context, event Event) {
 	hooks := append([]pluginmodel.Capability(nil), m.hooks...)
 	cfg := m.cfg
 	client := m.httpClient
+	reader := m.configReader
+	runtimeStore := m.runtimeStore
+	artifactStore := m.artifactStore
 	m.mu.RUnlock()
 	for _, cap := range hooks {
+		resolved, err := pluginconfig.ResolveCapabilityConfig(ctx, reader, cap, pluginconfig.ResolveCapabilityOptions{
+			RuntimeStore:  runtimeStore,
+			ArtifactStore: artifactStore,
+		})
+		if resolved.Cleanup != nil {
+			defer resolved.Cleanup()
+		}
+		if err != nil {
+			m.logger.ErrorContext(ctx, "resolve plugin hook config failed", "hook", cap.Name, "event", event.Type, "err", err)
+			continue
+		}
 		if _, err := pluginruntime.NewClient(cap, cfg).Call(ctx, pluginruntime.Request{
 			Action: "handle_event",
-			Config: cloneMap(cap.Defaults),
+			Config: resolved.Config,
 			Input: map[string]any{
 				"event": event,
 			},

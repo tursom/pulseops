@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,16 +10,18 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
-	toml "github.com/pelletier/go-toml/v2"
+	"go.yaml.in/yaml/v3"
 )
 
 const (
-	ManifestFilename     = "pulseops.plugin.toml"
-	ReleaseChecksumFile  = "pulseops.plugin.sha256"
-	ReleaseSignatureFile = "pulseops.plugin.sig"
+	ManifestFilename       = "pulseops.plugin.yaml"
+	LegacyManifestFilename = "pulseops.plugin.toml"
+	ReleaseChecksumFile    = "pulseops.plugin.sha256"
+	ReleaseSignatureFile   = "pulseops.plugin.sig"
 )
 
 func LoadManifest(path string) (Manifest, string, error) {
@@ -27,11 +30,30 @@ func LoadManifest(path string) (Manifest, string, error) {
 		return Manifest{}, "", fmt.Errorf("read manifest: %w", err)
 	}
 	var manifest Manifest
-	if err := toml.Unmarshal(content, &manifest); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(content))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&manifest); err != nil {
 		return Manifest{}, "", fmt.Errorf("decode manifest: %w", err)
 	}
 	sum := sha256.Sum256(content)
 	return manifest, hex.EncodeToString(sum[:]), nil
+}
+
+func ValidateReleaseManifestFiles(dir string) error {
+	legacyPath := filepath.Join(dir, LegacyManifestFilename)
+	if _, err := os.Stat(legacyPath); err == nil {
+		return fmt.Errorf("%s is not supported; use %s", legacyPath, ManifestFilename)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat legacy manifest %s: %w", legacyPath, err)
+	}
+	manifestPath := filepath.Join(dir, ManifestFilename)
+	if _, err := os.Stat(manifestPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%s is required", manifestPath)
+		}
+		return fmt.Errorf("stat manifest %s: %w", manifestPath, err)
+	}
+	return nil
 }
 
 func ReleaseChecksum(dir string) (string, error) {
@@ -137,6 +159,8 @@ func ValidateManifest(m Manifest) error {
 	if strings.TrimSpace(m.Version) == "" {
 		errs = append(errs, errors.New("version is required"))
 	}
+	errs = append(errs, validateManifestConfig(m)...)
+	errs = append(errs, validateManifestRuntimes(m)...)
 	seen := map[string]struct{}{}
 	for _, cap := range ManifestCapabilities(m, false, false, true) {
 		if cap.Name == "" {
@@ -152,6 +176,192 @@ func ValidateManifest(m Manifest) error {
 	return errors.Join(errs...)
 }
 
+func validateManifestRuntimes(m Manifest) []error {
+	var errs []error
+	check := func(path, runtime string) {
+		if strings.TrimSpace(runtime) == "c_abi" {
+			errs = append(errs, fmt.Errorf("%s.runtime c_abi is not supported in plugin manifest V1; use process or http", path))
+		}
+	}
+	for _, item := range m.DataSources {
+		check("data_sources."+item.Name, item.Runtime)
+	}
+	for _, item := range m.AIDataSources {
+		check("ai_data_sources."+item.Name, item.Runtime)
+	}
+	for _, item := range m.OutputWriters {
+		check("output_writers."+item.Name, item.Runtime)
+	}
+	for _, item := range m.TaskDrivers {
+		check("task_drivers."+item.Name, item.Runtime)
+	}
+	return errs
+}
+
+func validateManifestConfig(m Manifest) []error {
+	var errs []error
+	classes := m.ConfigClasses
+	for name, class := range classes {
+		if strings.TrimSpace(name) == "" {
+			errs = append(errs, errors.New("config_classes contains an empty class name"))
+			continue
+		}
+		if len(class.Fields) == 0 {
+			errs = append(errs, fmt.Errorf("config class %q requires at least one field", name))
+			continue
+		}
+		for fieldName, field := range class.Fields {
+			errs = append(errs, validateConfigField("config_classes."+name+"."+fieldName, field, classes, []string{name})...)
+		}
+	}
+	errs = append(errs, validateConfigSchema("config", m.Config, classes)...)
+	for _, item := range m.TaskTemplates {
+		errs = append(errs, validateConfigSchema("task_templates."+item.ID+".config", item.Config, classes)...)
+	}
+	for _, item := range m.TaskDrivers {
+		errs = append(errs, validateConfigSchema("task_drivers."+item.Name+".config", item.Config, classes)...)
+	}
+	for _, item := range m.DataSources {
+		errs = append(errs, validateConfigSchema("data_sources."+item.Name+".config", item.Config, classes)...)
+	}
+	for _, item := range m.AIDataSources {
+		errs = append(errs, validateConfigSchema("ai_data_sources."+item.Name+".config", item.Config, classes)...)
+	}
+	for _, item := range m.OutputWriters {
+		errs = append(errs, validateConfigSchema("output_writers."+item.Name+".config", item.Config, classes)...)
+	}
+	for _, item := range m.Evaluators {
+		errs = append(errs, validateConfigSchema("evaluators."+item.Name+".config", item.Config, classes)...)
+	}
+	for _, item := range m.TraceSinks {
+		errs = append(errs, validateConfigSchema("trace_sinks."+item.Name+".config", item.Config, classes)...)
+	}
+	for _, item := range m.Hooks {
+		errs = append(errs, validateConfigSchema("hooks."+item.Name+".config", item.Config, classes)...)
+	}
+	return errs
+}
+
+func validateConfigSchema(path string, schema *ConfigSchema, classes map[string]ConfigClass) []error {
+	if schema == nil {
+		return nil
+	}
+	if len(schema.Fields) == 0 {
+		return []error{fmt.Errorf("%s requires at least one field", path)}
+	}
+	var errs []error
+	for name, field := range schema.Fields {
+		if strings.TrimSpace(name) == "" {
+			errs = append(errs, fmt.Errorf("%s contains an empty field name", path))
+			continue
+		}
+		errs = append(errs, validateConfigField(path+"."+name, field, classes, nil)...)
+	}
+	return errs
+}
+
+func validateConfigField(path string, field ConfigField, classes map[string]ConfigClass, classStack []string) []error {
+	var errs []error
+	typ := strings.TrimSpace(field.Type)
+	if typ == "" {
+		return []error{fmt.Errorf("%s.type is required", path)}
+	}
+	if !allowedConfigFieldType(typ) {
+		errs = append(errs, fmt.Errorf("%s.type %q is not supported", path, typ))
+	}
+	if field.Validation.Pattern != "" {
+		if _, err := regexp.Compile(field.Validation.Pattern); err != nil {
+			errs = append(errs, fmt.Errorf("%s.validation.pattern is invalid: %w", path, err))
+		}
+	}
+	if field.UI.VisibleWhen != nil && !allowedConfigConditionOp(field.UI.VisibleWhen.Op) {
+		errs = append(errs, fmt.Errorf("%s.ui.visible_when.op %q is not supported", path, field.UI.VisibleWhen.Op))
+	}
+	switch typ {
+	case "object":
+		className := strings.TrimSpace(field.Class)
+		if className == "" {
+			errs = append(errs, fmt.Errorf("%s.class is required for object fields", path))
+			break
+		}
+		if className == "JSONObject" {
+			break
+		}
+		class, ok := classes[className]
+		if !ok {
+			errs = append(errs, fmt.Errorf("%s.class %q is not defined in config_classes", path, className))
+			break
+		}
+		if containsString(classStack, className) {
+			errs = append(errs, fmt.Errorf("%s.class %q forms a cycle", path, className))
+			break
+		}
+		nextStack := append(append([]string(nil), classStack...), className)
+		for name, child := range class.Fields {
+			errs = append(errs, validateConfigField(path+"."+name, child, classes, nextStack)...)
+		}
+	case "array":
+		if field.Items == nil {
+			errs = append(errs, fmt.Errorf("%s.items is required for array fields", path))
+			break
+		}
+		errs = append(errs, validateConfigField(path+".items", *field.Items, classes, classStack)...)
+	case "select", "multi_select":
+		if len(field.Options) == 0 {
+			errs = append(errs, fmt.Errorf("%s.options is required for %s fields", path, typ))
+		}
+		for i, option := range field.Options {
+			if option.Value == nil {
+				errs = append(errs, fmt.Errorf("%s.options[%d].value is required", path, i))
+			}
+		}
+	case "file":
+		if strings.TrimSpace(field.AssetKind) == "" {
+			errs = append(errs, fmt.Errorf("%s.asset_kind is required for file fields", path))
+		}
+		if !allowedAssetScope(field.AssetScope) {
+			errs = append(errs, fmt.Errorf("%s.asset_scope %q is not supported", path, field.AssetScope))
+		}
+	}
+	return errs
+}
+
+func allowedAssetScope(scope string) bool {
+	switch strings.TrimSpace(scope) {
+	case AssetScopePluginShared, AssetScopeCapabilityShared, AssetScopeConfigInstance:
+		return true
+	default:
+		return false
+	}
+}
+
+func allowedConfigFieldType(typ string) bool {
+	switch typ {
+	case "string", "number", "bool", "select", "multi_select", "object", "array", "file", "secret":
+		return true
+	default:
+		return false
+	}
+}
+
+func allowedConfigConditionOp(op string) bool {
+	switch strings.TrimSpace(op) {
+	case "", "eq", "ne", "in", "not_in", "exists", "empty":
+		return true
+	default:
+		return false
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
 func ManifestCapabilities(m Manifest, official, bundled, enabled bool) []Capability {
 	var caps []Capability
 	appendCap := func(cap Capability) {
@@ -165,6 +375,7 @@ func ManifestCapabilities(m Manifest, official, bundled, enabled bool) []Capabil
 		cap.Enabled = enabled
 		cap.Official = official
 		cap.Bundled = bundled
+		cap.ConfigClasses = cloneConfigClasses(m.ConfigClasses)
 		if cap.Status == "" {
 			if enabled {
 				cap.Status = "active"
@@ -189,6 +400,7 @@ func ManifestCapabilities(m Manifest, official, bundled, enabled bool) []Capabil
 			Defaults:    cloneAnyMap(item.Defaults),
 			Params:      cloneAnyMap(item.Params),
 			Schema:      cloneSchema(item.Schema),
+			Config:      cloneConfigSchema(item.Config),
 		})
 	}
 	for _, item := range m.TaskDrivers {
@@ -207,6 +419,7 @@ func ManifestCapabilities(m Manifest, official, bundled, enabled bool) []Capabil
 			Permissions: append([]string(nil), item.Permissions...),
 			Defaults:    cloneAnyMap(item.Defaults),
 			Schema:      cloneSchema(item.Schema),
+			Config:      cloneConfigSchema(item.Config),
 		})
 	}
 	for _, item := range m.AIDataSources {
@@ -260,6 +473,7 @@ func namedCapability(typ string, item NamedCapability) Capability {
 		Permissions: append([]string(nil), item.Permissions...),
 		Defaults:    cloneAnyMap(item.Defaults),
 		Schema:      cloneSchema(item.Schema),
+		Config:      cloneConfigSchema(item.Config),
 	}
 }
 
@@ -275,6 +489,7 @@ func runtimeCapability(typ string, item RuntimeCapability) Capability {
 		Permissions: append([]string(nil), item.Permissions...),
 		Defaults:    cloneAnyMap(item.Defaults),
 		Schema:      cloneSchema(item.Schema),
+		Config:      cloneConfigSchema(item.Config),
 	}
 }
 
@@ -295,6 +510,48 @@ func cloneSchema(input Schema) Schema {
 	}
 	out := make(Schema, len(input))
 	for key, value := range input {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneConfigClasses(input map[string]ConfigClass) map[string]ConfigClass {
+	if len(input) == 0 {
+		return nil
+	}
+	out := make(map[string]ConfigClass, len(input))
+	for key, value := range input {
+		value.Fields = cloneConfigFields(value.Fields)
+		out[key] = value
+	}
+	return out
+}
+
+func cloneConfigSchema(input *ConfigSchema) *ConfigSchema {
+	if input == nil {
+		return nil
+	}
+	out := *input
+	out.Fields = cloneConfigFields(input.Fields)
+	return &out
+}
+
+func cloneConfigFields(input map[string]ConfigField) map[string]ConfigField {
+	if len(input) == 0 {
+		return nil
+	}
+	out := make(map[string]ConfigField, len(input))
+	for key, value := range input {
+		if value.Items != nil {
+			items := *value.Items
+			if items.Items != nil {
+				nested := *items.Items
+				items.Items = &nested
+			}
+			value.Items = &items
+		}
+		value.Options = append([]ConfigOption(nil), value.Options...)
+		value.Accept = append([]string(nil), value.Accept...)
 		out[key] = value
 	}
 	return out
@@ -325,7 +582,14 @@ func FindReleaseManifests(pluginDir string) ([]string, error) {
 			if !release.IsDir() {
 				continue
 			}
-			manifestPath := filepath.Join(releasesDir, release.Name(), ManifestFilename)
+			releaseDir := filepath.Join(releasesDir, release.Name())
+			manifestPath := filepath.Join(releaseDir, ManifestFilename)
+			if err := ValidateReleaseManifestFiles(releaseDir); err != nil {
+				if strings.Contains(err.Error(), ManifestFilename+" is required") {
+					continue
+				}
+				return nil, err
+			}
 			if _, err := os.Stat(manifestPath); err != nil {
 				if os.IsNotExist(err) {
 					continue

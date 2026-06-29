@@ -53,7 +53,7 @@ func (m *Manager) Register(sink Sink) {
 	m.mu.Unlock()
 }
 
-func (m *Manager) SyncPluginSinks(caps []pluginmodel.Capability, cfg config.PluginsConfig, httpClient *http.Client) {
+func (m *Manager) SyncPluginSinks(caps []pluginmodel.Capability, cfg config.PluginsConfig, httpClient *http.Client, configStore any) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pluginSinks = map[string]Sink{}
@@ -64,7 +64,7 @@ func (m *Manager) SyncPluginSinks(caps []pluginmodel.Capability, cfg config.Plug
 		if cap.Runtime != "process" && cap.Runtime != "http" && cap.Runtime != "http_plugin" {
 			continue
 		}
-		m.pluginSinks[cap.ID] = NewPluginSink(cap, cfg, httpClient)
+		m.pluginSinks[cap.ID] = NewPluginSink(cap, cfg, httpClient, configStore, m.artifactStore)
 	}
 }
 

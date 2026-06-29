@@ -44,8 +44,11 @@ type HTTPJSONFanout struct {
 }
 
 type EvaluatorConfig struct {
-	Name   string         `json:"name"`
-	Params map[string]any `json:"params"`
+	Name                string         `json:"name"`
+	Params              map[string]any `json:"params"`
+	PluginConfigRef     string         `json:"plugin_config_ref"`
+	CapabilityConfigRef string         `json:"capability_config_ref"`
+	Overrides           map[string]any `json:"overrides"`
 }
 
 type Thresholds struct {
@@ -62,10 +65,13 @@ type Params struct {
 }
 
 type Output struct {
-	CheckStatus string           `json:"check_status"`
-	Summary     map[string]any   `json:"summary"`
-	Payload     map[string]any   `json:"payload"`
-	Findings    []map[string]any `json:"findings"`
+	CheckStatus          string           `json:"check_status"`
+	Summary              map[string]any   `json:"summary"`
+	Payload              map[string]any   `json:"payload"`
+	Findings             []map[string]any `json:"findings"`
+	PluginConfigVersions map[string]any   `json:"plugin_config_versions,omitempty"`
+	PluginAssetVersions  map[string]any   `json:"plugin_asset_versions,omitempty"`
+	PluginTaskOverrides  map[string]any   `json:"plugin_task_overrides,omitempty"`
 }
 
 type Executor struct {
@@ -92,11 +98,14 @@ func (e *Executor) Run(ctx context.Context, taskID string, params Params) (Outpu
 	sampled, seed := sampleItems(items, params.Sample)
 	fanoutItems := e.fanout(ctx, sampled, params.Fanout)
 	evalResult, err := ev.Evaluate(ctx, evaluator.Input{
-		TaskID:       taskID,
-		TaskParams:   params.Evaluator.Params,
-		SourceItems:  items,
-		SampledItems: sampled,
-		FanoutItems:  fanoutItems,
+		TaskID:              taskID,
+		TaskParams:          params.Evaluator.Params,
+		PluginConfigRef:     params.Evaluator.PluginConfigRef,
+		CapabilityConfigRef: params.Evaluator.CapabilityConfigRef,
+		Overrides:           params.Evaluator.Overrides,
+		SourceItems:         items,
+		SampledItems:        sampled,
+		FanoutItems:         fanoutItems,
 	})
 	if err != nil {
 		return Output{}, fmt.Errorf("evaluate scenario: %w", err)
@@ -112,7 +121,10 @@ func (e *Executor) Run(ctx context.Context, taskID string, params Params) (Outpu
 			"sampled_items": sampled,
 			"findings":      evalResult.Findings,
 		},
-		Findings: evalResult.Findings,
+		Findings:             evalResult.Findings,
+		PluginConfigVersions: evalResult.PluginConfigVersions,
+		PluginAssetVersions:  evalResult.PluginAssetVersions,
+		PluginTaskOverrides:  evalResult.PluginTaskOverrides,
 	}, nil
 }
 

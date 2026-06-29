@@ -5,19 +5,25 @@ import (
 	"net/http"
 
 	"pulseops/internal/config"
+	"pulseops/internal/pluginconfig"
 	"pulseops/internal/pluginmodel"
 	"pulseops/internal/pluginruntime"
 	"pulseops/internal/store"
 )
 
 type PluginSink struct {
-	cap        pluginmodel.Capability
-	cfg        config.PluginsConfig
-	httpClient *http.Client
+	cap           pluginmodel.Capability
+	cfg           config.PluginsConfig
+	httpClient    *http.Client
+	configReader  pluginconfig.ConfigReader
+	runtimeStore  pluginconfig.RuntimeStore
+	artifactStore store.ArtifactStore
 }
 
-func NewPluginSink(cap pluginmodel.Capability, cfg config.PluginsConfig, httpClient *http.Client) *PluginSink {
-	return &PluginSink{cap: cap, cfg: cfg, httpClient: httpClient}
+func NewPluginSink(cap pluginmodel.Capability, cfg config.PluginsConfig, httpClient *http.Client, configStore any, artifactStore store.ArtifactStore) *PluginSink {
+	reader, _ := configStore.(pluginconfig.ConfigReader)
+	runtimeStore, _ := configStore.(pluginconfig.RuntimeStore)
+	return &PluginSink{cap: cap, cfg: cfg, httpClient: httpClient, configReader: reader, runtimeStore: runtimeStore, artifactStore: artifactStore}
 }
 
 func (s *PluginSink) Name() string {
@@ -29,9 +35,19 @@ func (s *PluginSink) Kind() string {
 }
 
 func (s *PluginSink) Write(ctx context.Context, record store.RunRecord) error {
-	_, err := pluginruntime.NewClient(s.cap, s.cfg).Call(ctx, pluginruntime.Request{
+	resolved, err := pluginconfig.ResolveCapabilityConfig(ctx, s.configReader, s.cap, pluginconfig.ResolveCapabilityOptions{
+		RuntimeStore:  s.runtimeStore,
+		ArtifactStore: s.artifactStore,
+	})
+	if resolved.Cleanup != nil {
+		defer resolved.Cleanup()
+	}
+	if err != nil {
+		return err
+	}
+	_, err = pluginruntime.NewClient(s.cap, s.cfg).Call(ctx, pluginruntime.Request{
 		Action: "write_trace",
-		Config: clonePluginConfig(s.cap.Defaults),
+		Config: resolved.Config,
 		Input: map[string]any{
 			"record": record,
 		},
@@ -42,15 +58,4 @@ func (s *PluginSink) Write(ctx context.Context, record store.RunRecord) error {
 		TriggerType:   record.TriggerType,
 	})
 	return err
-}
-
-func clonePluginConfig(input map[string]any) map[string]any {
-	if len(input) == 0 {
-		return nil
-	}
-	out := make(map[string]any, len(input))
-	for key, value := range input {
-		out[key] = value
-	}
-	return out
 }
